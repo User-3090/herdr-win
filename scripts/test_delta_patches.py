@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -11,7 +12,14 @@ PATCH_NAME = re.compile(r"^[0-9]{4}-[a-z0-9-]+\.patch$")
 MAILBOX_FROM = re.compile(r"^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$")
 DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
 CONTROL_PATH_PREFIXES = (".github/", "patches/")
-CONTROL_PATHS = {"AGENTS.md", "CONTRIBUTING.md", "README.md", "docs/next/README.md"}
+CONTROL_PATHS = {
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "docs/next/README.md",
+    "website/preview.json",
+}
+FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/"
 
 
 def series_entries() -> list[str]:
@@ -62,6 +70,32 @@ class DeltaPatchTests(unittest.TestCase):
             )
             self.assertEqual(disallowed, [], entry)
         self.assertEqual(len(commits), len(set(commits)))
+
+    def test_preview_manifest_is_bootstrap_empty_or_fork_owned(self) -> None:
+        manifest = json.loads(
+            (PROJECT_ROOT / "website" / "preview.json").read_text(encoding="utf-8")
+        )
+        if manifest == {}:
+            return
+
+        self.assertEqual(manifest.get("channel"), "preview")
+        self.assertRegex(
+            str(manifest.get("build_id", "")), r"^[0-9a-f]{12}\.[0-9a-f]{12}$"
+        )
+        asset_groups = [manifest.get("assets", {})]
+        asset_groups.extend(
+            build.get("assets", {}) for build in manifest.get("builds", {}).values()
+        )
+        for assets in asset_groups:
+            self.assertIsInstance(assets, dict)
+            self.assertEqual(set(assets), {"windows-x86_64"})
+            windows = assets["windows-x86_64"]
+            self.assertIsInstance(windows, dict)
+            self.assertTrue(
+                str(windows.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+            )
+            self.assertRegex(str(windows.get("sha256", "")), r"^[0-9a-f]{64}$")
+            self.assertEqual(windows.get("format"), "zip")
 
 
 if __name__ == "__main__":

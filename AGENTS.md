@@ -20,7 +20,14 @@ distribution. Read this file and `CONTRIBUTING.md` before changing anything.
   mailbox filename and URL; current work does not belong there.
 - `.github/workflows/ci.yml` owns cheap PR/manual replay validation.
 - `.github/workflows/windows-nightly.yml` owns scheduled/manual Windows testing,
-  packaging, and immutable prereleases.
+  packaging, immutable prereleases, and publication of the fork preview update
+  manifest.
+- `website/preview.json` is generated update-channel state. The nightly workflow
+  updates it only after publishing a verified release; do not hand-edit it.
+- Repository release immutability and the
+  `HERDR_RELEASE_IMMUTABILITY_ENABLED=true` repository-variable attestation must
+  remain enabled. Nightly checks the attestation before packaging and the actual
+  release's immutable flag before advancing the manifest.
 - Root `README.md`, `CONTRIBUTING.md`, this file, and repository metadata own
   fork identity. Keep `docs/next/README.md` identical to the root README.
 
@@ -45,6 +52,11 @@ Nightly must remain ephemeral. Do not create or force-push an integration branch
 merge upstream into a release branch, resolve conflicts automatically, or build
 releases on ordinary pushes. A replay conflict is a maintenance signal and must
 fail closed.
+
+Manifest publication must execute the generator carried from the tested replay,
+not code from a mutable default-branch checkout. It may commit only
+`website/preview.json` and must fail instead of rebasing if release inputs or the
+selected control revision change during a run.
 
 ## Product design guardrails
 
@@ -97,7 +109,7 @@ nightly gates or equivalent real Windows evidence.
 
 ## Documentation
 
-- Keep the fork README concise about installation, manual update behavior,
+- Keep the fork README concise about initial installation, automatic updates,
   upstream attribution, and the runtime-name invariant.
 - Keep `README.md` and `docs/next/README.md` byte-for-byte identical.
 - General Herdr documentation remains upstream-owned. Fork product documentation

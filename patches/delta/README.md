@@ -10,7 +10,7 @@ than one monolith or a patch for every development commit:
 1. Windows terminal appearance.
 2. Windows desktop integration.
 3. Windows remote attach and image transport.
-4. Windows package and installer hardening.
+4. Windows package, installer, and fork update handling.
 
 When a feature evolves, refresh its existing mailbox in place. Add a new patch
 only when the change has a genuinely independent owner, verification plan, and

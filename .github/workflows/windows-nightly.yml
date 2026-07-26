@@ -27,11 +27,25 @@ jobs:
       upstream_sha: ${{ steps.source.outputs.upstream_sha }}
       control_sha: ${{ steps.source.outputs.control_sha }}
       build_id: ${{ steps.source.outputs.build_id }}
+      base_version: ${{ steps.replay.outputs.base_version }}
+      protocol: ${{ steps.replay.outputs.protocol }}
     steps:
+      - name: Require immutable release policy
+        shell: pwsh
+        env:
+          RELEASE_IMMUTABILITY_ATTESTED: ${{ vars.HERDR_RELEASE_IMMUTABILITY_ENABLED }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RELEASE_IMMUTABILITY_ATTESTED -cne "true") {
+            throw "HERDR_RELEASE_IMMUTABILITY_ENABLED must attest that repository release immutability is enabled"
+          }
+
       - name: Checkout herdr-win control repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           path: control
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout upstream Herdr
@@ -48,17 +62,66 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/master") {
+            throw "nightly publication must run from master, not $env:GITHUB_REF"
+          }
           $upstream = (git -C source rev-parse HEAD).Trim()
-          $control = (git -C control rev-parse HEAD).Trim()
+          Push-Location control
+          try {
+            $controlHead = (git rev-parse HEAD).Trim()
+            $control = $controlHead
+            $hiddenPrefixes = @(
+              "docs: update website manifest",
+              "docs: update preview manifest",
+              "chore: approve contributor",
+              "chore: approve merged contributor"
+            )
+            while ($true) {
+              $subject = (git show -s --format=%s $control).Trim().ToLowerInvariant()
+              $hidden = $false
+              foreach ($prefix in $hiddenPrefixes) {
+                if ($subject.StartsWith($prefix, [StringComparison]::Ordinal)) {
+                  $hidden = $true
+                  break
+                }
+              }
+              if (-not $hidden) {
+                break
+              }
+              $commitPaths = @(git diff-tree --no-commit-id --name-only -r $control)
+              if ($LASTEXITCODE -ne 0 -or $commitPaths.Count -ne 1 -or $commitPaths[0] -ne "website/preview.json") {
+                throw "hidden commit $control changed files outside website/preview.json"
+              }
+              $control = (git rev-parse "${control}^").Trim()
+            }
+            if ($control -notmatch '^[0-9a-f]{40}$') {
+              throw "failed to select immutable herdr-win control revision"
+            }
+            & git checkout --detach $control
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to check out selected control revision $control"
+            }
+            $selected = (python scripts\preview.py select-commit --ref $controlHead).Trim()
+            if ($LASTEXITCODE -ne 0 -or $selected -ne $control) {
+              throw "tested preview selector disagrees with validated control revision $control"
+            }
+          } finally {
+            Pop-Location
+          }
           $buildId = "$($upstream.Substring(0, 12)).$($control.Substring(0, 12))"
+          $manifestUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/master/website/preview.json"
+          $installerUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$control/website/install.ps1"
           "upstream_sha=$upstream" >> $env:GITHUB_OUTPUT
           "control_sha=$control" >> $env:GITHUB_OUTPUT
           "build_id=$buildId" >> $env:GITHUB_OUTPUT
-          "HERDR_BUILD_CHANNEL=nightly" >> $env:GITHUB_ENV
+          "HERDR_BUILD_CHANNEL=preview" >> $env:GITHUB_ENV
           "HERDR_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "HERDR_BUILD_COMMIT=$upstream" >> $env:GITHUB_ENV
+          "HERDR_PREVIEW_MANIFEST_URL=$manifestUrl" >> $env:GITHUB_ENV
+          "HERDR_WINDOWS_INSTALLER_URL=$installerUrl" >> $env:GITHUB_ENV
 
       - name: Validate and replay maintained delta
+        id: replay
         shell: pwsh
         env:
           GIT_COMMITTER_NAME: herdr-win replay
@@ -87,6 +150,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "replayed delta failed git diff --check"
           }
+          $controlInstaller = (Get-FileHash -LiteralPath website\install.ps1 -Algorithm SHA256).Hash
+          $sourceInstaller = (Get-FileHash -LiteralPath ..\source\website\install.ps1 -Algorithm SHA256).Hash
+          if ($controlInstaller -ne $sourceInstaller) {
+            throw "control website/install.ps1 differs from the replayed release installer"
+          }
+          $cargoToml = Get-Content -LiteralPath ..\source\Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$') {
+            throw "could not read replayed Cargo package version"
+          }
+          $baseVersion = $Matches[1]
+          $wire = Get-Content -LiteralPath ..\source\src\protocol\wire.rs -Raw
+          if ($wire -notmatch 'pub const PROTOCOL_VERSION: u32 = ([0-9]+);') {
+            throw "could not read replayed wire protocol version"
+          }
+          "base_version=$baseVersion" >> $env:GITHUB_OUTPUT
+          "protocol=$($Matches[1])" >> $env:GITHUB_OUTPUT
+          $replaySha = (git -C ..\source rev-parse HEAD).Trim()
+          "HERDR_REPLAY_SHA=$replaySha" >> $env:GITHUB_ENV
         working-directory: control
 
       - name: Install Rust
@@ -116,8 +197,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           python -m unittest scripts.test_package_windows_conpty
+          python -m unittest `
+            scripts.test_preview.PreviewNotesTests.test_build_manifest_archives_current_assets `
+            scripts.test_preview.PreviewNotesTests.test_windows_preview_asset_requires_sha256
           cargo fmt --check
           cargo clippy --bin herdr --locked --target $env:WINDOWS_TARGET -- -D warnings
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr custom_preview_feed_locks_the_existing_preview_channel
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr windows_
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr remote::attach::tests
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr raw_input::tests
@@ -158,9 +243,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
           $version = & $exe --version
-          $expected = "^herdr [0-9]+\.[0-9]+\.[0-9]+-nightly\.$([regex]::Escape($env:HERDR_BUILD_ID))$"
+          $expected = "^herdr [0-9]+\.[0-9]+\.[0-9]+-preview\.$([regex]::Escape($env:HERDR_BUILD_ID))$"
           if ($LASTEXITCODE -ne 0 -or [string] $version -cnotmatch $expected) {
             throw "nightly executable identity mismatch: $version"
+          }
+          $binary = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($exe))
+          foreach ($url in @($env:HERDR_PREVIEW_MANIFEST_URL, $env:HERDR_WINDOWS_INSTALLER_URL)) {
+            if (-not $binary.Contains($url)) {
+              throw "nightly executable does not contain required fork update URL: $url"
+            }
           }
 
           .\source\scripts\package_windows_conpty.ps1 `
@@ -182,7 +273,26 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksum = "$hash  $($env:ARTIFACT_NAME).zip`n"
           [IO.File]::WriteAllText("$archive.sha256", $checksum, [Text.UTF8Encoding]::new($false))
+          $sourceHead = (git -C source rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceHead -ne $env:HERDR_REPLAY_SHA) {
+            throw "replayed source identity changed during build"
+          }
+          $trackedChanges = @(git -C source status --short --untracked-files=no)
+          if ($LASTEXITCODE -ne 0 -or $trackedChanges.Count -ne 0) {
+            throw "build modified tracked replay source: $($trackedChanges -join ', ')"
+          }
+          & git -C source diff --quiet HEAD -- scripts/preview.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "tested preview generator differs from replay HEAD"
+          }
           Copy-Item -LiteralPath control\patches\delta\series -Destination (Join-Path $artifactRoot "PATCH_SERIES.txt")
+          $generator = Join-Path $artifactRoot "PREVIEW_GENERATOR.py"
+          Copy-Item -LiteralPath source\scripts\preview.py -Destination $generator
+          $sourceGeneratorHash = (Get-FileHash -LiteralPath source\scripts\preview.py -Algorithm SHA256).Hash
+          $artifactGeneratorHash = (Get-FileHash -LiteralPath $generator -Algorithm SHA256).Hash
+          if ($sourceGeneratorHash -ne $artifactGeneratorHash) {
+            throw "preview generator changed while entering the tested artifact"
+          }
 
       - name: Upload tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -192,6 +302,7 @@ jobs:
             artifact/${{ env.ARTIFACT_NAME }}.zip
             artifact/${{ env.ARTIFACT_NAME }}.zip.sha256
             artifact/PATCH_SERIES.txt
+            artifact/PREVIEW_GENERATOR.py
           if-no-files-found: error
           retention-days: 2
           compression-level: 0
@@ -208,7 +319,17 @@ jobs:
       UPSTREAM_SHA: ${{ needs.build.outputs.upstream_sha }}
       CONTROL_SHA: ${{ needs.build.outputs.control_sha }}
       BUILD_ID: ${{ needs.build.outputs.build_id }}
+      BASE_VERSION: ${{ needs.build.outputs.base_version }}
+      PROTOCOL: ${{ needs.build.outputs.protocol }}
     steps:
+      - name: Checkout manifest owner
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: master
+          path: control
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download tested package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -216,6 +337,7 @@ jobs:
           path: release-assets
 
       - name: Verify and publish prerelease
+        id: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -250,6 +372,17 @@ jobs:
             verify_tag_target
           }
 
+          remove_recoverable_release() {
+            local release_json="$1"
+            local reason="$2"
+            local release_id
+            verify_tag_target
+            release_id="$(jq -r .id <<<"$release_json")"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
+            echo "Removed ${reason} release ${tag}."
+          }
+
           verify_asset() {
             local release_json="$1"
             local name="$2"
@@ -270,22 +403,14 @@ jobs:
             local release_json="$1"
             if [[ "$(jq -r .draft <<<"$release_json")" != "false" || \
                   "$(jq -r .prerelease <<<"$release_json")" != "true" || \
+                  "$(jq -r '.immutable // false' <<<"$release_json")" != "true" || \
                   "$(jq '.assets | length' <<<"$release_json")" != "2" ]]; then
-              echo "Release ${tag} is not the expected published prerelease." >&2
+              echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
             fi
             verify_asset "$release_json" "$zip" "$zip_digest"
             verify_asset "$release_json" "$checksum" "$checksum_digest"
           }
-
-          if release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null)"; then
-            verify_tag_target
-            verify_release "$release_json"
-            echo "Verified existing immutable release ${tag}."
-            exit 0
-          fi
-
-          ensure_tag_target
 
           date_utc="$(date -u +%Y-%m-%d)"
           {
@@ -305,16 +430,237 @@ jobs:
             echo "The installed executable and command remain \`herdr\`. This is a drop-in Windows build, not an official upstream release."
           } > RELEASE_NOTES.md
 
-          gh release create "$tag" \
-            "${ARTIFACT_NAME}.zip" \
-            "${ARTIFACT_NAME}.zip.sha256" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$CONTROL_SHA" \
-            --title "herdr-win nightly ${date_utc}" \
-            --notes-file RELEASE_NOTES.md \
-            --prerelease \
-            --latest=false
+          release_pages="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          release_matches="$(jq -c --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' <<<"$release_pages")"
+          release_count="$(jq 'length' <<<"$release_matches")"
+          if [[ "$release_count" -gt 1 ]]; then
+            echo "Multiple releases unexpectedly use tag ${tag}." >&2
+            exit 1
+          fi
 
-          verify_tag_target
-          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
-          verify_release "$release_json"
+          release_json=""
+          if [[ "$release_count" == "1" ]]; then
+            release_json="$(jq -c '.[0]' <<<"$release_matches")"
+            if [[ "$(jq -r .draft <<<"$release_json")" == "true" ]]; then
+              remove_recoverable_release "$release_json" "incomplete draft"
+              release_json=""
+            elif [[ "$(jq -r '.immutable // false' <<<"$release_json")" != "true" ]]; then
+              remove_recoverable_release "$release_json" "mutable"
+              release_json=""
+            fi
+          fi
+
+          if [[ -n "$release_json" ]]; then
+            verify_tag_target
+            verify_release "$release_json"
+            echo "Verified existing immutable release ${tag}."
+          else
+            ensure_tag_target
+            gh release create "$tag" \
+              "${ARTIFACT_NAME}.zip" \
+              "${ARTIFACT_NAME}.zip.sha256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "herdr-win nightly ${date_utc}" \
+              --notes-file RELEASE_NOTES.md \
+              --prerelease \
+              --latest=false
+
+            verify_tag_target
+            release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
+            if [[ "$(jq -r '.immutable // false' <<<"$release_json")" != "true" ]]; then
+              remove_recoverable_release "$release_json" "mutable"
+              echo "Repository release immutability is not active; refusing publication." >&2
+              exit 1
+            fi
+            verify_release "$release_json"
+          fi
+
+          built_at="$(jq -r .published_at <<<"$release_json")"
+          if [[ ! "$built_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
+            echo "Release ${tag} has no stable publication timestamp." >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate preview update manifest
+        id: manifest
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          BUILT_AT: ${{ steps.release.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          zip="${ARTIFACT_NAME}.zip"
+          checksum="${zip}.sha256"
+          cd release-assets
+          sha256sum --check "$checksum"
+          zip_sha="$(sha256sum "$zip" | awk '{print $1}')"
+          jq -n --arg sha "$zip_sha" '{"windows-x86_64": $sha}' > preview-sha256.json
+
+          generator="$GITHUB_WORKSPACE/release-assets/PREVIEW_GENERATOR.py"
+          notes="$GITHUB_WORKSPACE/release-assets/RELEASE_NOTES.md"
+          shas="$GITHUB_WORKSPACE/release-assets/preview-sha256.json"
+          cd "$GITHUB_WORKSPACE/control"
+          git fetch --no-tags origin master
+          git checkout --force -B manifest-publish origin/master
+          if ! git merge-base --is-ancestor "$CONTROL_SHA" HEAD; then
+            echo "Selected control revision ${CONTROL_SHA} is no longer on master." >&2
+            exit 1
+          fi
+          selected="$(python3 "$generator" select-commit --ref HEAD)"
+          if [[ "$selected" != "$CONTROL_SHA" ]]; then
+            echo "master advanced to untested control revision ${selected}; refusing stale manifest publication." >&2
+            exit 1
+          fi
+          unexpected_paths="$(git diff --name-only "$CONTROL_SHA..HEAD" | grep -vxF 'website/preview.json' || true)"
+          if [[ -n "$unexpected_paths" ]]; then
+            echo "Skipped manifest commits changed release inputs:" >&2
+            echo "$unexpected_paths" >&2
+            exit 1
+          fi
+
+          python3 "$generator" manifest \
+            --output website/preview.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --build-id "$BUILD_ID" \
+            --commit "$UPSTREAM_SHA" \
+            --built-at "$BUILT_AT" \
+            --base-version "$BASE_VERSION" \
+            --protocol "$PROTOCOL" \
+            --notes "$notes" \
+            --sha-file "$shas" \
+            --retain 30
+
+          expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}"
+          jq -e \
+            --arg build_id "$BUILD_ID" \
+            --arg commit "$UPSTREAM_SHA" \
+            --arg base_version "$BASE_VERSION" \
+            --argjson protocol "$PROTOCOL" \
+            --arg sha "$zip_sha" \
+            --arg expected_url "$expected_url" \
+            --arg prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/" \
+            '.channel == "preview"
+             and .build_id == $build_id
+             and .commit == $commit
+             and .base_version == $base_version
+             and .protocol == $protocol
+             and .assets["windows-x86_64"].url == $expected_url
+             and .assets["windows-x86_64"].sha256 == $sha
+             and ([.assets, (.builds[]?.assets)] | all(keys == ["windows-x86_64"]))
+             and ([.assets["windows-x86_64"], (.builds[]?.assets["windows-x86_64"])]
+                  | all(.format == "zip" and (.sha256 | test("^[0-9a-f]{64}$"))))
+             and ([.assets[]?, (.builds[]?.assets[]?)] | all(.url | startswith($prefix)))' \
+            website/preview.json >/dev/null
+
+          if git diff --quiet -- website/preview.json; then
+            echo "Preview manifest already points at ${BUILD_ID}."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed_paths="$(git diff --name-only)"
+          untracked_paths="$(git ls-files --others --exclude-standard)"
+          if [[ "$changed_paths" != "website/preview.json" || -n "$untracked_paths" ]]; then
+            echo "Manifest generation changed paths outside website/preview.json." >&2
+            git status --short >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add website/preview.json
+          staged_paths="$(git diff --cached --name-only)"
+          unstaged_paths="$(git diff --name-only)"
+          untracked_paths="$(git ls-files --others --exclude-standard)"
+          if [[ "$staged_paths" != "website/preview.json" || -n "$unstaged_paths" || -n "$untracked_paths" ]]; then
+            echo "Only website/preview.json may be committed by the nightly workflow." >&2
+            git status --short >&2
+            exit 1
+          fi
+          git commit -m "docs: update preview manifest"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish preview update manifest
+        if: steps.manifest.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          if [[ "$(jq -r '.immutable // false' <<<"$release_json")" != "true" ]]; then
+            echo "Release ${TAG} is not immutable; refusing to publish an update manifest." >&2
+            exit 1
+          fi
+
+          cd control
+          if [[ "$(git show -s --format=%s HEAD)" != "docs: update preview manifest" || \
+                "$(git diff --name-only HEAD^..HEAD)" != "website/preview.json" ]]; then
+            echo "Generated manifest commit does not have the expected one-file shape." >&2
+            exit 1
+          fi
+          parent="$(git rev-parse HEAD^)"
+          remote_head="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
+          if [[ "$remote_head" != "$parent" ]]; then
+            echo "master changed during manifest publication; refusing to rebase generated state." >&2
+            exit 1
+          fi
+          git -c credential.helper= \
+            -c 'credential.helper=!gh auth git-credential' \
+            push origin HEAD:master
+
+  verify-update-feed:
+    name: Verify published update feed
+    needs: [build, publish]
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      BUILD_ID: ${{ needs.build.outputs.build_id }}
+      BASE_VERSION: ${{ needs.build.outputs.base_version }}
+    steps:
+      - name: Download tested package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: herdr-win-nightly-${{ github.run_id }}
+          path: update-check
+
+      - name: Confirm updater sees the published build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/master/website/preview.json"
+          $manifest = $null
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            try {
+              $manifest = Invoke-RestMethod -Uri $manifestUrl -Headers @{ "Cache-Control" = "no-cache" }
+            } catch {
+              $manifest = $null
+            }
+            if ($null -ne $manifest -and [string]$manifest.build_id -eq $env:BUILD_ID) {
+              break
+            }
+            if ($attempt -eq 12) {
+              throw "published preview manifest did not advance to $env:BUILD_ID"
+            }
+            Start-Sleep -Seconds 10
+          }
+
+          $archive = (Resolve-Path -LiteralPath "update-check\$($env:ARTIFACT_NAME).zip").Path
+          $stage = Join-Path $env:RUNNER_TEMP "herdr-win-update-check"
+          Expand-Archive -LiteralPath $archive -DestinationPath $stage
+          $env:HERDR_HOME = Join-Path $env:RUNNER_TEMP "herdr-win-update-home"
+          $env:HERDR_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "herdr-win-update-install"
+          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          $output = (& (Join-Path $stage "herdr.exe") update 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "herdr update failed with exit code $LASTEXITCODE`: $output"
+          }
+          $expected = "already up to date ($env:BASE_VERSION-preview.$env:BUILD_ID)"
+          if ($output -notlike "*$expected*") {
+            throw "updater did not confirm the published fork build: $output"
+          }

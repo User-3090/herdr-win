@@ -55,9 +55,16 @@ The fork executable is not code-signed, so Windows may show a SmartScreen
 warning. The bundled Microsoft ConPTY binaries are signature-checked during
 packaging.
 
-Fork nightlies are manual installs. The installer at `herdr.dev` and
-`herdr update` follow upstream release channels; they do not update to
-herdr-win nightlies.
+The first herdr-win install is manual. After that, the build reuses Herdr's
+existing preview update path against the fork-owned nightly manifest. It checks
+at startup and every 30 minutes while running, shows Herdr's normal update-ready
+indicator when a newer build exists, and installs the verified fork ZIP through
+`herdr update`. The manifest advances only after the Windows nightly passes and
+its immutable prerelease is published.
+
+The installer at `herdr.dev` still belongs to upstream. Use the fork release for
+the initial install, and run `herdr update` outside Herdr after detaching when an
+update is ready.
 
 ## What the maintained delta covers
 
@@ -66,7 +73,8 @@ The canonical queue is intentionally small and grouped by responsibility:
 1. Windows terminal appearance, input, cursor, and color behavior.
 2. Native Windows notifications and reliable audio playback.
 3. Windows remote attach plus bounded remote clipboard-image transport.
-4. Deterministic ConPTY packaging and hardened PowerShell installation checks.
+4. Deterministic ConPTY packaging, fork-owned updates, and hardened PowerShell
+   installation checks.
 
 Because this channel publishes only a Windows executable, it cannot
 automatically install the matching nightly binary on a Linux or macOS remote.
@@ -86,7 +94,8 @@ The scheduled workflow:
 3. runs Windows formatting, lint, focused tests, ConPTY, installer, and runtime
    probes;
 4. publishes an immutable prerelease identified by both the upstream and
-   herdr-win control revisions.
+   herdr-win control revisions;
+5. advances the fork preview manifest only after that release is verified.
 
 If a patch no longer applies or a gate fails, no release is published. Ordinary
 pushes do not build or publish binaries. For release purposes this repository is
