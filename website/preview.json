@@ -1,1 +1,33 @@
-{}
+{
+  "schema_version": 1,
+  "channel": "preview",
+  "base_version": "0.7.5",
+  "build_id": "e536bd8bd99d.14f35bee81f3",
+  "commit": "e536bd8bd99de975cb2d15bb384e6e35f88ef88e",
+  "built_at": "2026-07-26T09:29:45Z",
+  "protocol": 18,
+  "notes": "Unofficial herdr-win Windows nightly built from upstream Herdr plus the maintained Windows delta.\n\n- Upstream master: `e536bd8bd99de975cb2d15bb384e6e35f88ef88e`\n- herdr-win control revision: `14f35bee81f3dbad20a81831f03f14afdf016034`\n- Build identity: `e536bd8bd99d.14f35bee81f3`\n\nApplied patches:\n- `0001-windows-terminal-appearance.patch`\n- `0002-windows-desktop-integration.patch`\n- `0003-windows-remote-attach.patch`\n- `0004-windows-package-hardening.patch`\n\nThe installed executable and command remain `herdr`. This is a drop-in Windows build, not an official upstream release.",
+  "assets": {
+    "windows-x86_64": {
+      "url": "https://github.com/User-3090/herdr-win/releases/download/windows-nightly-e536bd8bd99d-14f35bee81f3/herdr-windows-x86_64.zip",
+      "sha256": "3bb5a3f2dd3f21ccbad61a8d7bf8f137964d974af9dc47922e9b37bcf4bd3ec3",
+      "format": "zip"
+    }
+  },
+  "builds": {
+    "e536bd8bd99d.14f35bee81f3": {
+      "base_version": "0.7.5",
+      "commit": "e536bd8bd99de975cb2d15bb384e6e35f88ef88e",
+      "built_at": "2026-07-26T09:29:45Z",
+      "protocol": 18,
+      "tag": "windows-nightly-e536bd8bd99d-14f35bee81f3",
+      "assets": {
+        "windows-x86_64": {
+          "url": "https://github.com/User-3090/herdr-win/releases/download/windows-nightly-e536bd8bd99d-14f35bee81f3/herdr-windows-x86_64.zip",
+          "sha256": "3bb5a3f2dd3f21ccbad61a8d7bf8f137964d974af9dc47922e9b37bcf4bd3ec3",
+          "format": "zip"
+        }
+      }
+    }
+  }
+}
