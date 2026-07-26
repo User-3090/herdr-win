@@ -1,0 +1,232 @@
+From 25a8b02fd2f017dde8d86693177098314845634f Mon Sep 17 00:00:00 2001
+From: User-3090 <71881005+User-3090@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 07:36:53 +0200
+Subject: [PATCH 2/4] feat(windows): integrate desktop notifications and audio
+
+Deliver Unicode-safe native notification balloons without duplicate shell audio, and bind MediaPlayer paths through the process environment so spaced and Unicode paths remain literal.
+---
+ src/platform/windows.rs | 90 ++++++++++++++++++++++++++++++++++++++---
+ src/sound.rs            | 40 +++++++++++++-----
+ 2 files changed, 113 insertions(+), 17 deletions(-)
+
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index d77a30beb33904122c60dea1616f5179f9b6ab85..4dd80789e0242c3f8147542ddaec2acf1d07a5fb 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -4,7 +4,10 @@ use std::{
+     mem::{size_of, MaybeUninit},
+     path::PathBuf,
+     ptr::{copy_nonoverlapping, null_mut},
+-    sync::{Arc, Mutex},
++    sync::{
++        atomic::{AtomicU32, Ordering},
++        Arc, Mutex,
++    },
+     time::{Duration, Instant},
+ };
+ 
+@@ -42,10 +45,13 @@ use windows_sys::{
+                     KEYEVENTF_KEYUP,
+                 },
+             },
+-            Shell::{CommandLineToArgvW, ShellExecuteW},
++            Shell::{
++                CommandLineToArgvW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_TIP,
++                NIIF_INFO, NIIF_NOSOUND, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
++            },
+             WindowsAndMessaging::{
+-                GetForegroundWindow, GetWindowThreadProcessId, SendMessageTimeoutW,
+-                SMTO_ABORTIFHUNG, WM_IME_CONTROL,
++                GetForegroundWindow, GetWindowThreadProcessId, LoadIconW, SendMessageTimeoutW,
++                IDI_APPLICATION, SMTO_ABORTIFHUNG, WM_IME_CONTROL,
+             },
+         },
+     },
+@@ -69,6 +75,7 @@ struct ProcessSnapshotCache {
+ 
+ static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
+     Mutex::new(ProcessSnapshotCache { cached: None });
++static NEXT_NOTIFICATION_ICON_ID: AtomicU32 = AtomicU32::new(0x4845_0000);
+ 
+ pub(crate) fn should_draw_host_cursor_by_default() -> bool {
+     true
+@@ -679,8 +686,70 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
+     None
+ }
+ 
+-pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
+-    Ok(false)
++pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
++    let hwnd = unsafe { GetConsoleWindow() };
++    if hwnd.is_null() {
++        return Ok(false);
++    }
++
++    let icon_id = NEXT_NOTIFICATION_ICON_ID.fetch_add(1, Ordering::Relaxed);
++    let mut notification = unsafe { std::mem::zeroed::<NOTIFYICONDATAW>() };
++    notification.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
++    notification.hWnd = hwnd;
++    notification.uID = icon_id;
++    notification.hIcon = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
++    notification.uFlags = NIF_TIP;
++    if !notification.hIcon.is_null() {
++        notification.uFlags |= NIF_ICON;
++    }
++    copy_wide_truncated(&mut notification.szTip, "Herdr");
++
++    if unsafe { Shell_NotifyIconW(NIM_ADD, &notification) } == 0 {
++        return Err(std::io::Error::other(
++            "failed to add Herdr notification-area icon",
++        ));
++    }
++
++    notification.uFlags = NIF_INFO;
++    notification.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
++    copy_wide_truncated(&mut notification.szInfoTitle, title);
++    copy_wide_truncated(&mut notification.szInfo, body.unwrap_or(title));
++    if unsafe { Shell_NotifyIconW(NIM_MODIFY, &notification) } == 0 {
++        unsafe {
++            Shell_NotifyIconW(NIM_DELETE, &notification);
++        }
++        return Err(std::io::Error::other(
++            "failed to show Herdr desktop notification",
++        ));
++    }
++
++    let hwnd_address = hwnd as usize;
++    std::thread::spawn(move || {
++        std::thread::sleep(Duration::from_secs(10));
++        let mut cleanup = unsafe { std::mem::zeroed::<NOTIFYICONDATAW>() };
++        cleanup.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
++        cleanup.hWnd = hwnd_address as _;
++        cleanup.uID = icon_id;
++        unsafe {
++            Shell_NotifyIconW(NIM_DELETE, &cleanup);
++        }
++    });
++
++    Ok(true)
++}
++
++fn copy_wide_truncated<const N: usize>(destination: &mut [u16; N], value: &str) {
++    destination.fill(0);
++    let mut offset = 0;
++    for ch in value.chars() {
++        let mut units = [0; 2];
++        let encoded = ch.encode_utf16(&mut units);
++        if offset + encoded.len() >= N {
++            break;
++        }
++        destination[offset..offset + encoded.len()].copy_from_slice(encoded);
++        offset += encoded.len();
++    }
+ }
+ 
+ fn wide_null(value: &str) -> Vec<u16> {
+@@ -1115,6 +1184,15 @@ mod tests {
+         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+     };
+ 
++    #[test]
++    fn windows_notification_text_is_null_terminated_and_unicode_safe() {
++        let mut destination = [u16::MAX; 6];
++        super::copy_wide_truncated(&mut destination, "abc😀def");
++
++        assert_eq!(String::from_utf16(&destination[..5]).unwrap(), "abc😀");
++        assert_eq!(destination[5], 0);
++    }
++
+     #[test]
+     fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
+         use base64::Engine as _;
+diff --git a/src/sound.rs b/src/sound.rs
+index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5cb84f46f 100644
+--- a/src/sound.rs
++++ b/src/sound.rs
+@@ -8,9 +8,7 @@ use std::io::Write;
+ #[cfg(not(any(windows, target_os = "macos")))]
+ use std::io::{Read, Result as IoResult};
+ use std::path::{Path, PathBuf};
+-#[cfg(not(windows))]
+-use std::process::Command;
+-use std::process::Output;
++use std::process::{Command, Output};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ #[cfg(not(any(windows, target_os = "macos")))]
+ use std::time::{Duration, Instant};
+@@ -18,6 +16,8 @@ use std::time::{Duration, Instant};
+ use tracing::warn;
+ 
+ const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
++#[cfg(any(windows, test))]
++const WINDOWS_SOUND_PATH_ENV: &str = "HERDR_SOUND_PATH";
+ #[cfg(not(any(windows, target_os = "macos")))]
+ const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
+ #[cfg(not(any(windows, target_os = "macos")))]
+@@ -121,7 +121,8 @@ fn run_player(path: &Path) -> Result<Output, String> {
+ #[cfg(any(windows, test))]
+ fn windows_media_player_script() -> &'static str {
+     r#"
+-param([string]$Path)
++$Path = [Environment]::GetEnvironmentVariable('HERDR_SOUND_PATH', 'Process')
++if ([string]::IsNullOrWhiteSpace($Path)) { throw 'HERDR_SOUND_PATH is not set' }
+ $ErrorActionPreference = 'Stop'
+ Add-Type -AssemblyName PresentationCore
+ $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
+@@ -150,9 +151,10 @@ if (-not $script:done) { throw 'sound playback timed out' }
+ "#
+ }
+ 
+-#[cfg(windows)]
+-fn run_windows_player(path: &Path) -> Result<Output, String> {
+-    crate::noninteractive_process::command("powershell.exe")
++#[cfg(any(windows, test))]
++fn windows_player_command(path: &Path) -> Command {
++    let mut command = crate::noninteractive_process::command("powershell.exe");
++    command
+         .args([
+             "-NoLogo",
+             "-NoProfile",
+@@ -162,7 +164,13 @@ fn run_windows_player(path: &Path) -> Result<Output, String> {
+             "-Command",
+             windows_media_player_script(),
+         ])
+-        .arg(path)
++        .env(WINDOWS_SOUND_PATH_ENV, path);
++    command
++}
++
++#[cfg(windows)]
++fn run_windows_player(path: &Path) -> Result<Output, String> {
++    windows_player_command(path)
+         .output()
+         .map_err(|e| format!("Windows MediaPlayer playback failed: {e}"))
+ }
+@@ -403,11 +411,21 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn windows_media_player_script_accepts_literal_path_argument() {
++    fn windows_media_player_uses_process_environment_for_literal_path() {
+         let script = windows_media_player_script();
+-
+-        assert!(script.contains("param([string]$Path)"));
++        let path = Path::new(r"C:\sound dir\döne.mp3");
++        let command = windows_player_command(path);
++        let env_path = command.get_envs().find_map(|(key, value)| {
++            (key == std::ffi::OsStr::new(WINDOWS_SOUND_PATH_ENV))
++                .then_some(value)
++                .flatten()
++        });
++
++        assert!(script.contains("GetEnvironmentVariable('HERDR_SOUND_PATH', 'Process')"));
++        assert!(!script.contains("param([string]$Path)"));
+         assert!(script.contains("Resolve-Path -LiteralPath $Path"));
+         assert!(script.contains("System.Windows.Media.MediaPlayer"));
++        assert_eq!(env_path, Some(path.as_os_str()));
++        assert!(!command.get_args().any(|arg| arg == path.as_os_str()));
+     }
+ }
+-- 
+2.55.0.windows.3
+

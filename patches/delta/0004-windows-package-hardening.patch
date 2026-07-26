@@ -1,0 +1,150 @@
+From a17705309e0df5fa4ef146c2570e911db1ad1e39 Mon Sep 17 00:00:00 2001
+From: User-3090 <71881005+User-3090@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 07:40:36 +0200
+Subject: [PATCH 4/4] fix(windows): harden package and installer handling
+
+Produce deterministic ConPTY package archives, keep installer staging paths short for Windows PowerShell 5.1, normalize vendor patch inventory paths, and make the installer test restore its environment while supporting local temp execution.
+---
+ scripts/package_windows_conpty.py               |  9 ++++++++-
+ scripts/test_package_windows_conpty.py          | 10 ++++++++++
+ scripts/test_vendor_libghostty_vt.py            |  4 ++--
+ scripts/test_vendor_portable_pty.py             |  4 ++--
+ scripts/windows_install_conpty_package_test.ps1 | 11 ++++++++++-
+ website/install.ps1                             |  5 ++++-
+ 6 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
+index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..a9ec8950f8a972eed24fec438af96c1c558ac120 100644
+--- a/scripts/package_windows_conpty.py
++++ b/scripts/package_windows_conpty.py
+@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ DEFAULT_METADATA = PROJECT_ROOT / "packaging" / "windows" / "conpty.json"
+ MARKER_PATH = PurePosixPath("conpty/herdr-conpty.json")
+ DOWNLOAD_TIMEOUT_SECONDS = 60
++ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+ 
+ 
+ def sha256_bytes(data: bytes) -> str:
+@@ -206,7 +207,13 @@ def archive_bundle(
+     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+         for path in sorted(stage_dir.rglob("*")):
+             if path.is_file():
+-                archive.write(path, path.relative_to(stage_dir).as_posix())
++                relative = path.relative_to(stage_dir).as_posix()
++                info = zipfile.ZipInfo(relative, date_time=ZIP_TIMESTAMP)
++                info.compress_type = zipfile.ZIP_DEFLATED
++                info.create_system = 3
++                mode = 0o100755 if path.suffix.lower() == ".exe" else 0o100644
++                info.external_attr = mode << 16
++                archive.writestr(info, path.read_bytes(), compresslevel=9)
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+diff --git a/scripts/test_package_windows_conpty.py b/scripts/test_package_windows_conpty.py
+index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..13ffe60d41a9e09746cff92a7f85b38f13a733fb 100644
+--- a/scripts/test_package_windows_conpty.py
++++ b/scripts/test_package_windows_conpty.py
+@@ -125,6 +125,16 @@ class WindowsConptyPackageTests(unittest.TestCase):
+                         package.load_metadata(metadata_path), "x86_64"
+                     ),
+                 )
++                self.assertTrue(
++                    all(info.date_time == package.ZIP_TIMESTAMP for info in archive.infolist())
++                )
++
++            first_archive = output.read_bytes()
++            for path in stage.rglob("*"):
++                path.touch()
++            second_output = root / "herdr-second.zip"
++            package.archive_bundle(metadata_path, "x86_64", stage, second_output)
++            self.assertEqual(first_archive, second_output.read_bytes())
+ 
+             (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
+             with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
+diff --git a/scripts/test_vendor_libghostty_vt.py b/scripts/test_vendor_libghostty_vt.py
+index ad5c8d5e2f46793d46f75cbd84710b58a3447fdc..2986af8f9609e27886eb2be61f121c44710a6049 100644
+--- a/scripts/test_vendor_libghostty_vt.py
++++ b/scripts/test_vendor_libghostty_vt.py
+@@ -108,9 +108,9 @@ class VendorLibghosttyVtTests(unittest.TestCase):
+         self.assertTrue(index.exists())
+         text = index.read_text()
+         missing = [
+-            str(path.relative_to(project_root))
++            path.relative_to(project_root).as_posix()
+             for path in patches
+-            if str(path.relative_to(project_root)) not in text
++            if path.relative_to(project_root).as_posix() not in text
+         ]
+         self.assertEqual(missing, [])
+ 
+diff --git a/scripts/test_vendor_portable_pty.py b/scripts/test_vendor_portable_pty.py
+index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6e2cb4462 100644
+--- a/scripts/test_vendor_portable_pty.py
++++ b/scripts/test_vendor_portable_pty.py
+@@ -65,9 +65,9 @@ class VendorPortablePtyTests(unittest.TestCase):
+         self.assertTrue(index.exists())
+         text = index.read_text()
+         missing = [
+-            str(path.relative_to(project_root))
++            path.relative_to(project_root).as_posix()
+             for path in patches
+-            if str(path.relative_to(project_root)) not in text
++            if path.relative_to(project_root).as_posix() not in text
+         ]
+         self.assertEqual(missing, [])
+ 
+diff --git a/scripts/windows_install_conpty_package_test.ps1 b/scripts/windows_install_conpty_package_test.ps1
+index 062c2cfedf0a7d343fc7e2eb896e9b246d83c4b1..746462a5cd9570533584ddcf4a074d559b896c9a 100644
+--- a/scripts/windows_install_conpty_package_test.ps1
++++ b/scripts/windows_install_conpty_package_test.ps1
+@@ -7,7 +7,12 @@ Set-StrictMode -Version Latest
+ $ErrorActionPreference = "Stop"
+ 
+ $archive = (Resolve-Path -LiteralPath $ArchivePath).Path
+-$root = Join-Path $env:RUNNER_TEMP ("herdr-installer-test-" + [Guid]::NewGuid().ToString("N"))
++$tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
++    [System.IO.Path]::GetTempPath()
++} else {
++    $env:RUNNER_TEMP
++}
++$root = Join-Path $tempRoot ("herdr-installer-test-" + [Guid]::NewGuid().ToString("N"))
+ $webRoot = Join-Path $root "web"
+ $herdrHome = Join-Path $root "home"
+ $installDir = Join-Path $root "bin"
+@@ -36,6 +41,8 @@ $manifest | Out-File -LiteralPath $manifestPath -Encoding utf8
+ 
+ $server = $null
+ $oldHerdrHome = $env:HERDR_HOME
++$oldProcessPath = $env:PATH
++$oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+ try {
+     $server = Start-Process python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $webRoot) -PassThru -WindowStyle Hidden
+     $env:HERDR_HOME = Join-Path $root "unused\..\home"
+@@ -139,6 +146,8 @@ try {
+     }
+ } finally {
+     $env:HERDR_HOME = $oldHerdrHome
++    $env:PATH = $oldProcessPath
++    [Environment]::SetEnvironmentVariable("Path", $oldUserPath, "User")
+     if ($null -ne $server -and -not $server.HasExited) {
+         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+     }
+diff --git a/website/install.ps1 b/website/install.ps1
+index ce510e7b3cf6c228015f44d7db46219396444770..4800d3232f010de326eacf368791ddf034a42e77 100644
+--- a/website/install.ps1
++++ b/website/install.ps1
+@@ -554,7 +554,10 @@ try {
+ 
+         if (-not (Test-HerdrReleaseComplete -ReleaseDir $releaseDir -Format $asset.Format)) {
+             $downloadPath = Join-Path $tempDir "herdr-download.$($asset.Format)"
+-            $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
++            # Keep the transient path short enough for Windows PowerShell 5.1's
++            # Expand-Archive implementation on systems without long paths.
++            # The install lock makes the process ID unique for this operation.
++            $stagingDir = Join-Path $releasesDir ".staging.$PID"
+             Write-Step "Downloading Herdr"
+             Invoke-WebRequest -Uri $asset.Url -OutFile $downloadPath
+             Test-FileDigest -Path $downloadPath -ExpectedDigest $asset.Sha256
+-- 
+2.55.0.windows.3
+

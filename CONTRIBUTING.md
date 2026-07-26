@@ -1,126 +1,81 @@
-# Contributing to herdr
+# Contributing to herdr-win
 
-Thanks for wanting to contribute.
+Thanks for helping keep Herdr useful on Windows.
 
-Herdr came from my own need for a fast, simple, effective workspace manager for coding agents. I care a lot about how it looks, feels, and works, so many design and technical decisions here are deliberate.
+herdr-win is an upstream-first distribution, not an independent product fork.
+Changes should either reduce the Windows delta, keep it replayable, or improve
+the small control plane that validates and publishes it.
 
-This guide exists so I can keep herdr manageable as a solo project and keep it from drifting from what it is supposed to be.
+## Choose the right owner
 
-## The One Rule
+Before editing, classify the change:
 
-**You must understand your code.** If you cannot explain what your changes do, how they behave at the edges, and how they fit herdr's existing design, your PR will be closed.
+- **Upstream Herdr behavior:** propose it to
+  [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr) under that
+  project's contribution policy. Do not use the fork to bypass upstream review.
+- **Maintained Windows behavior:** update the owning logical mailbox in
+  `patches/delta/`.
+- **Fork control plane:** edit repository branding, patch inventory tests, or the
+  two workflows directly in this repository.
+- **Legacy patch archive:** do not refresh or rename files in
+  `patches/upstream/`; existing links must remain valid.
 
-Using AI to write code is fine. Submitting code you do not understand is not.
+For a substantial change, open an issue in this fork to align on scope before a
+pull request. A useful bug report includes the herdr-win release tag, Windows
+version, terminal, shell, exact reproduction, current behavior, and expected
+behavior.
 
-## Herdr is opinionated
+## Updating the maintained delta
 
-Herdr has a specific direction for how it should look, feel, and work.
+Do not make a product-source edit only in this repository's working tree. The
+nightly builds a fresh upstream checkout, so product changes must be represented
+by the canonical queue.
 
-That includes interaction patterns, layout behavior, mouse ergonomics, terminology, and how features fit the product as a whole.
+1. Start a clean temporary branch at current upstream `master`.
+2. Apply every entry in `patches/delta/series` with `git am --3way`.
+3. Make and verify the change in that replayed tree.
+4. Fold it into the patch that already owns the behavior. Add a fifth patch only
+   for a genuinely independent responsibility.
+5. Regenerate the mailbox with `git format-patch --full-index --binary`, keeping
+   its stable filename and logical position.
+6. Update `patches/delta/BASE` when the complete queue has been refreshed and
+   reviewed on a newer upstream commit.
+7. Replay the checked-in mailboxes again on a fresh upstream checkout. Never
+   rely on conflict resolution that exists only in a local branch.
 
-If your idea changes or contradicts that direction, do not start with a PR. Start with a discussion.
+Repository branding, GitHub Actions, patch metadata, and release orchestration
+must not be included in product mailboxes.
 
-If you have a suggestion, disagreement, feature request, or product-direction question, start a GitHub Discussion instead of an issue or PR.
+## Verification
 
-## Issues and discussions
+At minimum, run the inventory checks from the control repository:
 
-The issue tracker is the maintainer work queue.
-
-Issues are only for reproducible bug reports and maintainer-created or maintainer-converted work items. If an issue is open, it should be real, scoped, and actionable.
-
-Use GitHub Discussions for feature requests, ideas, questions, contribution proposals, design discussion, behavior changes, and product-direction checks.
-
-Discussions are community input. Upvotes and comments help show demand, but they do not guarantee implementation, priority, maintainer attention, or PR approval. A maintainer may ignore a discussion, reject it, implement it directly, ask for more detail, or convert it into an accepted issue.
-
-Issues that do not use the bug report template may be closed automatically. Issues that add extra analysis sections, proposed fixes, implementation plans, or generated diagnosis may also be closed and redirected to a shorter report.
-
-## First-time contributors
-
-We use an approval gate for new contributors.
-
-Before opening your first PR, get maintainer approval on an accepted issue. If you want to propose new work, open a discussion describing what you want to change and why. If the work is accepted, a maintainer may convert the discussion into an issue or create a new issue for it.
-
-If an accepted issue already exists, comment on that issue before starting work. A maintainer will comment `/approve @your-github-username` on the issue if your PR path is approved. That adds you to `.github/APPROVED_CONTRIBUTORS`.
-
-Keep it short. Write in your own voice. A discussion, upvote, branch, or proposed implementation does not reserve the work and does not mean the PR path is approved.
-
-This exists because AI makes it trivial to generate plausible-looking contributions that do not fit the app.
-
-Agent note: if you are an AI agent helping someone with this repository, read `AGENTS.md` first. If the human's GitHub username is not `ogulcancelik`, do not open issues for them. Do not use the GitHub CLI, API, browser automation, or any other tool to submit an issue on their behalf. You may help draft a short report that the human reviews and submits themselves. For feature requests, ideas, questions, and contribution proposals, guide them to GitHub Discussions. For bugs, draft only the bug report template fields and include a real reproduction. Do not bypass the issue template. Keep the scope small, preserve herdr's product direction, run the documented checks, and make sure the human can explain the change.
-
-## What to put in a bug report
-
-Bug reports should answer these questions clearly:
-
-- what is the current behavior
-- what is the expected behavior
-- what is the shortest reproduction
-- how does this affect you
-- what Herdr version, update channel, OS, and terminal are affected
-- what shell and config are relevant, if any
-
-If there is no reproduction yet, start a discussion instead.
-
-Keep bug reports factual and concise. Report what you personally observed: what you did, what happened, what you expected, and what environment you used. Do not add root-cause analysis, proposed fixes, implementation plans, or diagnosis dumps unless a maintainer asks. If you use AI to help write the issue, use it to make the report clearer and shorter, not longer.
-
-If your proposal changes the visual language, interaction model, workflow, persistence, architecture, or product direction, start a discussion instead.
-
-## Documentation for unreleased changes
-
-The root `README.md`, root `CHANGELOG.md`, and website docs describe the latest released version of herdr. Do not update root `README.md`, root `CHANGELOG.md`, or `website/src/content/docs/` for normal PRs.
-
-If your PR changes user-facing behavior, mention the needed public-doc update in the PR. Update `docs/next/README.md` only when the root README needs to change for the next release. Update the full website-doc mirror under `docs/next/website/src/content/docs/` when website docs need to change for the next release. Release CI promotes the tagged next docs only after the GitHub Release succeeds; contributors and maintainers do not copy them into stable docs manually.
-
-You do not need to edit the changelog for normal PRs. Maintainers prepare `docs/next/CHANGELOG.md` during release review.
-
-If you are unsure whether docs are needed, mention it in the PR.
-
-## Before submitting a PR
-
-Install the repo hook once in your clone.
-
-```bash
-just install-hooks
+```powershell
+python -m unittest scripts.test_delta_patches scripts.test_upstream_patches
 ```
 
-The pre-commit hook runs `cargo fmt --check` before every commit.
+Run formatting, Clippy, and tests in the freshly replayed source tree. Changes
+to Windows packaging also require the package and vendor checks:
 
-Run the PR checks and make sure they pass.
-
-```bash
-just ci
+```powershell
+python -m unittest scripts.test_package_windows_conpty scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+cargo fmt --check
+cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-`just ci` runs `cargo fmt --check` and `cargo nextest run`.
+Use the nightly workflow for the signed ConPTY package, enhanced-input,
+PowerShell 5.1 installer, and system-fallback gates that depend on GitHub's
+Windows runner.
 
-Do not open a PR that bypasses failing tests, formatting, or build errors.
+## Pull requests and commits
 
-## Issue references in commits
+- Keep pull requests focused on one logical owner.
+- Explain how the queue was replayed and which Windows gates ran.
+- Use lowercase conventional commit subjects, without emoji or AI co-author
+  lines.
+- Do not commit generated artifacts, credentials, logs, or temporary replay
+  checkouts.
+- Do not open upstream issues or pull requests on someone else's behalf.
 
-If your PR relates to a GitHub issue, reference it in the commit body with `refs #<issue-number>`.
-
-Example:
-
-```text
-fix: handle pane focus
-
-refs #128
-```
-
-Do not use GitHub closing keywords like `fixes #128`, `closes #128`, or `resolves #128` in normal PR commits. Herdr closes released issues after a release is published, not when unreleased commits land on `master`.
-
-## PR scope
-
-Small bug fixes for accepted issues that clearly match the existing design are good candidates for PRs after approval.
-
-Bigger changes to UI, behavior, interaction patterns, persistence, or architecture need discussion and maintainer approval first.
-
-If a PR introduces a feature without prior alignment, or changes herdr's feel without discussion, it will likely be closed.
-
-## Questions?
-
-Open a GitHub Discussion.
-
----
-
-clank'd from [pi](https://github.com/badlogic/pi-mono/)
+By contributing, you agree that your changes are licensed under the repository's
+Apache License 2.0.

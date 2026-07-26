@@ -1,26 +1,23 @@
 name: Bug report
-description: Report a reproducible bug in herdr.
+description: Report a reproducible problem in a herdr-win nightly.
+title: "[bug] "
 body:
   - type: markdown
     attributes:
       value: |
-        **Before you start:** Read [CONTRIBUTING.md](https://github.com/ogulcancelik/herdr/blob/master/CONTRIBUTING.md).
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md).
 
-        Issues are only for reproducible bugs and maintainer-created or maintainer-converted work items. Feature requests, ideas, questions, contribution proposals, and direction checks belong in [Discussions](https://github.com/ogulcancelik/herdr/discussions).
+        Use this form for a problem observed in a herdr-win Windows nightly. If practical, try the same workflow with upstream Herdr and report the result below. Do not report a fork-only failure to upstream.
 
-        New PRs from unapproved contributors are auto-closed by default. Do not open a PR unless a maintainer has approved the work and approved you to contribute.
-
-        Keep this short. If it does not fit on one screen, it is too long. Write in your own voice.
-
-        Use only the sections in this template. Do not add root cause, proposed fix, analysis, implementation plan, or similar sections unless a maintainer asks.
+        Keep the report factual and include only the smallest relevant logs. For general Herdr questions and product feature requests, use the upstream project links shown on the new-issue page.
 
   - type: checkboxes
     id: bug-confirmation
     attributes:
       label: Is this a reproducible bug?
-      description: Feature requests, ideas, questions, contribution proposals, and direction checks belong in Discussions and may be closed automatically if opened as issues.
+      description: Confirm that the problem occurs in a herdr-win nightly and has exact reproduction steps.
       options:
-        - label: I confirm this is a reproducible bug, not a feature request, idea, question, contribution proposal, or direction check.
+        - label: I confirm this is a reproducible herdr-win bug, not a general Herdr question or feature request.
           required: true
 
   - type: textarea
@@ -59,13 +56,14 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Herdr version, update channel, operating system, and terminal are required. Shell and relevant config are optional.
+      description: Copy the release tag and upstream revision from the herdr-win release notes.
       value: |
-        - Herdr version:
-        - Update channel (stable or preview):
-        - Operating system:
+        - herdr-win release tag:
+        - Upstream revision:
+        - Windows version:
         - Terminal:
-        - Shell, if relevant:
+        - Shell:
+        - Result with upstream Herdr (same, not present, or not tested):
         - Relevant config, if any:
     validations:
       required: true

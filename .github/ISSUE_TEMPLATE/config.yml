@@ -1,8 +1,5 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Feature requests and ideas
+  - name: Upstream Herdr questions and feature requests
     url: https://github.com/ogulcancelik/herdr/discussions
-    about: Start a discussion for feature requests, ideas, behavior changes, and product direction.
-  - name: Questions and contribution proposals
-    url: https://github.com/ogulcancelik/herdr/discussions
-    about: Use discussions for questions, contribution proposals, and anything that is not a reproducible bug.
+    about: Use upstream Discussions for general Herdr questions, ideas, and product direction.

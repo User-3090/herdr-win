@@ -1,4 +1,4 @@
-name: Windows nightly prerelease
+name: herdr-win nightly
 
 on:
   schedule:
@@ -6,284 +6,88 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: windows-nightly-prerelease
+  group: herdr-win-nightly
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 env:
-  FORK_BRANCH: master
-  UPSTREAM_REPOSITORY: ogulcancelik/herdr
-  UPSTREAM_BRANCH: master
   RUST_TOOLCHAIN_VERSION: 1.96.1
   WINDOWS_TARGET: x86_64-pc-windows-msvc
   ARTIFACT_NAME: herdr-windows-x86_64
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  sync:
-    name: Merge upstream
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.sync.outputs.sha }}
-      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
-      changed: ${{ steps.sync.outputs.changed }}
-    steps:
-      - name: Resolve and merge upstream
-        id: sync
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          upstream_sha="$(gh api "repos/${UPSTREAM_REPOSITORY}/commits/${UPSTREAM_BRANCH}" --jq .sha)"
-          before_sha="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${FORK_BRANCH}" --jq .commit.sha)"
-
-          if ! merge_output="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/merges" \
-            --field base="${FORK_BRANCH}" \
-            --field head="${upstream_sha}" \
-            --field commit_message="chore: merge ${UPSTREAM_REPOSITORY}@${upstream_sha}" 2>&1)"; then
-            printf '%s\n' "$merge_output" >&2
-            exit 1
-          fi
-
-          after_sha="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${FORK_BRANCH}" --jq .commit.sha)"
-          comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${upstream_sha}...${after_sha}" --jq .status)"
-          if [[ "$comparison" != "ahead" && "$comparison" != "identical" ]]; then
-            echo "Fork commit ${after_sha} does not contain upstream ${upstream_sha} (status: ${comparison})." >&2
-            exit 1
-          fi
-
-          changed=false
-          if [[ "$before_sha" != "$after_sha" ]]; then
-            changed=true
-          fi
-          {
-            echo "sha=${after_sha}"
-            echo "upstream_sha=${upstream_sha}"
-            echo "changed=${changed}"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            echo "### Upstream sync"
-            echo "- Upstream: \`${upstream_sha}\`"
-            echo "- Fork branch: \`${after_sha}\`"
-            echo "- Branch changed: \`${changed}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  prepare:
-    name: Resolve pinned ConPTY and release state
-    needs: sync
-    runs-on: windows-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      conpty_version: ${{ steps.conpty.outputs.version }}
-      conpty_sha256: ${{ steps.conpty.outputs.sha256 }}
-      release_exists: ${{ steps.release.outputs.exists }}
-    env:
-      SOURCE_SHA: ${{ needs.sync.outputs.sha }}
-    steps:
-      - name: Checkout immutable fork commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ needs.sync.outputs.sha }}
-          persist-credentials: false
-
-      - name: Read pinned Microsoft ConPTY package
-        id: conpty
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $metadata = Get-Content -LiteralPath packaging\windows\conpty.json -Raw | ConvertFrom-Json
-          "version=$($metadata.package.version)" >> $env:GITHUB_OUTPUT
-          "sha256=$($metadata.package.sha256)" >> $env:GITHUB_OUTPUT
-          @(
-            "### Microsoft ConPTY"
-            "- Version: ``$($metadata.package.version)``"
-            "- Release: ``$($metadata.package.release_tag)``"
-            "- SHA-256: ``$($metadata.package.sha256)``"
-          ) >> $env:GITHUB_STEP_SUMMARY
-
-      - name: Check exact prerelease state
-        id: release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CONPTY_VERSION: ${{ steps.conpty.outputs.version }}
-          CONPTY_SHA256: ${{ steps.conpty.outputs.sha256 }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-
-          function Get-ExactTagSha([string] $Tag) {
-            $encodedTag = [Uri]::EscapeDataString($Tag)
-            $refsJson = & gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$encodedTag"
-            $refs = @(($refsJson -join "`n") | ConvertFrom-Json)
-            $exactRefs = @($refs | Where-Object { $_.ref -ceq "refs/tags/$Tag" })
-            if ($exactRefs.Count -gt 1) {
-              throw "Multiple exact Git refs exist for tag $Tag."
-            }
-            if ($exactRefs.Count -eq 0) {
-              return $null
-            }
-            return (& gh api "repos/$env:GITHUB_REPOSITORY/commits/$encodedTag" --jq .sha).Trim()
-          }
-
-          $shortSha = $env:SOURCE_SHA.Substring(0, 12)
-          $tag = "windows-nightly-$shortSha-conpty-$env:CONPTY_VERSION"
-          $releasePagesJson = & gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100"
-          $releasePages = ($releasePagesJson -join "`n") | ConvertFrom-Json
-          $releases = @($releasePages | ForEach-Object { $_ })
-          $matchingReleases = @($releases | Where-Object { $_.tag_name -ceq $tag })
-          if ($matchingReleases.Count -gt 1) {
-            throw "Multiple releases exist for tag $tag."
-          }
-          $release = $matchingReleases | Select-Object -First 1
-          $releaseExists = $false
-
-          if ($null -ne $release) {
-            $tagSha = Get-ExactTagSha $tag
-            if ($null -ne $tagSha -and $tagSha -cne $env:SOURCE_SHA) {
-              throw "Existing tag $tag points to $tagSha, expected $env:SOURCE_SHA."
-            }
-            if ($release.draft) {
-              if ($release.target_commitish -cne $env:SOURCE_SHA) {
-                throw "Existing draft $tag targets $($release.target_commitish), expected $env:SOURCE_SHA."
-              }
-              Write-Host "Found interrupted draft $tag; it will be repaired."
-            } else {
-              if ($null -eq $tagSha) {
-                throw "Published release $tag has no exact Git tag."
-              }
-              $assets = @($release.assets)
-              $expectedAssetNames = @(
-                "herdr-windows-x86_64.zip"
-                "herdr-windows-x86_64.zip.sha256"
-              )
-              $assetNames = @($assets | ForEach-Object { $_.name } | Sort-Object)
-              $body = [string] $release.body
-              $requiredNotes = @(
-                "Workflow owner: $env:GITHUB_REPOSITORY windows-nightly/v1",
-                "Fork commit: $env:SOURCE_SHA",
-                "Microsoft ConPTY package: $env:CONPTY_VERSION",
-                "Microsoft ConPTY package SHA-256: $env:CONPTY_SHA256"
-              )
-              $missingNotes = @($requiredNotes | Where-Object { -not $body.Contains($_) })
-              if (
-                -not $release.prerelease -or
-                $assets.Count -ne 2 -or
-                @(Compare-Object $expectedAssetNames $assetNames -CaseSensitive).Count -ne 0 -or
-                $missingNotes.Count -ne 0
-              ) {
-                throw "Existing release $tag failed source, ConPTY, or asset verification."
-              }
-
-              $tempDir = Join-Path $env:RUNNER_TEMP "verify-$([guid]::NewGuid().ToString('N'))"
-              New-Item -ItemType Directory -Path $tempDir | Out-Null
-              try {
-                & gh release download $tag --repo $env:GITHUB_REPOSITORY --dir $tempDir
-                $zip = Join-Path $tempDir "herdr-windows-x86_64.zip"
-                $checksum = "$zip.sha256"
-                if (-not (Test-Path -LiteralPath $zip -PathType Leaf) -or -not (Test-Path -LiteralPath $checksum -PathType Leaf)) {
-                  throw "Published release $tag is missing an expected downloaded asset."
-                }
-
-                $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-                $checksumHash = (Get-FileHash -LiteralPath $checksum -Algorithm SHA256).Hash.ToLowerInvariant()
-                foreach ($assetCheck in @(
-                  @{ Name = "herdr-windows-x86_64.zip"; Hash = $zipHash },
-                  @{ Name = "herdr-windows-x86_64.zip.sha256"; Hash = $checksumHash }
-                )) {
-                  $asset = @($assets | Where-Object { $_.name -ceq $assetCheck.Name })
-                  if (
-                    $asset.Count -ne 1 -or
-                    $asset[0].state -cne "uploaded" -or
-                    $asset[0].digest -cne "sha256:$($assetCheck.Hash)"
-                  ) {
-                    throw "Published asset $($assetCheck.Name) failed state or digest verification."
-                  }
-                }
-
-                $checksumLine = (Get-Content -LiteralPath $checksum -Raw).Trim()
-                if ($checksumLine -cnotmatch '^([0-9a-fA-F]{64})  herdr-windows-x86_64\.zip$') {
-                  throw "Published checksum asset has an invalid format."
-                }
-                if ($Matches[1].ToLowerInvariant() -ne $zipHash) {
-                  throw "Published checksum does not match the ZIP."
-                }
-
-                Add-Type -AssemblyName System.IO.Compression.FileSystem
-                $archive = [IO.Compression.ZipFile]::OpenRead($zip)
-                try {
-                  $expectedFiles = @(
-                    "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-LICENSE.txt"
-                    "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-NOTICE.md"
-                    "conpty/arm64/OpenConsole.exe"
-                    "conpty/conpty.dll"
-                    "conpty/herdr-conpty.json"
-                    "conpty/x64/OpenConsole.exe"
-                    "herdr.exe"
-                  )
-                  $actualFiles = @(
-                    $archive.Entries |
-                      Where-Object { -not [string]::IsNullOrEmpty($_.Name) } |
-                      ForEach-Object { $_.FullName.Replace('\', '/') } |
-                      Sort-Object
-                  )
-                  if (@(Compare-Object $expectedFiles $actualFiles -CaseSensitive).Count -ne 0) {
-                    throw "Published ZIP has unexpected files: $($actualFiles -join ', ')"
-                  }
-                } finally {
-                  $archive.Dispose()
-                }
-
-                $expanded = Join-Path $tempDir "expanded"
-                Expand-Archive -LiteralPath $zip -DestinationPath $expanded
-                $version = & (Join-Path $expanded "herdr.exe") --version
-                $expectedVersion = "^herdr [0-9]+\.[0-9]+\.[0-9]+-nightly\.$([regex]::Escape($env:SOURCE_SHA))$"
-                if ($LASTEXITCODE -ne 0 -or [string] $version -cnotmatch $expectedVersion) {
-                  throw "Published executable identity does not match $env:SOURCE_SHA`: $version"
-                }
-              } finally {
-                Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-              }
-              $releaseExists = $true
-            }
-          }
-
-          "exists=$($releaseExists.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
-          @(
-            "### Nightly release gate"
-            "- Tag: ``$tag``"
-            "- Exact published release exists: ``$releaseExists``"
-          ) >> $env:GITHUB_STEP_SUMMARY
-
   build:
-    name: Test and package Windows build
-    needs: [sync, prepare]
-    if: needs.prepare.outputs.release_exists != 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
-    timeout-minutes: 35
-    permissions:
-      contents: read
-    env:
-      SOURCE_SHA: ${{ needs.sync.outputs.sha }}
-      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
-      CONPTY_VERSION: ${{ needs.prepare.outputs.conpty_version }}
-      CONPTY_SHA256: ${{ needs.prepare.outputs.conpty_sha256 }}
-      HERDR_BUILD_CHANNEL: nightly
-      HERDR_BUILD_ID: ${{ needs.sync.outputs.sha }}
-      HERDR_BUILD_COMMIT: ${{ needs.sync.outputs.sha }}
+    name: Replay, test, and package Windows
+    runs-on: windows-2022
+    timeout-minutes: 40
+    outputs:
+      upstream_sha: ${{ steps.source.outputs.upstream_sha }}
+      control_sha: ${{ steps.source.outputs.control_sha }}
+      build_id: ${{ steps.source.outputs.build_id }}
     steps:
-      - name: Checkout immutable fork commit
+      - name: Checkout herdr-win control repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.sync.outputs.sha }}
+          path: control
           persist-credentials: false
+
+      - name: Checkout upstream Herdr
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ogulcancelik/herdr
+          ref: master
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record immutable source identity
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $upstream = (git -C source rev-parse HEAD).Trim()
+          $control = (git -C control rev-parse HEAD).Trim()
+          $buildId = "$($upstream.Substring(0, 12)).$($control.Substring(0, 12))"
+          "upstream_sha=$upstream" >> $env:GITHUB_OUTPUT
+          "control_sha=$control" >> $env:GITHUB_OUTPUT
+          "build_id=$buildId" >> $env:GITHUB_OUTPUT
+          "HERDR_BUILD_CHANNEL=nightly" >> $env:GITHUB_ENV
+          "HERDR_BUILD_ID=$buildId" >> $env:GITHUB_ENV
+          "HERDR_BUILD_COMMIT=$upstream" >> $env:GITHUB_ENV
+
+      - name: Validate and replay maintained delta
+        shell: pwsh
+        env:
+          GIT_COMMITTER_NAME: herdr-win replay
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          $ErrorActionPreference = "Stop"
+          $base = (git -C ..\source rev-parse HEAD).Trim()
+          python -m unittest scripts.test_delta_patches scripts.test_upstream_patches
+          if ($LASTEXITCODE -ne 0) {
+            throw "patch inventory validation failed with exit code $LASTEXITCODE"
+          }
+          $entries = @(
+            Get-Content -LiteralPath patches\delta\series |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -and -not $_.StartsWith("#") }
+          )
+          foreach ($entry in $entries) {
+            $patch = (Resolve-Path -LiteralPath (Join-Path "patches\delta" $entry)).Path
+            & git -C ..\source am --3way $patch
+            if ($LASTEXITCODE -ne 0) {
+              & git -C ..\source am --abort 2>$null
+              throw "failed to replay $entry on upstream master"
+            }
+          }
+          & git -C ..\source diff --check "$base..HEAD"
+          if ($LASTEXITCODE -ne 0) {
+            throw "replayed delta failed git diff --check"
+          }
+        working-directory: control
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
@@ -298,650 +102,219 @@ jobs:
           version: 0.15.2
           use-cache: false
 
-      - name: Restore cargo cache
+      - name: Restore Cargo cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
-          key: windows-nightly
+          key: herdr-win-nightly
+          workspaces: source
 
-      - name: Test pinned ConPTY packaging
-        run: python -m unittest scripts.test_package_windows_conpty scripts.test_vendor_portable_pty
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Lint
-        run: cargo clippy --bin herdr --locked --target ${{ env.WINDOWS_TARGET }} -- -D warnings
-
-      - name: Test Windows build
+      - name: Run Windows checks
+        working-directory: source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr windows_
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr raw_input::tests
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr client::input
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr host_color
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr pane::cursor::tests
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr cursor_color
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr terminal_restore_postlude
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr host_theme_update_preserves_cursor
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr host_terminal_theme_restore_probe
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr restore_host_terminal_theme
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr render_ansi::tests
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr app_theme_
-          cargo test --locked --target ${{ env.WINDOWS_TARGET }} --bin herdr client_input_events_roundtrip
-
-      - name: Build debug executable
-        run: cargo build --locked --target ${{ env.WINDOWS_TARGET }}
-
-      - name: Smoke-test system ConPTY fallback
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $exe = Join-Path $PWD "target\${{ env.WINDOWS_TARGET }}\debug\herdr.exe"
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "nightly-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-
-      - name: Package and probe app-local ConPTY
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $conptyPackage = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-debug"
-          $archive = Join-Path $env:RUNNER_TEMP "herdr-windows-debug.zip"
-          .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe "target\${{ env.WINDOWS_TARGET }}\debug\herdr.exe" `
-            -PackagePath $conptyPackage `
-            -StageDir $stage `
-            -OutputPath $archive
-          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
-            -ExePath (Join-Path $stage "herdr.exe") `
-            -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
-            -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
+          python -m unittest scripts.test_package_windows_conpty scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+          cargo fmt --check
+          cargo clippy --bin herdr --locked --target $env:WINDOWS_TARGET -- -D warnings
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr windows_
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr remote::attach::tests
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr raw_input::tests
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr client::input
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr host_color
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr pane::cursor::tests
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr cursor_color
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr terminal_restore_postlude
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr host_theme_update_preserves_cursor
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr host_terminal_theme_restore_probe
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr restore_host_terminal_theme
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr render_ansi::tests
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr app_theme_
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr client_input_events_roundtrip
 
       - name: Build release executable
+        working-directory: source
         run: cargo build --release --locked --target ${{ env.WINDOWS_TARGET }}
 
-      - name: Package release assets
+      - name: Verify system ConPTY fallback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr.exe"
+          .\source\scripts\windows_smoke_conpty_path.ps1 `
+            -ExePath $exe `
+            -Session "nightly-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+
+      - name: Package and validate release
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $artifactRoot = Join-Path $PWD "artifact"
-          $package = Join-Path $artifactRoot $env:ARTIFACT_NAME
-          $zip = Join-Path $artifactRoot "$($env:ARTIFACT_NAME).zip"
-          $conptyPackage = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $stage = Join-Path $env:RUNNER_TEMP $env:ARTIFACT_NAME
+          $archive = Join-Path $artifactRoot "$($env:ARTIFACT_NAME).zip"
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $exe = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr.exe"
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-          .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe "target\${{ env.WINDOWS_TARGET }}\release\herdr.exe" `
-            -PackagePath $conptyPackage `
-            -StageDir $package `
-            -OutputPath $zip
-          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$zipHash  $([IO.Path]::GetFileName($zip))" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
 
-      - name: Smoke-test packaged release executable
-        shell: pwsh
-        run: |
-          $package = Join-Path $PWD "artifact\$env:ARTIFACT_NAME"
-          $version = & (Join-Path $package "herdr.exe") --version
-          $expectedVersion = "^herdr [0-9]+\.[0-9]+\.[0-9]+-nightly\.$([regex]::Escape($env:SOURCE_SHA))$"
-          if ([string] $version -cnotmatch $expectedVersion) {
-            throw "Nightly build identity missing from packaged executable: $version"
+          $version = & $exe --version
+          $expected = "^herdr [0-9]+\.[0-9]+\.[0-9]+-nightly\.$([regex]::Escape($env:HERDR_BUILD_ID))$"
+          if ($LASTEXITCODE -ne 0 -or [string] $version -cnotmatch $expected) {
+            throw "nightly executable identity mismatch: $version"
           }
-          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
-            -ExePath (Join-Path $package "herdr.exe") `
-            -Session "nightly-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
-            -ExpectedConsoleHostPath (Join-Path $package "conpty\x64\OpenConsole.exe")
 
-      - name: Test packaged installer
-        shell: pwsh
-        run: |
+          .\source\scripts\package_windows_conpty.ps1 `
+            -HerdrExe $exe `
+            -PackagePath $package `
+            -StageDir $stage `
+            -OutputPath $archive
+          .\source\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath (Join-Path $stage "herdr.exe") `
+            -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\scripts\windows_install_conpty_package_test.ps1 `
-            -ArchivePath "artifact\$env:ARTIFACT_NAME.zip"
+            .\source\scripts\windows_install_conpty_package_test.ps1 `
+            -ArchivePath $archive
           if ($LASTEXITCODE -ne 0) {
             throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
           }
 
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  $($env:ARTIFACT_NAME).zip`n"
+          [IO.File]::WriteAllText("$archive.sha256", $checksum, [Text.UTF8Encoding]::new($false))
+          Copy-Item -LiteralPath control\patches\delta\series -Destination (Join-Path $artifactRoot "PATCH_SERIES.txt")
+
       - name: Upload tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: herdr-win-nightly-${{ github.run_id }}
           path: |
             artifact/${{ env.ARTIFACT_NAME }}.zip
             artifact/${{ env.ARTIFACT_NAME }}.zip.sha256
+            artifact/PATCH_SERIES.txt
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
           compression-level: 0
+          overwrite: true
 
-  release:
-    name: Publish permanent prerelease
-    needs: [sync, prepare, build]
+  publish:
+    name: Publish immutable Windows prerelease
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      SOURCE_SHA: ${{ needs.sync.outputs.sha }}
-      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
-      CONPTY_VERSION: ${{ needs.prepare.outputs.conpty_version }}
-      CONPTY_SHA256: ${{ needs.prepare.outputs.conpty_sha256 }}
+      UPSTREAM_SHA: ${{ needs.build.outputs.upstream_sha }}
+      CONTROL_SHA: ${{ needs.build.outputs.control_sha }}
+      BUILD_ID: ${{ needs.build.outputs.build_id }}
     steps:
       - name: Download tested package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: herdr-win-nightly-${{ github.run_id }}
           path: release-assets
 
-      - name: Create or verify commit-specific prerelease
+      - name: Verify and publish prerelease
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          short_sha="${SOURCE_SHA:0:12}"
-          tag="windows-nightly-${short_sha}-conpty-${CONPTY_VERSION}"
-          date_utc="$(date -u +%Y-%m-%d)"
-          title="Herdr Windows nightly ${date_utc} (${short_sha}, ConPTY ${CONPTY_VERSION})"
-          zip="release-assets/${ARTIFACT_NAME}.zip"
+          cd release-assets
+          zip="${ARTIFACT_NAME}.zip"
           checksum="${zip}.sha256"
-
-          test -f "$zip"
-          test -f "$checksum"
-          (cd release-assets && sha256sum --check "$(basename "$checksum")")
+          sha256sum --check "$checksum"
           zip_digest="sha256:$(sha256sum "$zip" | awk '{print $1}')"
           checksum_digest="sha256:$(sha256sum "$checksum" | awk '{print $1}')"
 
-          ownership_marker="Workflow owner: ${GITHUB_REPOSITORY} windows-nightly/v1"
-          workflow_line="Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          workflow_placeholder="Workflow run: <run>"
-          printf -v notes '%s\n\n%s\n%s\n%s\n%s\n%s\n\n%s\n\n%s' \
-            "Automated Windows prerelease." \
-            "Fork commit: ${SOURCE_SHA}" \
-            "Upstream commit included: ${UPSTREAM_SHA}" \
-            "Microsoft ConPTY package: ${CONPTY_VERSION}" \
-            "Microsoft ConPTY package SHA-256: ${CONPTY_SHA256}" \
-            "$workflow_line" \
-            "The ZIP contains herdr.exe, the pinned conpty/ runtime and marker, and Microsoft license notices. The executable falls back to system ConPTY when no bundled runtime is present." \
-            "$ownership_marker"
-          printf -v expected_owned_notes '%s\n\n%s\n%s\n%s\n%s\n%s\n\n%s\n\n%s' \
-            "Automated Windows prerelease." \
-            "Fork commit: ${SOURCE_SHA}" \
-            "Upstream commit included: ${UPSTREAM_SHA}" \
-            "Microsoft ConPTY package: ${CONPTY_VERSION}" \
-            "Microsoft ConPTY package SHA-256: ${CONPTY_SHA256}" \
-            "$workflow_placeholder" \
-            "The ZIP contains herdr.exe, the pinned conpty/ runtime and marker, and Microsoft license notices. The executable falls back to system ConPTY when no bundled runtime is present." \
-            "$ownership_marker"
+          tag="windows-nightly-${UPSTREAM_SHA:0:12}-${CONTROL_SHA:0:12}"
 
-          encoded_tag="$(jq -rn --arg value "$tag" '$value | @uri')"
-
-          get_exact_tag_sha() {
-            local refs_json
-            local exact_count
-            local resolved_sha
-
-            refs_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${encoded_tag}")" || return 2
-            exact_count="$(jq --arg ref "refs/tags/${tag}" '[.[] | select(.ref == $ref)] | length' <<<"$refs_json")"
-            if [[ "$exact_count" == "0" ]]; then
-              printf ''
-              return
-            fi
-            if [[ "$exact_count" != "1" ]]; then
-              echo "Expected at most one exact Git ref for ${tag}, found ${exact_count}." >&2
-              return 2
-            fi
-            resolved_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${encoded_tag}" --jq .sha)" || return 2
-            printf '%s' "$resolved_sha"
-          }
-
-          assert_existing_tag_matches_source() {
+          verify_tag_target() {
             local tag_sha
-            tag_sha="$(get_exact_tag_sha)"
-            if [[ -n "$tag_sha" && "$tag_sha" != "$SOURCE_SHA" ]]; then
-              echo "Existing tag ${tag} points to ${tag_sha}, expected ${SOURCE_SHA}." >&2
+            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            if [[ "$tag_sha" != "$CONTROL_SHA" ]]; then
+              echo "Tag ${tag} points to ${tag_sha}, expected ${CONTROL_SHA}." >&2
               exit 1
             fi
           }
 
-          assert_source_tag() {
-            local tag_sha
-            tag_sha="$(get_exact_tag_sha)"
-            if [[ -z "$tag_sha" ]]; then
-              echo "Required source tag ${tag} does not exist." >&2
-              exit 1
+          ensure_tag_target() {
+            # Create the lightweight tag first so release creation never decides
+            # its target. A pre-existing tag returns an error and is verified below.
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              --field ref="refs/tags/${tag}" \
+              --field sha="$CONTROL_SHA" >/dev/null 2>&1; then
+              :
             fi
-            if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
-              echo "Tag ${tag} points to ${tag_sha}, expected ${SOURCE_SHA}." >&2
-              exit 1
-            fi
+            verify_tag_target
           }
 
-          ensure_source_tag() {
-            local tag_sha
-            local create_error
-
-            tag_sha="$(get_exact_tag_sha)"
-            if [[ -z "$tag_sha" ]]; then
-              if ! create_error="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-                --field ref="refs/tags/${tag}" \
-                --field sha="$SOURCE_SHA" 2>&1)"; then
-                tag_sha="$(get_exact_tag_sha)"
-                if [[ -z "$tag_sha" ]]; then
-                  printf '%s\n' "$create_error" >&2
-                  echo "Could not create exact source tag ${tag}." >&2
-                  exit 1
-                fi
-              else
-                tag_sha="$(get_exact_tag_sha)"
-              fi
-            fi
-            if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
-              echo "Tag ${tag} points to ${tag_sha}, expected ${SOURCE_SHA}." >&2
-              exit 1
-            fi
-          }
-
-          fetch_exact_release() {
-            local pages_json
-            local matches_json
-            local match_count
-            local attempt
-
-            for attempt in 1 2 3 4 5; do
-              pages_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq 'add')" || return 2
-              matches_json="$(jq -c --arg tag "$tag" '[.[] | select(.tag_name == $tag)]' <<<"$pages_json")"
-              match_count="$(jq 'length' <<<"$matches_json")"
-              if [[ "$match_count" == "1" ]]; then
-                jq -c '.[0]' <<<"$matches_json"
-                return
-              fi
-              if [[ "$match_count" -gt 1 ]]; then
-                echo "Expected one release for ${tag}, found ${match_count}." >&2
-                return 2
-              fi
-              if [[ "$attempt" != "5" ]]; then
-                sleep 2
-              fi
-            done
-            echo "Release ${tag} was not visible after five attempts." >&2
-            return 2
-          }
-
-          verify_release_assets() {
+          verify_asset() {
             local release_json="$1"
-            local name
-            local expected_digest
-            local matching_count
+            local name="$2"
+            local expected_digest="$3"
+            local count
             local state
             local digest
-
-            if [[ "$(jq '.assets | length' <<<"$release_json")" != "2" ]]; then
-              echo "Release ${tag} must contain exactly two assets." >&2
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
+            state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<<"$release_json")"
+            digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            if [[ "$count" != "1" || "$state" != "uploaded" || "$digest" != "$expected_digest" ]]; then
+              echo "Release asset ${name} is missing, duplicated, incomplete, or has the wrong digest." >&2
               exit 1
             fi
-            for name in "$(basename "$zip")" "$(basename "$checksum")"; do
-              if [[ "$name" == "$(basename "$zip")" ]]; then
-                expected_digest="$zip_digest"
-              else
-                expected_digest="$checksum_digest"
-              fi
-              matching_count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
-              state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<<"$release_json")"
-              digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-              if [[ "$matching_count" != "1" || "$state" != "uploaded" || "$digest" != "$expected_digest" ]]; then
-                echo "Release asset ${name} is missing, duplicated, incomplete, or differs from this tested build." >&2
-                exit 1
-              fi
-            done
-          }
-
-          verify_release_notes() {
-            local release_json="$1"
-            local body
-            local normalized_body
-
-            body="$(jq -r .body <<<"$release_json")"
-            normalized_body="$(sed -E "s#^Workflow run: https://github\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+\$#${workflow_placeholder}#" <<<"$body")"
-            if [[ "$normalized_body" != "$expected_owned_notes" ]]; then
-              echo "Release ${tag} does not match the complete workflow-owned note template." >&2
-              exit 1
-            fi
-          }
-
-          validate_repairable_draft() {
-            local release_json="$1"
-            local zip_name
-            local checksum_name
-            local unexpected_count
-            local invalid_uploader_count
-            local release_name
-            local title_prefix
-            local title_suffix
-            local title_date
-            local name
-            local matching_count
-            local state
-            local digest
-
-            zip_name="$(basename "$zip")"
-            checksum_name="$(basename "$checksum")"
-            if [[ "$(jq -r .tag_name <<<"$release_json")" != "$tag" || \
-                  "$(jq -r .draft <<<"$release_json")" != "true" || \
-                  "$(jq -r .prerelease <<<"$release_json")" != "true" || \
-                  "$(jq -r .target_commitish <<<"$release_json")" != "$SOURCE_SHA" || \
-                  "$(jq -r .author.login <<<"$release_json")" != "github-actions[bot]" ]]; then
-              echo "Existing release ${tag} is not a repairable workflow draft." >&2
-              exit 1
-            fi
-            verify_release_notes "$release_json"
-            release_name="$(jq -r .name <<<"$release_json")"
-            title_prefix="Herdr Windows nightly "
-            title_suffix=" (${short_sha}, ConPTY ${CONPTY_VERSION})"
-            if [[ "$release_name" != "$title_prefix"* || "$release_name" != *"$title_suffix" ]]; then
-              echo "Draft ${tag} does not use the workflow-owned title template." >&2
-              exit 1
-            fi
-            title_date="${release_name#"$title_prefix"}"
-            title_date="${title_date%"$title_suffix"}"
-            if [[ ! "$title_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-              echo "Draft ${tag} has an invalid workflow title date." >&2
-              exit 1
-            fi
-            unexpected_count="$(jq --arg zip "$zip_name" --arg checksum "$checksum_name" '[.assets[] | select(.name != $zip and .name != $checksum)] | length' <<<"$release_json")"
-            if [[ "$unexpected_count" != "0" ]]; then
-              echo "Draft ${tag} contains unexpected assets; refusing automated replacement." >&2
-              exit 1
-            fi
-            invalid_uploader_count="$(jq '[.assets[] | select(.uploader.login != "github-actions[bot]")] | length' <<<"$release_json")"
-            if [[ "$invalid_uploader_count" != "0" ]]; then
-              echo "Draft ${tag} contains an asset not uploaded by github-actions[bot]." >&2
-              exit 1
-            fi
-
-            for name in "$zip_name" "$checksum_name"; do
-              matching_count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
-              if [[ "$matching_count" -gt 1 ]]; then
-                echo "Draft ${tag} has duplicate assets named ${name}." >&2
-                exit 1
-              fi
-              if [[ "$matching_count" == "1" ]]; then
-                state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<<"$release_json")"
-                digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-                if [[ "$state" == "uploaded" && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                  continue
-                fi
-                if [[ "$state" == "starter" && ( -z "$digest" || "$digest" == "null" ) ]]; then
-                  continue
-                fi
-                echo "Draft asset ${name} has an unsafe state or digest." >&2
-                exit 1
-              fi
-            done
-          }
-
-          draft_requires_replacement() {
-            local release_json="$1"
-            local name
-            local expected_digest
-            local state
-            local digest
-
-            for name in "$(basename "$zip")" "$(basename "$checksum")"; do
-              if [[ "$name" == "$(basename "$zip")" ]]; then
-                expected_digest="$zip_digest"
-              else
-                expected_digest="$checksum_digest"
-              fi
-              state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state // empty' <<<"$release_json")"
-              digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest // empty' <<<"$release_json")"
-              if [[ "$state" == "uploaded" && "$digest" != "$expected_digest" ]]; then
-                printf 'true'
-                return
-              fi
-            done
-            printf 'false'
-          }
-
-          wait_for_release_absent() {
-            local pages_json
-            local match_count
-            local attempt
-
-            for attempt in 1 2 3 4 5; do
-              pages_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq 'add')"
-              match_count="$(jq --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | length' <<<"$pages_json")"
-              if [[ "$match_count" == "0" ]]; then
-                return
-              fi
-              if [[ "$match_count" -gt 1 ]]; then
-                echo "Multiple releases remain for ${tag} during cleanup." >&2
-                exit 1
-              fi
-              if [[ "$attempt" != "5" ]]; then
-                sleep 2
-              fi
-            done
-            echo "Deleted draft ${tag} remained visible after five attempts." >&2
-            exit 1
-          }
-
-          wait_for_tag_absent() {
-            local tag_sha
-            local attempt
-
-            for attempt in 1 2 3 4 5; do
-              tag_sha="$(get_exact_tag_sha)"
-              if [[ -z "$tag_sha" ]]; then
-                return
-              fi
-              if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
-                echo "Tag ${tag} changed to ${tag_sha} during draft cleanup." >&2
-                exit 1
-              fi
-              if [[ "$attempt" != "5" ]]; then
-                sleep 2
-              fi
-            done
-            echo "Deleted source tag ${tag} remained visible after five attempts." >&2
-            exit 1
-          }
-
-          verify_draft_ready() {
-            local release_json
-            local expected_count
-            local uploaded_count
-            local unexpected_count
-            local attempt
-
-            for attempt in 1 2 3 4 5; do
-              release_json="$(fetch_exact_release)"
-              unexpected_count="$(jq --arg zip "$(basename "$zip")" --arg checksum "$(basename "$checksum")" '[.assets[] | select(.name != $zip and .name != $checksum)] | length' <<<"$release_json")"
-              if [[ "$unexpected_count" != "0" ]]; then
-                echo "Draft ${tag} contains unexpected assets." >&2
-                exit 1
-              fi
-              expected_count="$(jq --arg zip "$(basename "$zip")" --arg checksum "$(basename "$checksum")" '[.assets[] | select(.name == $zip or .name == $checksum)] | length' <<<"$release_json")"
-              uploaded_count="$(jq --arg zip "$(basename "$zip")" --arg checksum "$(basename "$checksum")" --arg zip_digest "$zip_digest" --arg checksum_digest "$checksum_digest" '[.assets[] | select((.name == $zip and .state == "uploaded" and .digest == $zip_digest) or (.name == $checksum and .state == "uploaded" and .digest == $checksum_digest))] | length' <<<"$release_json")"
-              if [[ "$(jq -r .draft <<<"$release_json")" == "true" && \
-                    "$(jq -r .prerelease <<<"$release_json")" == "true" && \
-                    "$(jq -r .target_commitish <<<"$release_json")" == "$SOURCE_SHA" && \
-                    "$(jq -r .name <<<"$release_json")" == "$title" && \
-                    "$expected_count" == "2" && "$uploaded_count" == "2" ]]; then
-                verify_release_assets "$release_json"
-                verify_release_notes "$release_json"
-                return
-              fi
-              if [[ "$expected_count" == "2" && "$(jq '[.assets[] | select(.state == "uploaded")] | length' <<<"$release_json")" == "2" && "$uploaded_count" != "2" ]]; then
-                echo "Draft ${tag} has uploaded assets that differ from this tested build." >&2
-                exit 1
-              fi
-              if [[ "$attempt" != "5" ]]; then
-                sleep 2
-              fi
-            done
-            echo "Draft ${tag} did not reach a fresh ready state after five attempts." >&2
-            exit 1
           }
 
           verify_release() {
-            local release_json
-            local attempt
-            assert_source_tag
-            for attempt in 1 2 3 4 5; do
-              release_json="$(fetch_exact_release)"
-              if [[ "$(jq -r .draft <<<"$release_json")" == "false" && \
-                    "$(jq -r .prerelease <<<"$release_json")" == "true" ]]; then
-                break
-              fi
-              if [[ "$attempt" != "5" ]]; then
-                sleep 2
-              fi
-            done
-            if [[ "$(jq -r .draft <<<"$release_json")" != "false" || "$(jq -r .prerelease <<<"$release_json")" != "true" ]]; then
-              echo "Release ${tag} did not reach a fresh published prerelease state." >&2
+            local release_json="$1"
+            if [[ "$(jq -r .draft <<<"$release_json")" != "false" || \
+                  "$(jq -r .prerelease <<<"$release_json")" != "true" || \
+                  "$(jq '.assets | length' <<<"$release_json")" != "2" ]]; then
+              echo "Release ${tag} is not the expected published prerelease." >&2
               exit 1
             fi
-            verify_release_assets "$release_json"
-            verify_release_notes "$release_json"
+            verify_asset "$release_json" "$zip" "$zip_digest"
+            verify_asset "$release_json" "$checksum" "$checksum_digest"
           }
 
-          verify_or_upload_draft_asset() {
-            local path="$1"
-            local expected_digest="$2"
-            local name
-            local release_json
-            local matching_assets
-            local state
-            local existing_digest
-            local asset_id
-
-            name="$(basename "$path")"
-            release_json="$(fetch_exact_release)"
-            matching_assets="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
-            if [[ "$matching_assets" == "0" ]]; then
-              gh release upload "$tag" "$path" --repo "$GITHUB_REPOSITORY"
-              return
-            fi
-            if [[ "$matching_assets" != "1" ]]; then
-              echo "Draft ${tag} has duplicate assets named ${name}." >&2
-              exit 1
-            fi
-
-            state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<<"$release_json")"
-            existing_digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-            if [[ "$state" == "uploaded" && "$existing_digest" == "$expected_digest" ]]; then
-              return
-            fi
-            if [[ "$state" == "starter" && ( -z "$existing_digest" || "$existing_digest" == "null" ) ]]; then
-              asset_id="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' <<<"$release_json")"
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
-              gh release upload "$tag" "$path" --repo "$GITHUB_REPOSITORY"
-              return
-            fi
-            echo "Draft asset ${name} differs from this tested build; refusing to overwrite it." >&2
-            exit 1
-          }
-
-          releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq 'add')"
-          matching_releases="$(jq -c --arg tag "$tag" '[.[] | select(.tag_name == $tag)]' <<<"$releases_json")"
-          matching_release_count="$(jq 'length' <<<"$matching_releases")"
-          if [[ "$matching_release_count" -gt 1 ]]; then
-            echo "Multiple releases exist for tag ${tag}." >&2
-            exit 1
+          if release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null)"; then
+            verify_tag_target
+            verify_release "$release_json"
+            echo "Verified existing immutable release ${tag}."
+            exit 0
           fi
 
-          assert_existing_tag_matches_source
-          create_draft="false"
-          if [[ "$matching_release_count" == "1" ]]; then
-            existing_release="$(jq -c '.[0]' <<<"$matching_releases")"
-            release_draft="$(jq -r .draft <<<"$existing_release")"
-            if [[ "$release_draft" == "true" ]]; then
-              validate_repairable_draft "$existing_release"
-              if [[ "$(draft_requires_replacement "$existing_release")" == "true" ]]; then
-                release_id="$(jq -r .id <<<"$existing_release")"
-                if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
-                  echo "Draft ${tag} has an invalid release ID." >&2
-                  exit 1
-                fi
-                existing_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")"
-                if [[ "$(jq -r .id <<<"$existing_release")" != "$release_id" ]]; then
-                  echo "Draft ${tag} changed identity before cleanup." >&2
-                  exit 1
-                fi
-                validate_repairable_draft "$existing_release"
-                if [[ "$(draft_requires_replacement "$existing_release")" == "true" ]]; then
-                  echo "Replacing exact workflow-owned draft ${tag}; uploaded asset bytes differ from this tested build."
-                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
-                  wait_for_release_absent
-                  tag_sha="$(get_exact_tag_sha)"
-                  if [[ -n "$tag_sha" ]]; then
-                    if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
-                      echo "Tag ${tag} changed to ${tag_sha} before cleanup." >&2
-                      exit 1
-                    fi
-                    gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${encoded_tag}"
-                    wait_for_tag_absent
-                  fi
-                  create_draft="true"
-                else
-                  verify_or_upload_draft_asset "$zip" "$zip_digest"
-                  verify_or_upload_draft_asset "$checksum" "$checksum_digest"
-                  gh release edit "$tag" \
-                    --title "$title" \
-                    --notes "$notes" \
-                    --prerelease \
-                    --latest=false \
-                    --repo "$GITHUB_REPOSITORY"
-                  ensure_source_tag
-                  verify_draft_ready
-                  assert_source_tag
-                  gh release edit "$tag" --draft=false --prerelease --latest=false --repo "$GITHUB_REPOSITORY"
-                fi
-              else
-                verify_or_upload_draft_asset "$zip" "$zip_digest"
-                verify_or_upload_draft_asset "$checksum" "$checksum_digest"
-                gh release edit "$tag" \
-                  --title "$title" \
-                  --notes "$notes" \
-                  --prerelease \
-                  --latest=false \
-                  --repo "$GITHUB_REPOSITORY"
-                ensure_source_tag
-                verify_draft_ready
-                assert_source_tag
-                gh release edit "$tag" --draft=false --prerelease --latest=false --repo "$GITHUB_REPOSITORY"
-              fi
-            fi
-          else
-            create_draft="true"
-          fi
+          ensure_tag_target
 
-          if [[ "$create_draft" == "true" ]]; then
-            gh release create "$tag" \
-              --target "$SOURCE_SHA" \
-              --title "$title" \
-              --notes "$notes" \
-              --draft \
-              --prerelease \
-              --latest=false \
-              --repo "$GITHUB_REPOSITORY"
-            verify_or_upload_draft_asset "$zip" "$zip_digest"
-            verify_or_upload_draft_asset "$checksum" "$checksum_digest"
-            ensure_source_tag
-            verify_draft_ready
-            assert_source_tag
-            gh release edit "$tag" --draft=false --prerelease --latest=false --repo "$GITHUB_REPOSITORY"
-          fi
-          verify_release
-
-          release_url="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
-
+          date_utc="$(date -u +%Y-%m-%d)"
           {
-            echo "### Published or verified prerelease"
-            echo "- Tag: \`${tag}\`"
-            echo "- Source: \`${SOURCE_SHA}\`"
-            echo "- ConPTY: \`${CONPTY_VERSION}\`"
-            echo "- Release: ${release_url}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "Unofficial herdr-win Windows nightly built from upstream Herdr plus the maintained Windows delta."
+            echo
+            echo "- Upstream master: \`${UPSTREAM_SHA}\`"
+            echo "- herdr-win control revision: \`${CONTROL_SHA}\`"
+            echo "- Build identity: \`${BUILD_ID}\`"
+            echo
+            echo "Applied patches:"
+            while IFS= read -r patch; do
+              patch="${patch%$'\r'}"
+              [[ -z "$patch" || "$patch" == \#* ]] && continue
+              printf -- '- `%s`\n' "$patch"
+            done < PATCH_SERIES.txt
+            echo
+            echo "The installed executable and command remain \`herdr\`. This is a drop-in Windows build, not an official upstream release."
+          } > RELEASE_NOTES.md
+
+          gh release create "$tag" \
+            "${ARTIFACT_NAME}.zip" \
+            "${ARTIFACT_NAME}.zip.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$CONTROL_SHA" \
+            --title "herdr-win nightly ${date_utc}" \
+            --notes-file RELEASE_NOTES.md \
+            --prerelease \
+            --latest=false
+
+          verify_tag_target
+          release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
+          verify_release "$release_json"

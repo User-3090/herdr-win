@@ -249,6 +249,39 @@
         "GitHub Actions run 29894851735 validated the focused fix on Windows."
       ],
       "remove_when": "Upstream Windows MediaPlayer playback binds literal spaced and Unicode paths without relying on positional arguments following powershell.exe -Command."
+    },
+    {
+      "id": "controlled-app-local-conpty",
+      "title": "Controlled app-local ConPTY",
+      "summary": "Loads a complete app-local ConPTY bundle only from the executable directory, never probes PATH, and otherwise falls back to system ConPTY.",
+      "upstream_base": "ef85fa0c7ebb48bb59fe7593af5a67f3e02ff3d4",
+      "mailboxes": [
+        {
+          "file": "0008-controlled-app-local-conpty.patch",
+          "commit": "f359481fd9460c3d73395ce1678582317554afc7"
+        }
+      ],
+      "upstream_refs": [
+        "https://github.com/ogulcancelik/herdr/issues/761",
+        "https://github.com/ogulcancelik/herdr/issues/1528"
+      ],
+      "reference_notes": [
+        "Issue #761's unsafe bare-DLL search is already fixed upstream; this patch adds an explicit complete-bundle opt-in without restoring PATH probing. Issue #1528 is contextual Windows ConPTY/input validation from the source work."
+      ],
+      "touched_paths": [
+        "scripts/test_vendor_portable_pty.py",
+        "scripts/windows_smoke_conpty_path.ps1",
+        "vendor/patches/portable-pty/0001-controlled-app-local-conpty.patch",
+        "vendor/patches/portable-pty/0001-force-system-conpty.patch",
+        "vendor/portable-pty.patches.md",
+        "vendor/portable-pty/src/win/psuedocon.rs"
+      ],
+      "verification": [
+        "python3 -m unittest scripts.test_vendor_portable_pty",
+        "GitHub Actions Windows app-local ConPTY smoke test must observe the bundled x64/OpenConsole.exe process.",
+        "GitHub Actions Windows system fallback smoke test must pass with no app-local bundle."
+      ],
+      "remove_when": "Upstream portable-pty supports an absolute executable-local ConPTY DLL with complete architecture-specific OpenConsole validation, no PATH probing, and system fallback when no bundle is present."
     }
   ]
 }

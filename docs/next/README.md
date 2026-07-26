@@ -1,108 +1,119 @@
-# herdr
+# herdr-win
 
-<!-- BEGIN USER-3090 FORK STATUS -->
-## custom fork status and maintained fixes
+**An unofficial, upstream-first Windows build of [Herdr](https://github.com/ogulcancelik/herdr).**
 
-This is a **custom fork** of
-[`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr), focused on a
-reliable Windows build while continuing to merge upstream work.
+[Windows nightlies](https://github.com/User-3090/herdr-win/releases) ·
+[upstream Herdr](https://github.com/ogulcancelik/herdr) ·
+[maintained delta](patches/delta/README.md)
 
-Maintained logical fixes, at a high level:
+`herdr-win` keeps a small set of Windows-focused changes replayable on top of
+the latest upstream `master`. It is meant to be a friendly drop-in build for
+people using Herdr natively on Windows, not a separate product or a competing
+upstream.
 
-- bounded Windows host color and appearance transport;
-- visible software cursors plus host and child cursor-color preservation;
-- automatic host-appearance defaults for otherwise unconfigured themes;
-- native Windows desktop notifications and reliable MediaPlayer paths.
+## The repository is `herdr-win`; the program is `herdr`
 
-The Windows experimental/nightly test, packaging, upstream-sync, and release
-workflows are **fork-only CI**, not upstream product fixes or an indication of
-upstream Windows release support.
+Only the fork's repository and release-channel identity change. Runtime-facing
+names stay compatible with upstream:
 
-See the maintained [upstream patch archive](patches/upstream/README.md), use
-the [fork releases](https://github.com/User-3090/herdr/releases) for fork
-builds, and consult the [upstream project](https://github.com/ogulcancelik/herdr)
-for upstream status. **Maintainers must update this section whenever the
-`index.json` active entries change.**
+| Surface | Name |
+| --- | --- |
+| Repository and nightly channel | `herdr-win` |
+| Executable and command | `herdr.exe` / `herdr` |
+| Cargo package | `herdr` |
+| Configuration, state, sessions, sockets, and protocol | `herdr` |
 
-<!-- END USER-3090 FORK STATUS -->
+You can switch between an upstream Herdr build and a herdr-win build without
+migrating configuration or learning a second command. Stop running sessions
+before replacing the executable.
 
-<p align="center">
-  <img src="assets/logo.png" alt="herdr" width="100" />
-</p>
+## Install a Windows nightly
 
-<p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="https://herdr.dev/docs/quick-start/">quick start</a> · <a href="https://herdr.dev/docs/">docs</a> · <a href="#sponsors">sponsors</a>
-</p>
+Nightlies currently target Windows x86_64. From the newest
+[herdr-win prerelease](https://github.com/User-3090/herdr-win/releases), download
+both:
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-666666?labelColor=333333" alt="Apache 2.0 license" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/releases"><img src="https://img.shields.io/github/downloads/ogulcancelik/herdr/total?labelColor=333333&color=666666" alt="total GitHub release downloads" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/stargazers"><img src="https://img.shields.io/github/stars/ogulcancelik/herdr?labelColor=333333&color=666666&logo=github" alt="GitHub stars" /></a>
-  <a href="https://github.com/ogulcancelik/herdr/releases/latest"><img src="https://img.shields.io/github/v/release/ogulcancelik/herdr?label=release&labelColor=333333&color=666666" alt="latest stable release" /></a>
-  <a href="https://formulae.brew.sh/formula/herdr"><img src="https://img.shields.io/homebrew/v/herdr?label=homebrew&labelColor=333333&color=666666" alt="Homebrew version" /></a>
-  <a href="https://x.com/herdrdev"><img src="https://img.shields.io/badge/follow-%40herdrdev-000000?logo=x&logoColor=white" alt="follow @herdrdev on X" /></a>
-</p>
+- `herdr-windows-x86_64.zip`
+- `herdr-windows-x86_64.zip.sha256`
 
----
+Verify the archive in PowerShell:
 
-https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
-
-**agent multiplexer that lives in your terminal.**
-
-- **every agent at a glance** — blocked, working, done. real terminal views, not a wrapped interpretation.
-- **detach, agents keep running** — reattach from any terminal, or over ssh. sessions survive restarts.
-- **agents can use herdr too** — a pure socket api: agents spawn panes, read output, wait on each other. [agent skill →](https://herdr.dev/docs/agent-skill/)
-- **keyboard and mouse, both first-class** — tmux-style prefix keys *and* click, drag, split. pick per moment, not per tool.
-- **plugins** — extend panes and workflows. [browse the marketplace →](https://herdr.dev/plugins/)
-- **one rust binary, no electron** — runs in whatever terminal you already use.
-
----
-
-## install
-
-```bash
-curl -fsSL https://herdr.dev/install.sh | sh
+```powershell
+$archive = (Resolve-Path .\herdr-windows-x86_64.zip).Path
+$checksum = (Resolve-Path .\herdr-windows-x86_64.zip.sha256).Path
+$expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+$actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "herdr-win checksum mismatch" }
 ```
 
-or `brew install herdr` · `mise use -g herdr` · windows beta: `powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` · [binaries](https://github.com/ogulcancelik/herdr/releases)
+Extract the ZIP into a new, empty directory and keep the complete directory
+together. It contains `herdr.exe`, the pinned Microsoft ConPTY runtime, its
+integrity marker, and third-party notices. Then run `herdr.exe` directly or add
+that directory to your user `PATH`.
 
-then start it where the work lives:
+The fork executable is not code-signed, so Windows may show a SmartScreen
+warning. The bundled Microsoft ConPTY binaries are signature-checked during
+packaging.
 
-```bash
-herdr
-```
+Fork nightlies are manual installs. The installer at `herdr.dev` and
+`herdr update` follow upstream release channels; they do not update to
+herdr-win nightlies.
 
-run your agents, split panes, walk away. `ctrl+b q` detaches, `herdr` reattaches. [quick start →](https://herdr.dev/docs/quick-start/)
+## What the maintained delta covers
 
-## docs
+The canonical queue is intentionally small and grouped by responsibility:
 
-everything lives at [herdr.dev/docs](https://herdr.dev/docs/): [quick start](https://herdr.dev/docs/quick-start/) · [concepts](https://herdr.dev/docs/concepts/) · [supported agents](https://herdr.dev/docs/agents/) · [keyboard](https://herdr.dev/docs/keyboard/) · [configuration](https://herdr.dev/docs/configuration/) · [session state](https://herdr.dev/docs/session-state/) · [remote](https://herdr.dev/docs/persistence-remote/) · [integrations](https://herdr.dev/docs/integrations/) · [plugins](https://herdr.dev/docs/plugins/) · [socket api](https://herdr.dev/docs/socket-api/)
+1. Windows terminal appearance, input, cursor, and color behavior.
+2. Native Windows notifications and reliable audio playback.
+3. Windows remote attach plus bounded remote clipboard-image transport.
+4. Deterministic ConPTY packaging and hardened PowerShell installation checks.
 
-## sponsors
+Because this channel publishes only a Windows executable, it cannot
+automatically install the matching nightly binary on a Linux or macOS remote.
+Use a pre-provisioned matching target or provide a matching build through
+`HERDR_REMOTE_BINARY` when attaching from a nightly.
 
-herdr is built full-time, in the open. sponsoring directly funds development, stability, and the path to a real agent runtime.
+See [`patches/delta/README.md`](patches/delta/README.md) for the exact queue and
+refresh policy. [`patches/upstream/`](patches/upstream/README.md) is a frozen
+legacy archive retained so existing patch links continue to work.
 
-### gold
+## How nightlies work
 
-<a href="https://terminaltrove.com/"><img src="assets/sponsors/terminal-trove.png" alt="Terminal Trove" width="200" /></a>
+The scheduled workflow:
 
-[**→ become a sponsor**](https://github.com/sponsors/ogulcancelik) · enterprise / partnership: hey@herdr.dev · see [SPONSORS.md](./SPONSORS.md) for tiers. thank you 🐑
+1. checks out the current upstream Herdr `master`;
+2. applies `patches/delta/series` without resolving conflicts automatically;
+3. runs Windows formatting, lint, focused tests, ConPTY, installer, and runtime
+   probes;
+4. publishes an immutable prerelease identified by both the upstream and
+   herdr-win control revisions.
 
-## agent instructions
+If a patch no longer applies or a gate fails, no release is published. Ordinary
+pushes do not build or publish binaries. For release purposes this repository is
+the control plane; the nightly always builds a fresh upstream checkout rather
+than treating a long-lived integration branch as release source.
 
-if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
+## Documentation and support
 
-## development
+Use the [upstream documentation](https://herdr.dev/docs/) for the `herdr` CLI,
+configuration, agent integrations, and general behavior. Fork-specific behavior
+and limitations are documented here and in the maintained patch queue.
 
-```bash
-git clone https://github.com/ogulcancelik/herdr
-cd herdr
-cargo build --release
+When reporting a problem, include the herdr-win release tag, Windows version,
+terminal, shell, and a minimal reproduction. Please reproduce a problem with an
+upstream build before reporting it upstream; fork-only failures belong in this
+repository.
 
-just test        # unit tests
-just check       # formatting, tests, and maintenance checks
-```
+## Contributing
 
-## license
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing the queue or automation.
+AI agents must also follow [`AGENTS.md`](AGENTS.md).
 
-Herdr is licensed under the [Apache License 2.0](LICENSE).
+## Attribution and license
+
+Herdr is created and maintained upstream by
+[Can Çelik](https://github.com/ogulcancelik). Consider
+[sponsoring upstream Herdr](https://github.com/sponsors/ogulcancelik) if the
+project is useful to you.
+
+herdr-win is distributed under the upstream [Apache License 2.0](LICENSE).
