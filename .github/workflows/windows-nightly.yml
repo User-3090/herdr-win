@@ -156,7 +156,7 @@ jobs:
             throw "control website/install.ps1 differs from the replayed release installer"
           }
           $cargoToml = Get-Content -LiteralPath ..\source\Cargo.toml -Raw
-          if ($cargoToml -notmatch '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$') {
+          if ($cargoToml -notmatch '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\r?$') {
             throw "could not read replayed Cargo package version"
           }
           $baseVersion = $Matches[1]
