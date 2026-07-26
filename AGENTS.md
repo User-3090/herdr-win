@@ -58,6 +58,11 @@ not code from a mutable default-branch checkout. It may commit only
 `website/preview.json` and must fail instead of rebasing if release inputs or the
 selected control revision change during a run.
 
+On a same-source rerun, the existing immutable release is canonical because a
+fresh Windows link is not guaranteed to be bit-for-bit identical. Validate and
+download the release assets, derive the manifest digest from that immutable ZIP,
+and never replace or repoint the published release.
+
 ## Product design guardrails
 
 - Keep state separate from runtime and rendering pure.

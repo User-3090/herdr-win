@@ -383,18 +383,30 @@ jobs:
             echo "Removed ${reason} release ${tag}."
           }
 
-          verify_asset() {
+          verify_asset_shape() {
             local release_json="$1"
             local name="$2"
-            local expected_digest="$3"
             local count
             local state
             local digest
             count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' <<<"$release_json")"
             state="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<<"$release_json")"
             digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-            if [[ "$count" != "1" || "$state" != "uploaded" || "$digest" != "$expected_digest" ]]; then
-              echo "Release asset ${name} is missing, duplicated, incomplete, or has the wrong digest." >&2
+            if [[ "$count" != "1" || "$state" != "uploaded" || \
+                  ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Release asset ${name} is missing, duplicated, incomplete, or has no SHA-256 digest." >&2
+              exit 1
+            fi
+          }
+
+          verify_asset_matches() {
+            local release_json="$1"
+            local name="$2"
+            local expected_digest="$3"
+            local digest
+            digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            if [[ "$digest" != "$expected_digest" ]]; then
+              echo "Newly published release asset ${name} does not match the tested package." >&2
               exit 1
             fi
           }
@@ -408,8 +420,8 @@ jobs:
               echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
             fi
-            verify_asset "$release_json" "$zip" "$zip_digest"
-            verify_asset "$release_json" "$checksum" "$checksum_digest"
+            verify_asset_shape "$release_json" "$zip"
+            verify_asset_shape "$release_json" "$checksum"
           }
 
           date_utc="$(date -u +%Y-%m-%d)"
@@ -474,6 +486,8 @@ jobs:
               exit 1
             fi
             verify_release "$release_json"
+            verify_asset_matches "$release_json" "$zip" "$zip_digest"
+            verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
           fi
 
           built_at="$(jq -r .published_at <<<"$release_json")"
@@ -481,8 +495,30 @@ jobs:
             echo "Release ${tag} has no stable publication timestamp." >&2
             exit 1
           fi
+
+          canonical_dir="$RUNNER_TEMP/herdr-win-published-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$canonical_dir"
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$zip" \
+            --pattern "$checksum" \
+            --dir "$canonical_dir"
+          (
+            cd "$canonical_dir"
+            sha256sum --check "$checksum"
+          )
+          published_zip_digest="sha256:$(sha256sum "$canonical_dir/$zip" | awk '{print $1}')"
+          published_checksum_digest="sha256:$(sha256sum "$canonical_dir/$checksum" | awk '{print $1}')"
+          api_zip_digest="$(jq -r --arg name "$zip" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+          api_checksum_digest="$(jq -r --arg name "$checksum" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+          if [[ "$published_zip_digest" != "$api_zip_digest" || \
+                "$published_checksum_digest" != "$api_checksum_digest" ]]; then
+            echo "Downloaded immutable release assets do not match GitHub's recorded digests." >&2
+            exit 1
+          fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
+          echo "zip_sha=${published_zip_digest#sha256:}" >> "$GITHUB_OUTPUT"
 
       - name: Generate preview update manifest
         id: manifest
@@ -490,13 +526,12 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
           BUILT_AT: ${{ steps.release.outputs.built_at }}
+          ZIP_SHA: ${{ steps.release.outputs.zip_sha }}
         run: |
           set -euo pipefail
           zip="${ARTIFACT_NAME}.zip"
-          checksum="${zip}.sha256"
+          zip_sha="$ZIP_SHA"
           cd release-assets
-          sha256sum --check "$checksum"
-          zip_sha="$(sha256sum "$zip" | awk '{print $1}')"
           jq -n --arg sha "$zip_sha" '{"windows-x86_64": $sha}' > preview-sha256.json
 
           generator="$GITHUB_WORKSPACE/release-assets/PREVIEW_GENERATOR.py"
@@ -623,12 +658,6 @@ jobs:
       BUILD_ID: ${{ needs.build.outputs.build_id }}
       BASE_VERSION: ${{ needs.build.outputs.base_version }}
     steps:
-      - name: Download tested package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: herdr-win-nightly-${{ github.run_id }}
-          path: update-check
-
       - name: Confirm updater sees the published build
         shell: pwsh
         run: |
@@ -650,7 +679,19 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-          $archive = (Resolve-Path -LiteralPath "update-check\$($env:ARTIFACT_NAME).zip").Path
+          $asset = $manifest.assets.'windows-x86_64'
+          $releasePrefix = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/"
+          if ($null -eq $asset -or [string] $asset.format -cne "zip" -or
+              [string] $asset.url -notlike "$releasePrefix*" -or
+              [string] $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "published preview manifest has no valid fork Windows asset"
+          }
+          $archive = Join-Path $env:RUNNER_TEMP "$($env:ARTIFACT_NAME).zip"
+          Invoke-WebRequest -Uri ([string] $asset.url) -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne [string] $asset.sha256) {
+            throw "published Windows asset digest does not match the preview manifest"
+          }
           $stage = Join-Path $env:RUNNER_TEMP "herdr-win-update-check"
           Expand-Archive -LiteralPath $archive -DestinationPath $stage
           $env:HERDR_HOME = Join-Path $env:RUNNER_TEMP "herdr-win-update-home"
