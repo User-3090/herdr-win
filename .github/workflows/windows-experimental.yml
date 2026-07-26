@@ -28,22 +28,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve latest signed Microsoft ConPTY package
-        id: conpty
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $package = .\scripts\resolve_latest_windows_conpty.ps1 -IncludePrerelease
-          "CONPTY_VERSION=$($package.Version)" >> $env:GITHUB_ENV
-          "CONPTY_SHA256=$($package.Sha256)" >> $env:GITHUB_ENV
-          @(
-            "### Microsoft ConPTY"
-            "- Version: ``$($package.Version)``"
-            "- SHA-256: ``$($package.Sha256)``"
-            "- Prerelease: ``$($package.IsPrerelease)``"
-          ) >> $env:GITHUB_STEP_SUMMARY
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
         with:
@@ -68,7 +52,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          python -m unittest scripts.test_vendor_portable_pty
+          python -m unittest scripts.test_package_windows_conpty scripts.test_vendor_portable_pty
           cargo fmt --check
           cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
           cargo test --locked --target x86_64-pc-windows-msvc --bin herdr windows_
@@ -92,13 +76,22 @@ jobs:
           $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
           .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 
-      - name: Smoke app-local ConPTY
+      - name: Package and probe app-local ConPTY
         shell: pwsh
         run: |
-          $exeDir = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug"
-          $exe = Join-Path $exeDir "herdr.exe"
-          .\scripts\prepare_windows_conpty.ps1 -Destination $exeDir -Architecture x64 -PackageVersion $env:CONPTY_VERSION -PackageSha256 $env:CONPTY_SHA256
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -ExpectedHostPath (Join-Path $exeDir "x64\OpenConsole.exe") -Session "ci-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $ErrorActionPreference = "Stop"
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-debug"
+          $archive = Join-Path $env:RUNNER_TEMP "herdr-windows-debug.zip"
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe target\x86_64-pc-windows-msvc\debug\herdr.exe `
+            -PackagePath $package `
+            -StageDir $stage `
+            -OutputPath $archive
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath (Join-Path $stage "herdr.exe") `
+            -Session "ci-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
 
       - name: Build release
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
@@ -106,26 +99,15 @@ jobs:
       - name: Package experimental artifact
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
           $artifact = Join-Path $PWD "artifact\herdr-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item target\x86_64-pc-windows-msvc\release\herdr.exe (Join-Path $artifact "herdr.exe")
-          .\scripts\prepare_windows_conpty.ps1 -Destination $artifact -Architecture x64 -PackageVersion $env:CONPTY_VERSION -PackageSha256 $env:CONPTY_SHA256
-          Get-ChildItem -LiteralPath $artifact -Recurse -File -Filter "*.txt" | Remove-Item -Force
-
-          $expectedFiles = @(
-            "arm64/OpenConsole.exe"
-            "conpty.dll"
-            "herdr.exe"
-            "x64/OpenConsole.exe"
-          )
-          $actualFiles = @(
-            Get-ChildItem -LiteralPath $artifact -Recurse -File |
-              ForEach-Object { [IO.Path]::GetRelativePath($artifact, $_.FullName).Replace('\', '/') } |
-              Sort-Object
-          )
-          if (@(Compare-Object $expectedFiles $actualFiles -CaseSensitive).Count -ne 0) {
-            throw "Unexpected experimental package files: $($actualFiles -join ', ')"
-          }
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $artifact) | Out-Null
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe target\x86_64-pc-windows-msvc\release\herdr.exe `
+            -PackagePath $package `
+            -StageDir $artifact `
+            -OutputPath artifact\herdr-windows-x86_64.zip
 
       - name: Smoke packaged release executable
         shell: pwsh
@@ -136,12 +118,25 @@ jobs:
           if ([string] $version -cnotmatch $expectedVersion) {
             throw "Experimental build identity missing from packaged executable: $version"
           }
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath (Join-Path $artifact "herdr.exe") -ExpectedHostPath (Join-Path $artifact "x64\OpenConsole.exe") -Session "ci-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath (Join-Path $artifact "herdr.exe") `
+            -Session "ci-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath (Join-Path $artifact "conpty\x64\OpenConsole.exe")
+
+      - name: Test packaged installer
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            .\scripts\windows_install_conpty_package_test.ps1 `
+            -ArchivePath artifact\herdr-windows-x86_64.zip
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
+          }
 
       - name: Upload experimental artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: herdr-windows-x86_64
-          path: artifact/herdr-windows-x86_64
+          path: artifact/herdr-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 14

@@ -2,9 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $ExePath,
 
-    [string] $Session = "ci-windows-$([guid]::NewGuid().ToString('N'))",
-
-    [string] $ExpectedHostPath
+    [string] $Session = "ci-windows-$([guid]::NewGuid().ToString('N'))"
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,8 +59,11 @@ Invoke-Checked rustc @("--crate-type", "cdylib", "--edition", "2021", $fakeSourc
 
 $oldPath = $env:PATH
 $oldSession = $env:HERDR_SESSION
+$oldSocket = $env:HERDR_SOCKET_PATH
+$oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
 $env:PATH = "$fakeDir;$oldPath"
 $env:HERDR_SESSION = $Session
+Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
 
 $server = $null
 try {
@@ -86,38 +87,20 @@ try {
         throw "server did not become ready"
     }
 
-    $created = & $exe workspace create --cwd $PWD.Path 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "workspace create failed with exit code $LASTEXITCODE`: $($created -join "`n")"
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $created = & $exe workspace create --cwd $PWD.Path 2>&1
+        $createdExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($createdExitCode -ne 0) {
+        throw "workspace create failed with exit code $createdExitCode`: $($created -join "`n")"
     }
     $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
     if ([string]::IsNullOrWhiteSpace($paneId)) {
         throw "workspace create did not return a root pane id: $($created -join "`n")"
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedHostPath)) {
-        $expectedHost = (Resolve-Path $ExpectedHostPath).Path
-        $matchingHost = $null
-        $deadline = (Get-Date).AddSeconds(10)
-        do {
-            $matchingHost = Get-Process -Name OpenConsole -ErrorAction SilentlyContinue |
-                Where-Object {
-                    try {
-                        $_.Path -eq $expectedHost
-                    } catch {
-                        $false
-                    }
-                } |
-                Select-Object -First 1
-            if ($null -ne $matchingHost) {
-                break
-            }
-            Start-Sleep -Milliseconds 250
-        } while ((Get-Date) -lt $deadline)
-
-        if ($null -eq $matchingHost) {
-            throw "pane did not start the expected app-local console host: $expectedHost"
-        }
     }
 
     $marker = "HERDR_CONPTY_SMOKE_OK"
@@ -154,9 +137,27 @@ try {
             Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
         }
         Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
+        $server.Refresh()
+        if (-not $server.HasExited) {
+            & taskkill.exe /PID $server.Id /T /F 2>&1 | Out-Null
+        }
     }
     $global:LASTEXITCODE = 0
     $env:PATH = $oldPath
-    $env:HERDR_SESSION = $oldSession
+    if ($null -eq $oldSession) {
+        Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue
+    } else {
+        $env:HERDR_SESSION = $oldSession
+    }
+    if ($null -eq $oldSocket) {
+        Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
+    } else {
+        $env:HERDR_SOCKET_PATH = $oldSocket
+    }
+    if ($null -eq $oldClientSocket) {
+        Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+    } else {
+        $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
+    }
     Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue
 }

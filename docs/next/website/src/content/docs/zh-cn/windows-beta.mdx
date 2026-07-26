@@ -36,6 +36,7 @@ Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默�
 | 插件 | 预览 |
 | 窗格屏幕历史 | 测试版 |
 | 嵌套启动覆盖 | 测试版 |
+| 连接 Linux/macOS 和预配置 Windows 主机的 `herdr --remote` | 测试版 |
 
 Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器。它对 Codex、Claude 等智能体很有用,但和 Unix 前台进程组检测不是一回事。
 
@@ -47,14 +48,14 @@ Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接�
 | --- | --- |
 | shell `cd` 之后的实时 cwd | 部分支持 |
 | 通过 shell 集成/OSC7 的实时 cwd | 测试版 |
-| 向智能体粘贴剪贴板图像 | 未验证 |
+| 向智能体远程粘贴剪贴板图像 | 测试版 |
 | CJK 输入法候选窗口定位 | 部分支持 |
 | Kitty graphics 渲染 | 未验证 |
 | 主机光标渲染 | 部分支持 |
 
 Herdr 可以在正确的目录中启动窗格,并能从你启动 Herdr 的目录创建初始工作区。启动之后 PowerShell 的目录变化则不同: Herdr 能检查的进程字段无法可靠跟踪后续的逻辑 `cd` 变化。实时 cwd 上报请使用 Herdr 集成或提示符 shell 集成。
 
-Windows Terminal 可能为特定智能体支持图像粘贴路径,但 Herdr 自己的剪贴板图像读取器尚未在 Windows 上接通。在 Windows 剪贴板桥实现并测试之前,请把 `alt+v` 图像粘贴视为未验证。远程剪贴板图像桥是独立功能,仍然绑定于 Unix/macOS 的 `herdr --remote`。
+使用 `herdr --remote` 时,Herdr 会在 Windows 上读取已注册的 PNG 和 DIB 剪贴板格式,并向远程服务器发送受大小限制的 PNG。默认快捷键是 `ctrl+v`;可通过 `keys.remote_image_paste` 更改或禁用。粘贴或拖放的绝对图像路径也会以同样方式传输。此桥接仅用于远程连接;没有受支持的剪贴板图像时会回退到普通输入。
 
 Kitty graphics 仍是实验性功能,尚未宣称支持 Windows。除非你专门在 Windows Terminal 中测试图像渲染,否则保持 `experimental.kitty_graphics = false`。
 
@@ -79,33 +80,34 @@ host_cursor = "native"
 
 Windows 终端并不都以相同形式报告带修饰键的按键。Herdr 在 Windows Terminal 和 Windows 上的 Alacritty 中保留鼠标报告和 `ctrl+j`,但 `shift+enter` 只有在外层终端把它报告为独立的修饰 Enter 键时才有效。如果 Windows 或终端把它报告为普通 Enter,Herdr 会转发普通 Enter。
 
+旧版 Windows 10 的系统 ConPTY 会丢弃 Kimi 和 Pi 等智能体使用的 Kitty 键盘协议序列,因此预览包包含固定版本的 Microsoft 应用本地 ConPTY 运行时。仅在诊断捆绑运行时的兼容性问题时,才应在启动 Herdr 前设置 `HERDR_WINDOWS_CONPTY=system`。
+
 ## 复制与粘贴
 
 Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选文本即可通过 Herdr 复制。
 
 文本粘贴请在 Windows Terminal 中使用 `ctrl+shift+v`。多行文本粘贴是带括号的 (bracketed),因此 shell 和智能体提示符会把它作为一次粘贴接收,而不是逐行提交。按住 `shift` 再右键,可以使用外层终端的粘贴操作,而不把点击发给 Herdr。
 
+远程连接期间,使用 `ctrl+v` 粘贴剪贴板图像。Herdr 接受已注册的 PNG、CF_DIBV5 和 CF_DIB 数据,把 DIB 数据转换为受大小限制的 PNG,并将暂存的远程路径粘贴到当前聚焦的窗格中。
+
 ## Windows 测试版不支持
 
 | 能力 | 状态 |
 | --- | --- |
 | 直接终端附加 | 不支持 |
-| Windows 二进制的 `herdr --remote` | 不支持 |
 | 实时服务器交接 | 不支持 |
 | Unix 文件描述符交接 | 不支持 |
 | Unix 前台进程组 | 不支持 |
-| 远程剪贴板图像桥 | 不支持 |
 | 前缀输入法切换 | 不支持 |
 | 签名二进制 / 规避 SmartScreen | 不支持 |
 
-在 Windows 上进行远程工作,请 SSH 到服务器并在那里运行 `herdr`:
+原生 Windows 二进制可以作为 Linux 和 macOS Herdr 主机以及本分支预配置 Windows 沙盒主机的瘦客户端:
 
 ```powershell
-ssh you@server
-herdr
+herdr --remote workbox
 ```
 
-这种模式下 Herdr 运行在远程主机上。Windows 原生的 `herdr --remote` 不在测试版范围内。
+Herdr 在 Windows 上不使用控制套接字连接复用。它仍会添加备用 SSH keepalive,但密码认证可能会为多个设置命令重复提示。建议使用密钥或 Windows `ssh-agent` 认证。Linux 和 macOS 主机支持检测和可选安装;Windows 主机必须已经包含沙盒 Herdr 可执行文件,并且不支持实时交接。
 
 Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
 

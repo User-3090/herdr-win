@@ -74,7 +74,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   prepare:
-    name: Resolve signed ConPTY and release state
+    name: Resolve pinned ConPTY and release state
     needs: sync
     runs-on: windows-latest
     timeout-minutes: 10
@@ -93,20 +93,19 @@ jobs:
           ref: ${{ needs.sync.outputs.sha }}
           persist-credentials: false
 
-      - name: Resolve latest signed Microsoft ConPTY package
+      - name: Read pinned Microsoft ConPTY package
         id: conpty
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $package = .\scripts\resolve_latest_windows_conpty.ps1 -IncludePrerelease
-          "version=$($package.Version)" >> $env:GITHUB_OUTPUT
-          "sha256=$($package.Sha256)" >> $env:GITHUB_OUTPUT
+          $metadata = Get-Content -LiteralPath packaging\windows\conpty.json -Raw | ConvertFrom-Json
+          "version=$($metadata.package.version)" >> $env:GITHUB_OUTPUT
+          "sha256=$($metadata.package.sha256)" >> $env:GITHUB_OUTPUT
           @(
             "### Microsoft ConPTY"
-            "- Version: ``$($package.Version)``"
-            "- SHA-256: ``$($package.Sha256)``"
-            "- Prerelease: ``$($package.IsPrerelease)``"
+            "- Version: ``$($metadata.package.version)``"
+            "- Release: ``$($metadata.package.release_tag)``"
+            "- SHA-256: ``$($metadata.package.sha256)``"
           ) >> $env:GITHUB_STEP_SUMMARY
 
       - name: Check exact prerelease state
@@ -221,10 +220,13 @@ jobs:
                 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
                 try {
                   $expectedFiles = @(
-                    "arm64/OpenConsole.exe"
-                    "conpty.dll"
+                    "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-LICENSE.txt"
+                    "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-NOTICE.md"
+                    "conpty/arm64/OpenConsole.exe"
+                    "conpty/conpty.dll"
+                    "conpty/herdr-conpty.json"
+                    "conpty/x64/OpenConsole.exe"
                     "herdr.exe"
-                    "x64/OpenConsole.exe"
                   )
                   $actualFiles = @(
                     $archive.Entries |
@@ -302,8 +304,8 @@ jobs:
           cache-bin: false
           key: windows-nightly
 
-      - name: Test portable ConPTY preparation
-        run: python -m unittest scripts.test_vendor_portable_pty
+      - name: Test pinned ConPTY packaging
+        run: python -m unittest scripts.test_package_windows_conpty scripts.test_vendor_portable_pty
 
       - name: Check formatting
         run: cargo fmt --check
@@ -340,14 +342,22 @@ jobs:
           $exe = Join-Path $PWD "target\${{ env.WINDOWS_TARGET }}\debug\herdr.exe"
           .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "nightly-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 
-      - name: Smoke-test app-local ConPTY
+      - name: Package and probe app-local ConPTY
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exeDir = Join-Path $PWD "target\${{ env.WINDOWS_TARGET }}\debug"
-          $exe = Join-Path $exeDir "herdr.exe"
-          .\scripts\prepare_windows_conpty.ps1 -Destination $exeDir -Architecture x64 -PackageVersion $env:CONPTY_VERSION -PackageSha256 $env:CONPTY_SHA256
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -ExpectedHostPath (Join-Path $exeDir "x64\OpenConsole.exe") -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $conptyPackage = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-debug"
+          $archive = Join-Path $env:RUNNER_TEMP "herdr-windows-debug.zip"
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe "target\${{ env.WINDOWS_TARGET }}\debug\herdr.exe" `
+            -PackagePath $conptyPackage `
+            -StageDir $stage `
+            -OutputPath $archive
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath (Join-Path $stage "herdr.exe") `
+            -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
 
       - name: Build release executable
         run: cargo build --release --locked --target ${{ env.WINDOWS_TARGET }}
@@ -358,29 +368,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           $artifactRoot = Join-Path $PWD "artifact"
           $package = Join-Path $artifactRoot $env:ARTIFACT_NAME
-          New-Item -ItemType Directory -Force -Path $package | Out-Null
-
-          Copy-Item "target\${{ env.WINDOWS_TARGET }}\release\herdr.exe" (Join-Path $package "herdr.exe")
-          .\scripts\prepare_windows_conpty.ps1 -Destination $package -Architecture x64 -PackageVersion $env:CONPTY_VERSION -PackageSha256 $env:CONPTY_SHA256
-          Get-ChildItem -LiteralPath $package -Recurse -File -Filter "*.txt" | Remove-Item -Force
-
-          $expectedFiles = @(
-            "arm64/OpenConsole.exe"
-            "conpty.dll"
-            "herdr.exe"
-            "x64/OpenConsole.exe"
-          )
-          $actualFiles = @(
-            Get-ChildItem -LiteralPath $package -Recurse -File |
-              ForEach-Object { [IO.Path]::GetRelativePath($package, $_.FullName).Replace('\', '/') } |
-              Sort-Object
-          )
-          if (@(Compare-Object $expectedFiles $actualFiles -CaseSensitive).Count -ne 0) {
-            throw "Unexpected nightly package files: $($actualFiles -join ', ')"
-          }
-
           $zip = Join-Path $artifactRoot "$($env:ARTIFACT_NAME).zip"
-          Compress-Archive -Path (Join-Path $package "*") -DestinationPath $zip -CompressionLevel Optimal
+          $conptyPackage = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe "target\${{ env.WINDOWS_TARGET }}\release\herdr.exe" `
+            -PackagePath $conptyPackage `
+            -StageDir $package `
+            -OutputPath $zip
           $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$zipHash  $([IO.Path]::GetFileName($zip))" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
 
@@ -393,7 +388,20 @@ jobs:
           if ([string] $version -cnotmatch $expectedVersion) {
             throw "Nightly build identity missing from packaged executable: $version"
           }
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath (Join-Path $package "herdr.exe") -ExpectedHostPath (Join-Path $package "x64\OpenConsole.exe") -Session "nightly-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          .\scripts\windows_conpty_enhanced_input_probe.ps1 `
+            -ExePath (Join-Path $package "herdr.exe") `
+            -Session "nightly-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -ExpectedConsoleHostPath (Join-Path $package "conpty\x64\OpenConsole.exe")
+
+      - name: Test packaged installer
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+            .\scripts\windows_install_conpty_package_test.ps1 `
+            -ArchivePath "artifact\$env:ARTIFACT_NAME.zip"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
+          }
 
       - name: Upload tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -455,7 +463,7 @@ jobs:
             "Microsoft ConPTY package: ${CONPTY_VERSION}" \
             "Microsoft ConPTY package SHA-256: ${CONPTY_SHA256}" \
             "$workflow_line" \
-            "The ZIP contains herdr.exe, conpty.dll, x64/OpenConsole.exe, and arm64/OpenConsole.exe. The executable falls back to system ConPTY when no bundled runtime is present." \
+            "The ZIP contains herdr.exe, the pinned conpty/ runtime and marker, and Microsoft license notices. The executable falls back to system ConPTY when no bundled runtime is present." \
             "$ownership_marker"
           printf -v expected_owned_notes '%s\n\n%s\n%s\n%s\n%s\n%s\n\n%s\n\n%s' \
             "Automated Windows prerelease." \
@@ -464,7 +472,7 @@ jobs:
             "Microsoft ConPTY package: ${CONPTY_VERSION}" \
             "Microsoft ConPTY package SHA-256: ${CONPTY_SHA256}" \
             "$workflow_placeholder" \
-            "The ZIP contains herdr.exe, conpty.dll, x64/OpenConsole.exe, and arm64/OpenConsole.exe. The executable falls back to system ConPTY when no bundled runtime is present." \
+            "The ZIP contains herdr.exe, the pinned conpty/ runtime and marker, and Microsoft license notices. The executable falls back to system ConPTY when no bundled runtime is present." \
             "$ownership_marker"
 
           encoded_tag="$(jq -rn --arg value "$tag" '$value | @uri')"

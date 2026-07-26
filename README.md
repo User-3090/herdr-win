@@ -12,8 +12,7 @@ Maintained logical fixes, at a high level:
 - bounded Windows host color and appearance transport;
 - visible software cursors plus host and child cursor-color preservation;
 - automatic host-appearance defaults for otherwise unconfigured themes;
-- native Windows desktop notifications and reliable MediaPlayer paths; and
-- controlled app-local ConPTY support with system fallback.
+- native Windows desktop notifications and reliable MediaPlayer paths.
 
 The Windows experimental/nightly test, packaging, upstream-sync, and release
 workflows are **fork-only CI**, not upstream product fixes or an indication of

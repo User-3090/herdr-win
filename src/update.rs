@@ -628,8 +628,12 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
 }
 
 #[cfg(windows)]
-fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), String> {
-    let status = Command::new("powershell")
+fn install_windows_update_with_installer(
+    channel: UpdateChannel,
+    expected_build_id: Option<&str>,
+) -> Result<(), String> {
+    let mut command = Command::new("powershell");
+    command
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -643,7 +647,11 @@ fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), S
         // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
         // Get-FileHash. Removing it lets 5.1 compute its own default path.
         // See PowerShell/PowerShell#8635.
-        .env_remove("PSModulePath")
+        .env_remove("PSModulePath");
+    if let Some(build_id) = expected_build_id {
+        command.env("HERDR_EXPECTED_BUILD_ID", build_id);
+    }
+    let status = command
         .status()
         .map_err(|err| format!("failed to run Windows installer: {err}"))?;
 
@@ -1822,6 +1830,11 @@ pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
         || is_nix_store_exe_path_following_links(path)
 }
 
+#[cfg(not(unix))]
+pub(crate) fn is_package_manager_managed_exe_path(_path: &Path) -> bool {
+    false
+}
+
 fn is_homebrew_managed_exe_path_following_links(path: &Path) -> bool {
     if is_homebrew_managed_exe_path(path) {
         return true;
@@ -2019,7 +2032,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         if let Some(sha256) = &release.sha256 {
             tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
         }
-        install_windows_update_with_installer(channel)?;
+        install_windows_update_with_installer(channel, release.build_id.as_deref())?;
         let updated_exe = windows_installed_herdr_exe_path()?;
         eprintln!("installed {}", release.label());
         print_outdated_integration_notice_with_updated_binary(&updated_exe);
