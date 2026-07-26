@@ -72,11 +72,7 @@ fn sanitize_extension(extension: &str) -> &'static str {
 }
 
 fn staging_dir() -> PathBuf {
-    #[cfg(unix)]
-    let user_id = unsafe { libc::geteuid() };
-    #[cfg(windows)]
-    let user_id = std::process::id();
-    std::env::temp_dir().join(format!("herdr-clipboard-images-{user_id}"))
+    crate::platform::clipboard_image_staging_dir()
 }
 
 fn ensure_staging_dir() -> io::Result<PathBuf> {
@@ -101,7 +97,9 @@ fn restrict_file_options(options: &mut fs::OpenOptions) {
 }
 
 #[cfg(windows)]
-fn restrict_file_options(_options: &mut fs::OpenOptions) {}
+fn restrict_file_options(_options: &mut fs::OpenOptions) {
+    // Files inherit the user-profile ACL from `config::state_dir()`.
+}
 
 #[cfg(unix)]
 fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
@@ -112,6 +110,8 @@ fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn restrict_dir_permissions(_dir: &Path) -> io::Result<()> {
+    // The Windows staging directory lives below the per-user state directory
+    // rather than the shared system temp directory and inherits its ACL.
     Ok(())
 }
 

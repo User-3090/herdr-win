@@ -608,6 +608,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "widestring",
  "windows-sys",
 ]
 

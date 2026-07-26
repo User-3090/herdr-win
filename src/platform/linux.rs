@@ -11,6 +11,12 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub(crate) use super::unix_common::{
+    clipboard_image_staging_dir, create_remote_ssh_config_dir, create_remote_ssh_config_file,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_arg,
+    remote_reattach_program, remote_ssh_config_paths,
+};
+
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

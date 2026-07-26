@@ -1,8 +1,12 @@
 use std::fs;
+#[cfg(windows)]
+use std::io::Write as _;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
@@ -12,6 +16,12 @@ pub(crate) type LocalStream = interprocess::local_socket::Stream;
 
 pub(crate) enum LocalStreamRead {
     Data,
+    Pending,
+    Closed,
+}
+
+pub(crate) enum LocalStreamReadCount {
+    Data(usize),
     Pending,
     Closed,
 }
@@ -45,6 +55,11 @@ pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
     }
 }
 
+/// Binds a local listener carrying private Herdr control or terminal traffic.
+///
+/// Unix permissions are restricted after bind by the listener owner. On
+/// Windows the access check is part of named-pipe creation, so every listener
+/// receives a protected owner/System DACL up front.
 pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {
@@ -60,14 +75,25 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
     #[cfg(windows)]
     {
         use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 
         let name = path.to_string_lossy().to_string();
         let name = name.to_ns_name::<GenericNamespaced>()?;
+        let security_descriptor = crate::platform::private_local_socket_security_descriptor()?;
         let listener = ListenerOptions::new()
             .name(name)
             .reclaim_name(false)
+            .security_descriptor(security_descriptor)
             .create_sync()?;
-        fs::write(path, windows_socket_marker())?;
+        let marker = windows_socket_marker();
+        let mut marker_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        if let Err(err) = marker_file.write_all(marker.as_bytes()) {
+            let _ = fs::remove_file(path);
+            return Err(err);
+        }
         Ok(listener)
     }
 }
@@ -125,16 +151,58 @@ pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) 
     }
 }
 
+/// Sets nonblocking mode for both reads and writes.
+///
+/// Most Windows callers use `PeekNamedPipe` and leave the stream blocking, but
+/// full-duplex bridges need writes to remain cancellable under backpressure.
+pub(crate) fn set_local_stream_nonblocking(
+    stream: &mut LocalStream,
+    enabled: bool,
+) -> io::Result<()> {
+    use interprocess::local_socket::traits::Stream as _;
+
+    stream.set_nonblocking(enabled)
+}
+
+/// Whether a successful zero-byte write means the nonblocking transport is
+/// temporarily full rather than closed.
+pub(crate) fn local_stream_zero_write_is_pending() -> bool {
+    cfg!(windows)
+}
+
+/// Caps a nonblocking write to a size Windows named pipes can accept without
+/// requiring the entire larger caller buffer to fit at once.
+pub(crate) fn local_stream_write_chunk_len(remaining: usize) -> usize {
+    if cfg!(windows) {
+        remaining.min(4 * 1024)
+    } else {
+        remaining
+    }
+}
+
 pub(crate) fn poll_local_stream_read(
     stream: &mut LocalStream,
     buf: &mut [u8],
 ) -> io::Result<LocalStreamRead> {
+    match poll_local_stream_read_count(stream, buf)? {
+        LocalStreamReadCount::Data(_) => Ok(LocalStreamRead::Data),
+        LocalStreamReadCount::Pending => Ok(LocalStreamRead::Pending),
+        LocalStreamReadCount::Closed => Ok(LocalStreamRead::Closed),
+    }
+}
+
+pub(crate) fn poll_local_stream_read_count(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+) -> io::Result<LocalStreamReadCount> {
     #[cfg(unix)]
     {
         match stream.read(buf) {
-            Ok(0) => Ok(LocalStreamRead::Closed),
-            Ok(_) => Ok(LocalStreamRead::Data),
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(LocalStreamRead::Pending),
+            Ok(0) => Ok(LocalStreamReadCount::Closed),
+            Ok(read) => Ok(LocalStreamReadCount::Data(read)),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                Ok(LocalStreamReadCount::Pending)
+            }
             Err(err) => Err(err),
         }
     }
@@ -142,14 +210,58 @@ pub(crate) fn poll_local_stream_read(
     #[cfg(windows)]
     {
         match windows_named_pipe_available(stream)? {
-            None => Ok(LocalStreamRead::Closed),
-            Some(0) => Ok(LocalStreamRead::Pending),
+            None => Ok(LocalStreamReadCount::Closed),
+            Some(0) => Ok(LocalStreamReadCount::Pending),
             Some(_) => match stream.read(buf) {
-                Ok(0) => Ok(LocalStreamRead::Closed),
-                Ok(_) => Ok(LocalStreamRead::Data),
-                Err(err) if is_connection_closed_error(&err) => Ok(LocalStreamRead::Closed),
+                Ok(0) => Ok(LocalStreamReadCount::Closed),
+                Ok(read) => Ok(LocalStreamReadCount::Data(read)),
+                Err(err) if is_connection_closed_error(&err) => Ok(LocalStreamReadCount::Closed),
                 Err(err) => Err(err),
             },
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) struct LocalStreamDeadlineReader<'a> {
+    stream: &'a mut LocalStream,
+    deadline: Instant,
+}
+
+#[cfg(windows)]
+impl<'a> LocalStreamDeadlineReader<'a> {
+    pub(crate) fn new(stream: &'a mut LocalStream, timeout: Duration) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + timeout,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Read for LocalStreamDeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            match poll_local_stream_read_count(self.stream, buf)? {
+                LocalStreamReadCount::Data(read) => return Ok(read),
+                LocalStreamReadCount::Closed => return Ok(0),
+                LocalStreamReadCount::Pending => {
+                    let now = Instant::now();
+                    if now >= self.deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "local socket read deadline elapsed",
+                        ));
+                    }
+                    std::thread::sleep(POLL_INTERVAL.min(self.deadline - now));
+                }
+            }
         }
     }
 }
@@ -346,6 +458,52 @@ mod tests {
 
         assert!(local_stream_peer_closed(&mut server).unwrap());
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_named_pipe_accepts_owner_and_reports_byte_count() {
+        use std::io::Write as _;
+
+        let path = temp_socket_marker_path("private-pipe");
+        let _ = fs::remove_file(&path);
+        let listener = bind_local_listener(&path).unwrap();
+        let mut client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        client.write_all(b"remote").unwrap();
+
+        let mut buffer = [0_u8; 16];
+        assert!(matches!(
+            poll_local_stream_read_count(&mut server, &mut buffer).unwrap(),
+            LocalStreamReadCount::Data(6)
+        ));
+        assert_eq!(&buffer[..6], b"remote");
+
+        let identity = socket_file_identity(&path).unwrap();
+        drop(client);
+        drop(server);
+        drop(listener);
+        remove_socket_file_if_owned(&path, &identity).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_stream_deadline_times_out_an_idle_peer() {
+        let path = temp_socket_marker_path("deadline-idle");
+        let _ = fs::remove_file(&path);
+        let listener = bind_local_listener(&path).unwrap();
+        let _client = connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        let started = Instant::now();
+
+        let err = LocalStreamDeadlineReader::new(&mut server, Duration::from_millis(25))
+            .read(&mut [0_u8; 1])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
         let _ = fs::remove_file(path);
     }
 

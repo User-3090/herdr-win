@@ -6,7 +6,7 @@ use std::{
     ptr::{copy_nonoverlapping, null_mut},
     sync::{
         atomic::{AtomicU32, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -20,7 +20,10 @@ use windows_sys::{
         },
         System::{
             Console::GetConsoleWindow,
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+            },
             Diagnostics::{
                 Debug::ReadProcessMemory,
                 ToolHelp::{
@@ -29,8 +32,8 @@ use windows_sys::{
                 },
             },
             JobObjects::IsProcessInJob,
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-            Ole::CF_UNICODETEXT,
+            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+            Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
                 CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
@@ -49,6 +52,8 @@ use windows_sys::{
 
 use super::{ClipboardImage, ForegroundJob, Signal};
 
+mod clipboard_image;
+
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
 
@@ -66,6 +71,92 @@ struct ProcessSnapshotCache {
 static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
     Mutex::new(ProcessSnapshotCache { cached: None });
 static NEXT_NOTIFICATION_ICON_ID: AtomicU32 = AtomicU32::new(0x4845_0000);
+static PNG_CLIPBOARD_FORMAT: OnceLock<u32> = OnceLock::new();
+
+pub(crate) fn private_local_socket_security_descriptor(
+) -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use widestring::U16CString;
+
+    // A protected DACL keeps terminal and API traffic available only to the
+    // object owner and Local System. The latter permits supervised services
+    // without exposing the pipe to other interactive users.
+    let descriptor = U16CString::from_str("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    SecurityDescriptor::deserialize(&descriptor)
+}
+
+pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
+    super::RemoteSshConfigPaths {
+        user_config: std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|home| home.join(".ssh").join("config")),
+        system_config: std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .map(|dir| dir.join("ssh").join("ssh_config")),
+        multiplexing: false,
+    }
+}
+
+pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
+    let base = remote_private_temp_base();
+    std::fs::create_dir_all(&base)?;
+    for attempt in 0..100 {
+        let dir = base.join(format!("ssh-{}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "failed to create private herdr ssh config directory",
+    ))
+}
+
+pub(crate) fn create_remote_ssh_config_file(
+    path: &std::path::Path,
+) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+pub(crate) fn remote_private_temp_base() -> PathBuf {
+    crate::config::state_dir().join("remote")
+}
+
+pub(crate) fn clipboard_image_staging_dir() -> PathBuf {
+    crate::config::state_dir().join("clipboard-images")
+}
+
+pub(crate) fn remote_bridge_endpoint_path(_readable_name: &str, short_name: &str) -> PathBuf {
+    remote_private_temp_base().join(short_name)
+}
+
+pub(crate) fn remote_reattach_program(_program: &str) -> String {
+    // The installed launcher is on PATH and works in both PowerShell and cmd.
+    // An absolute executable path with spaces would require shell-specific
+    // quoting (and PowerShell's call operator), making the hint less portable.
+    "herdr".to_string()
+}
+
+pub(crate) fn remote_reattach_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "''"))
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     true
@@ -670,9 +761,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     }
 }
 
-// Windows does not wire clipboard-image bridging into semantic input yet.
-#[cfg_attr(windows, allow(dead_code))]
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
+    let png_format = *PNG_CLIPBOARD_FORMAT.get_or_init(|| {
+        let name = wide_null("PNG");
+        unsafe { RegisterClipboardFormatW(name.as_ptr()) }
+    });
+    if png_format != 0 {
+        if let Some(bytes) =
+            copy_clipboard_format(png_format, crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD)
+                .and_then(|bytes| clipboard_image::validated_png(&bytes))
+        {
+            return Some(ClipboardImage {
+                bytes,
+                extension: "png",
+            });
+        }
+    }
+
+    for format in [u32::from(CF_DIBV5), u32::from(CF_DIB)] {
+        if let Some(bytes) = copy_clipboard_format(format, clipboard_image::MAX_DIB_CLIPBOARD_BYTES)
+            .and_then(|bytes| clipboard_image::dib_to_png(&bytes))
+        {
+            return Some(ClipboardImage {
+                bytes,
+                extension: "png",
+            });
+        }
+    }
+
+    None
+}
+
+fn copy_clipboard_format(format: u32, max_bytes: usize) -> Option<Vec<u8>> {
+    if unsafe { IsClipboardFormatAvailable(format) } == 0 {
+        return None;
+    }
+    let _clipboard = open_clipboard_for_read()?;
+    let memory = unsafe { GetClipboardData(format) };
+    if memory.is_null() {
+        return None;
+    }
+    let size = unsafe { GlobalSize(memory) };
+    if size == 0 || size > max_bytes {
+        return None;
+    }
+    let locked = unsafe { GlobalLock(memory) };
+    if locked.is_null() {
+        return None;
+    }
+    let _lock = ClipboardMemoryLock(memory);
+    Some(unsafe { std::slice::from_raw_parts(locked.cast::<u8>(), size) }.to_vec())
+}
+
+fn open_clipboard_for_read() -> Option<ClipboardGuard> {
+    const ATTEMPTS: usize = 5;
+    for attempt in 0..ATTEMPTS {
+        if unsafe { OpenClipboard(null_mut()) } != 0 {
+            return Some(ClipboardGuard);
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
     None
 }
 
@@ -750,10 +900,20 @@ struct ProcessHandle(HANDLE);
 
 struct ClipboardGuard;
 
+struct ClipboardMemoryLock(HANDLE);
+
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
         unsafe {
             CloseClipboard();
+        }
+    }
+}
+
+impl Drop for ClipboardMemoryLock {
+    fn drop(&mut self) {
+        unsafe {
+            GlobalUnlock(self.0);
         }
     }
 }

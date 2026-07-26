@@ -404,23 +404,6 @@ fn input_event_limit(events: &[ClientInputEvent]) -> InputEventLimit {
     }
 }
 
-#[cfg(windows)]
-fn set_client_recv_timeout(
-    stream: &LocalStream,
-    timeout: Option<Duration>,
-    context: &'static str,
-    client_id: u64,
-) -> io::Result<()> {
-    match stream.set_recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-            debug!(client_id, err = %err, context, "client socket receive timeout unavailable");
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
-}
-
 #[cfg(not(windows))]
 fn set_client_recv_timeout(
     stream: &LocalStream,
@@ -429,6 +412,23 @@ fn set_client_recv_timeout(
     _client_id: u64,
 ) -> io::Result<()> {
     stream.set_recv_timeout(timeout)
+}
+
+fn read_client_handshake_message(
+    stream: &mut LocalStream,
+    timeout: Duration,
+) -> Result<ClientMessage, protocol::FramingError> {
+    #[cfg(windows)]
+    {
+        let mut reader = crate::ipc::LocalStreamDeadlineReader::new(stream, timeout);
+        protocol::read_message(&mut reader, MAX_FRAME_SIZE)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = timeout;
+        protocol::read_message(stream, MAX_FRAME_SIZE)
+    }
 }
 
 /// Handles the client handshake on a blocking thread.
@@ -445,6 +445,7 @@ pub(crate) fn handle_client_handshake(
     // the handshake thread needs blocking I/O for read_message/write_message.
     stream.set_nonblocking(false)?;
 
+    #[cfg(not(windows))]
     set_client_recv_timeout(
         &stream,
         Some(HANDSHAKE_TIMEOUT),
@@ -453,7 +454,7 @@ pub(crate) fn handle_client_handshake(
     )?;
 
     // Read the Hello message.
-    let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
+    let hello = match read_client_handshake_message(&mut stream, HANDSHAKE_TIMEOUT) {
         Ok(msg) => msg,
         Err(protocol::FramingError::UnexpectedEof) => {
             debug!(client_id, "client disconnected before handshake");
@@ -549,6 +550,7 @@ pub(crate) fn handle_client_handshake(
     };
     protocol::write_message(&mut stream, &welcome).map_err(|e| io::Error::other(e.to_string()))?;
 
+    #[cfg(not(windows))]
     set_client_recv_timeout(
         &stream,
         None,
@@ -839,6 +841,19 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, TestSocketPath(path))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_server_handshake_deadline_times_out_idle_client() {
+        let (_client, mut server, _path) = local_stream_pair("handshake-deadline");
+
+        let result = read_client_handshake_message(&mut server, Duration::from_millis(25));
+
+        assert!(matches!(
+            result,
+            Err(protocol::FramingError::Io(err)) if err.kind() == io::ErrorKind::TimedOut
+        ));
     }
 
     fn recv_server_event(receiver: &mut mpsc::Receiver<ServerEvent>, context: &str) -> ServerEvent {

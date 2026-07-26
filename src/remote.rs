@@ -1,13 +1,15 @@
+mod attach;
 #[cfg(unix)]
 mod unix;
 
+pub(crate) use attach::*;
 #[cfg(unix)]
-pub(crate) use unix::*;
+pub(crate) use unix::run_remote_client_bridge;
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::*;
+pub(crate) use windows::run_remote_client_bridge;
 
 pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
     if is_remote_auth_error(err) {
