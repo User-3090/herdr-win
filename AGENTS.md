@@ -3,6 +3,12 @@
 herdr-win is the Windows-focused control repository for an unofficial Herdr
 distribution. Read this file and `CONTRIBUTING.md` before changing anything.
 
+The reusable personal workflow in `~/.config/opencode/AGENTS.md` applies here.
+This file is the project overlay and takes precedence for Herdr-specific identity,
+ownership, patch, release, verification, and delivery rules. Do not copy the
+global workflow or create project-local `.opencode/` configuration; improve a
+missing generic capability in the global owner instead.
+
 ## Identity invariants
 
 - Repository and nightly channel: `herdr-win`.
@@ -39,6 +45,33 @@ The checked-out product source is useful for history and local inspection, but
 nightly release source is always a fresh upstream checkout plus
 `patches/delta/series`. A direct source edit is incomplete until its owning
 mailbox is regenerated and replayed.
+
+Route durable decisions to one existing owner: agent/repository workflow to this
+file, contribution and replay procedure to `CONTRIBUTING.md`, public fork identity
+and user-facing install/update behavior to both README copies, maintained product
+behavior or carried documentation to its logical delta mailbox, and release
+behavior to the owning workflow/tests. Do not invent permanent memory or backlog
+files without explicit approval. Long-task checkpoints remain external through
+the global `portable-checkpoint` workflow and must never be committed.
+
+## Precedence and repository safety
+
+1. Platform/system safety and the current user instruction.
+2. This project overlay and its identity/release invariants.
+3. `CONTRIBUTING.md` and the project owners named above.
+4. The global OpenCode working agreement.
+
+- Treat this directory as the repository root and `master` as the control branch.
+  Stop for direction if an existing checkout is unexpectedly on another branch.
+- Preserve unrelated user/shared-worktree changes and recovery stashes. Never
+  reformat, stage, or commit work outside the current slice.
+- Before reset, restore, checkout over files, clean, rebase, deletion, overwrite,
+  history rewrite, or force-push, stop and request explicit approval with the
+  exact command, affected paths, status/diff scope, safer alternatives, recovery
+  plan, and risks.
+- `direct-builder` owns the smallest verified vertical slice. For maintained
+  product behavior, the canonical implementation owner is the logical delta
+  mailbox, not the checked-out source alone.
 
 ## Working model
 
@@ -131,10 +164,13 @@ nightly gates or equivalent real Windows evidence.
 - Before committing, inspect status, the complete intended diff, and recent log;
   stage only task-owned files.
 - Use lowercase conventional commits, no emoji, and no AI co-author lines.
-- Propose the commit message and get user alignment before committing.
-- Push only to the configured fork upstream; never force-push or create tracking
-  implicitly.
+- Commit coherent verified milestones without interrupting for routine wording
+  approval, then push immediately to the configured fork upstream. Never
+  force-push or create tracking implicitly.
 - Do not open upstream issues or pull requests for the user. Upstream engagement
   must follow `ogulcancelik/herdr`'s current contribution process.
 - Never commit secrets, artifacts, logs, temporary replay trees, or checkpoint
   files.
+- Final responses include changed files/docs, verification, net complexity,
+  artifact/installer path when applicable, commit/push result, unresolved risks,
+  next action, and checkpoint path when used.
