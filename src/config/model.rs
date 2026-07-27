@@ -19,15 +19,6 @@ pub enum UpdateChannelConfig {
     Preview,
 }
 
-impl UpdateChannelConfig {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Preview => "preview",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -1123,7 +1114,6 @@ manifest_check = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.update.channel, UpdateChannelConfig::Preview);
-        assert_eq!(config.update.channel.as_str(), "preview");
         assert!(!config.update.version_check);
         assert!(!config.update.manifest_check);
     }

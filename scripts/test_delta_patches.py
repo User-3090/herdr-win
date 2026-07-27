@@ -20,6 +20,12 @@ CONTROL_PATHS = {
     "website/preview.json",
 }
 FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/"
+FORK_RAW_PREFIX = "https://raw.githubusercontent.com/User-3090/herdr-win/"
+FORBIDDEN_DISTRIBUTION_ENV = (
+    "HERDR_BUILD_CHANNEL",
+    "HERDR_PREVIEW_MANIFEST_URL",
+    "HERDR_WINDOWS_INSTALLER_URL",
+)
 
 
 def series_entries() -> list[str]:
@@ -96,6 +102,51 @@ class DeltaPatchTests(unittest.TestCase):
             )
             self.assertRegex(str(windows.get("sha256", "")), r"^[0-9a-f]{64}$")
             self.assertEqual(windows.get("format"), "zip")
+
+    def test_distribution_configuration_is_fork_owned_and_env_free(self) -> None:
+        distribution = (PROJECT_ROOT / "src" / "distribution.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            f'{FORK_RAW_PREFIX}master/website/preview.json', distribution
+        )
+        installer = re.search(
+            re.escape(FORK_RAW_PREFIX)
+            + r"([0-9a-f]{40})/website/install\.ps1",
+            distribution,
+        )
+        self.assertIsNotNone(installer)
+        self.assertNotIn("https://herdr.dev", distribution)
+
+        product_sources = "\n".join(
+            (PROJECT_ROOT / path).read_text(encoding="utf-8")
+            for path in (
+                "build.rs",
+                "src/build_info.rs",
+                "src/remote/attach.rs",
+                "src/update.rs",
+            )
+        )
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
+        ).read_text(encoding="utf-8")
+        for variable in FORBIDDEN_DISTRIBUTION_ENV:
+            self.assertNotIn(variable, product_sources)
+            self.assertNotIn(variable, workflow)
+
+        patch = (DELTA_ROOT / "0004-windows-package-hardening.patch").read_text(
+            encoding="utf-8"
+        )
+        added = "\n".join(
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        for variable in FORBIDDEN_DISTRIBUTION_ENV:
+            self.assertNotIn(variable, added)
+        self.assertNotIn("https://herdr.dev/latest.json", added)
+        self.assertNotIn("https://herdr.dev/preview.json", added)
+        self.assertNotIn("https://herdr.dev/install.ps1", added)
 
 
 if __name__ == "__main__":

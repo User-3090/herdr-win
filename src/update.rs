@@ -1,6 +1,6 @@
 //! Self-update mechanism.
 //!
-//! Checks the hosted herdr.dev update manifest for newer versions.
+//! Checks the configured distribution manifest for newer versions.
 //! Manual `herdr update` downloads and installs the binary.
 //! Background checks only surface availability and release notes.
 //! Uses `curl` as a subprocess for HTTP — no additional Rust HTTP dependencies.
@@ -23,8 +23,6 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
@@ -42,6 +40,11 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(not(windows))]
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn preview_update_manifest_url() -> &'static str {
+    crate::distribution::PREVIEW_MANIFEST_URL
+}
+
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
         .ok()
@@ -107,9 +110,9 @@ enum UpdateChannel {
 
 impl UpdateChannel {
     fn configured() -> Self {
-        match crate::config::Config::load().config.update.channel {
-            crate::config::UpdateChannelConfig::Stable => Self::Stable,
-            crate::config::UpdateChannelConfig::Preview => Self::Preview,
+        match crate::distribution::UPDATE_CHANNEL {
+            "preview" => Self::Preview,
+            _ => Self::Stable,
         }
     }
 
@@ -283,11 +286,11 @@ impl ReleaseInfo {
 }
 
 fn fetch_update_manifest() -> Result<UpdateManifest, String> {
-    fetch_json_manifest(STABLE_UPDATE_MANIFEST_URL)
+    fetch_json_manifest(crate::distribution::STABLE_MANIFEST_URL)
 }
 
 fn fetch_preview_manifest() -> Result<PreviewManifest, String> {
-    fetch_json_manifest(PREVIEW_UPDATE_MANIFEST_URL)
+    fetch_json_manifest(preview_update_manifest_url())
 }
 
 fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
@@ -628,19 +631,12 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
 }
 
 #[cfg(windows)]
-fn install_windows_update_with_installer(
-    channel: UpdateChannel,
-    expected_build_id: Option<&str>,
-) -> Result<(), String> {
+fn windows_installer_command(channel: UpdateChannel, expected_build_id: Option<&str>) -> Command {
+    let installer_command = format!("irm '{}' | iex", crate::distribution::WINDOWS_INSTALLER_URL);
     let mut command = Command::new("powershell");
     command
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://herdr.dev/install.ps1 | iex",
-        ])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
+        .arg(installer_command)
         .env("HERDR_CHANNEL", channel.as_str())
         // Drop any inherited PSModulePath. When herdr is launched from
         // PowerShell 7, its Core module paths come first and Windows
@@ -648,10 +644,21 @@ fn install_windows_update_with_installer(
         // Get-FileHash. Removing it lets 5.1 compute its own default path.
         // See PowerShell/PowerShell#8635.
         .env_remove("PSModulePath");
+    if channel == UpdateChannel::Preview {
+        command.env("HERDR_MANIFEST_URL", preview_update_manifest_url());
+    }
     if let Some(build_id) = expected_build_id {
         command.env("HERDR_EXPECTED_BUILD_ID", build_id);
     }
-    let status = command
+    command
+}
+
+#[cfg(windows)]
+fn install_windows_update_with_installer(
+    channel: UpdateChannel,
+    expected_build_id: Option<&str>,
+) -> Result<(), String> {
+    let status = windows_installer_command(channel, expected_build_id)
         .status()
         .map_err(|err| format!("failed to run Windows installer: {err}"))?;
 
@@ -2245,6 +2252,43 @@ fn platform_target() -> (&'static str, &'static str) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod cross_platform_tests {
+    use super::*;
+
+    #[test]
+    fn fork_distribution_locks_the_existing_preview_channel() {
+        assert_eq!(
+            UpdateChannel::configured().as_str(),
+            crate::distribution::UPDATE_CHANNEL
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_installer_command_uses_distribution_sources() {
+        let command = windows_installer_command(UpdateChannel::Preview, Some("build-id"));
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(arguments.contains(crate::distribution::WINDOWS_INSTALLER_URL));
+
+        let manifest = command.get_envs().find_map(|(name, value)| {
+            if name == std::ffi::OsStr::new("HERDR_MANIFEST_URL") {
+                value.map(|value| value.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            manifest.as_deref(),
+            Some(crate::distribution::PREVIEW_MANIFEST_URL)
+        );
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

@@ -24,6 +24,10 @@ distribution. Read this file and `CONTRIBUTING.md` before changing anything.
   manifest.
 - `website/preview.json` is generated update-channel state. The nightly workflow
   updates it only after publishing a verified release; do not hand-edit it.
+- Replayed `src/distribution.rs`, owned by delta patch 0004, is the only owner of
+  fork update channel and source URLs. Local and nightly builds must use it
+  without URL/channel environment variables or upstream fallbacks. Keep the
+  Windows installer URL pinned to a reviewed immutable control commit.
 - Repository release immutability and the
   `HERDR_RELEASE_IMMUTABILITY_ENABLED=true` repository-variable attestation must
   remain enabled. Nightly checks the attestation before packaging and the actual

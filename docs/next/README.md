@@ -60,7 +60,9 @@ existing preview update path against the fork-owned nightly manifest. It checks
 at startup and every 30 minutes while running, shows Herdr's normal update-ready
 indicator when a newer build exists, and installs the verified fork ZIP through
 `herdr update`. The manifest advances only after the Windows nightly passes and
-its immutable prerelease is published.
+its immutable prerelease is published. Local and nightly builds read the same
+checked-in fork distribution configuration; no update URL or channel environment
+variables are required, and there is no fallback to upstream update sources.
 
 The installer at `herdr.dev` still belongs to upstream. Use the fork release for
 the initial install, and run `herdr update` outside Herdr after detaching when an

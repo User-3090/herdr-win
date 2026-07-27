@@ -109,16 +109,11 @@ jobs:
             Pop-Location
           }
           $buildId = "$($upstream.Substring(0, 12)).$($control.Substring(0, 12))"
-          $manifestUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/master/website/preview.json"
-          $installerUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$control/website/install.ps1"
           "upstream_sha=$upstream" >> $env:GITHUB_OUTPUT
           "control_sha=$control" >> $env:GITHUB_OUTPUT
           "build_id=$buildId" >> $env:GITHUB_OUTPUT
-          "HERDR_BUILD_CHANNEL=preview" >> $env:GITHUB_ENV
           "HERDR_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "HERDR_BUILD_COMMIT=$upstream" >> $env:GITHUB_ENV
-          "HERDR_PREVIEW_MANIFEST_URL=$manifestUrl" >> $env:GITHUB_ENV
-          "HERDR_WINDOWS_INSTALLER_URL=$installerUrl" >> $env:GITHUB_ENV
 
       - name: Validate and replay maintained delta
         id: replay
@@ -154,6 +149,36 @@ jobs:
           $sourceInstaller = (Get-FileHash -LiteralPath ..\source\website\install.ps1 -Algorithm SHA256).Hash
           if ($controlInstaller -ne $sourceInstaller) {
             throw "control website/install.ps1 differs from the replayed release installer"
+          }
+          $distribution = Get-Content -LiteralPath ..\source\src\distribution.rs -Raw
+          function Get-DistributionUrl([string] $name) {
+            $pattern = '(?s)\bconst\s+' + [regex]::Escape($name) + ':\s*&str\s*=\s*"([^"]+)";'
+            $match = [regex]::Match($distribution, $pattern)
+            if (-not $match.Success) {
+              throw "could not read $name from replayed distribution configuration"
+            }
+            $match.Groups[1].Value
+          }
+          $manifestUrl = Get-DistributionUrl "PREVIEW_MANIFEST_URL"
+          $expectedManifestUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/master/website/preview.json"
+          if ($manifestUrl -cne $expectedManifestUrl) {
+            throw "replayed distribution manifest URL is not fork-owned"
+          }
+          $installerUrl = Get-DistributionUrl "WINDOWS_INSTALLER_URL"
+          $installerPattern = '^https://raw\.githubusercontent\.com/' +
+            [regex]::Escape($env:GITHUB_REPOSITORY) + '/([0-9a-f]{40})/website/install\.ps1$'
+          if ($installerUrl -cnotmatch $installerPattern) {
+            throw "replayed distribution installer URL is not pinned to a fork commit"
+          }
+          $installerRevision = $Matches[1]
+          & git merge-base --is-ancestor $installerRevision HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "pinned installer revision is not part of the selected control history"
+          }
+          $pinnedInstallerBlob = (git rev-parse "${installerRevision}:website/install.ps1").Trim()
+          $sourceInstallerBlob = (git -C ..\source hash-object website/install.ps1).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pinnedInstallerBlob -ne $sourceInstallerBlob) {
+            throw "pinned installer does not match the tested replay installer"
           }
           $cargoToml = Get-Content -LiteralPath ..\source\Cargo.toml -Raw
           if ($cargoToml -notmatch '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\r?$') {
@@ -202,7 +227,9 @@ jobs:
             scripts.test_preview.PreviewNotesTests.test_windows_preview_asset_requires_sha256
           cargo fmt --check
           cargo clippy --bin herdr --locked --target $env:WINDOWS_TARGET -- -D warnings
-          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr custom_preview_feed_locks_the_existing_preview_channel
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr distribution::tests
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr distribution_channel_owns_local_build_identity
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr fork_distribution_locks_the_existing_preview_channel
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr windows_
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr remote::attach::tests
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr raw_input::tests
@@ -248,9 +275,26 @@ jobs:
             throw "nightly executable identity mismatch: $version"
           }
           $binary = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($exe))
-          foreach ($url in @($env:HERDR_PREVIEW_MANIFEST_URL, $env:HERDR_WINDOWS_INSTALLER_URL)) {
+          $distribution = Get-Content -LiteralPath source\src\distribution.rs -Raw
+          $requiredUrls = [regex]::Matches(
+            $distribution,
+            '(?s)\bconst\s+(?:PREVIEW_MANIFEST_URL|WINDOWS_INSTALLER_URL):\s*&str\s*=\s*"([^"]+)";'
+          ) | ForEach-Object { $_.Groups[1].Value }
+          if ($requiredUrls.Count -ne 2) {
+            throw "could not read required fork URLs from distribution configuration"
+          }
+          foreach ($url in $requiredUrls) {
             if (-not $binary.Contains($url)) {
               throw "nightly executable does not contain required fork update URL: $url"
+            }
+          }
+          foreach ($url in @(
+            "https://herdr.dev/latest.json",
+            "https://herdr.dev/preview.json",
+            "https://herdr.dev/install.ps1"
+          )) {
+            if ($binary.Contains($url)) {
+              throw "nightly executable contains forbidden upstream update URL: $url"
             }
           }
 

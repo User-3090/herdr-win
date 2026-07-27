@@ -63,6 +63,7 @@ mod cli;
 mod client;
 mod config;
 mod detect;
+mod distribution;
 mod events;
 mod ghostty;
 mod handoff_runtime;
@@ -146,12 +147,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # new_cwd = "follow"
 
 [update]
-# Update channel used by background version checks and `herdr update`.
-# Defaults to "stable" on Linux/macOS and "preview" on Windows.
-# Set explicitly to choose stable releases or opt-in preview builds.
-# channel = "stable"
+# The herdr-win update channel and sources are fixed by src/distribution.rs.
+# User configuration cannot redirect the updater away from the fork preview feed.
 
-# Check herdr.dev for new Herdr versions in the background.
+# Check the configured herdr-win feed for new versions in the background.
 # version_check = true
 
 # Check herdr.dev for remote agent-detection manifest updates in the background.
@@ -570,8 +569,8 @@ fn main() -> io::Result<()> {
                 "Stop the running server via the API socket",
             ),
             (
-                "herdr channel set <stable|preview>",
-                "Choose the stable or preview update channel",
+                "herdr channel show",
+                "Show the fixed herdr-win update channel",
             ),
             (
                 "herdr server reload-config",
@@ -580,10 +579,6 @@ fn main() -> io::Result<()> {
             (
                 "herdr config reset-keys",
                 "Back up config.toml and remove custom keybindings",
-            ),
-            (
-                "herdr channel <subcommand>",
-                "Manage the stable or preview update channel",
             ),
             (
                 "herdr api <subcommand>",

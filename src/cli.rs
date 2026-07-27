@@ -109,8 +109,7 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(|arg| arg.as_str()) {
         Some("set") => channel_set(&args[1..]),
         Some("show") if args.len() == 1 => {
-            let config = crate::config::Config::load().config;
-            println!("{}", config.update.channel.as_str());
+            println!("{}", crate::build_info::channel());
             Ok(0)
         }
         Some("help" | "--help" | "-h") => {
@@ -126,9 +125,17 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
 
 fn channel_set(args: &[String]) -> std::io::Result<i32> {
     let Some(channel) = parse_channel_set_arg(args) else {
-        eprintln!("usage: herdr channel set <stable|preview>");
+        eprintln!("usage: herdr channel set preview");
         return Ok(2);
     };
+
+    if channel != crate::distribution::UPDATE_CHANNEL {
+        eprintln!(
+            "herdr-win update channel is fixed to {}.",
+            crate::distribution::UPDATE_CHANNEL
+        );
+        return Ok(1);
+    }
 
     if let Some(reason) = channel_set_rejection(
         channel,
@@ -236,8 +243,8 @@ fn channel_set_install_action(
 
 fn print_channel_help() {
     eprintln!("herdr channel commands:");
-    eprintln!("  herdr channel show                  print the configured update channel");
-    eprintln!("  herdr channel set <stable|preview>  choose the update channel");
+    eprintln!("  herdr channel show         print the fixed distribution channel");
+    eprintln!("  herdr channel set preview  keep the herdr-win preview channel");
 }
 
 fn run_config_command(args: &[String]) -> std::io::Result<i32> {

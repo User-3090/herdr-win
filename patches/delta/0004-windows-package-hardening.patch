@@ -1,37 +1,44 @@
-From 9d7c260cad88a2819fc1f95efa30250ef2505847 Mon Sep 17 00:00:00 2001
+From df28fe6da82288bf19fcaf54fc04077f581fea57 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 07:40:36 +0200
 Subject: [PATCH 4/4] fix(windows): harden package, installer, and update
  handling
 
-Produce deterministic ConPTY package archives, keep installer staging paths short for Windows PowerShell 5.1, normalize vendor patch inventory paths, and let downstream preview builds select their own manifest and Windows installer while reusing Herdr update mechanics.
+Produce deterministic ConPTY package archives, keep installer staging paths short for Windows PowerShell 5.1, normalize vendor patch inventory paths, and centralize herdr-win preview distribution sources so local and nightly builds cannot fall back to upstream while reusing Herdr update mechanics.
 ---
- build.rs                                      |  2 +
- scripts/package_windows_conpty.py             |  9 ++-
- scripts/preview.py                            | 13 ++--
+ build.rs                                      |  1 -
+ scripts/package_windows_conpty.py             |  9 +-
+ scripts/preview.py                            | 13 +--
  scripts/test_package_windows_conpty.py        | 10 +++
- scripts/test_preview.py                       |  4 ++
+ scripts/test_preview.py                       |  4 +
  scripts/test_vendor_libghostty_vt.py          |  4 +-
  scripts/test_vendor_portable_pty.py           |  4 +-
- .../windows_install_conpty_package_test.ps1   | 11 +++-
- src/remote/attach.rs                          | 11 +++-
- src/update.rs                                 | 61 +++++++++++++++++--
+ .../windows_install_conpty_package_test.ps1   | 11 ++-
+ src/build_info.rs                             |  7 +-
+ src/cli.rs                                    | 17 ++--
+ src/cli/status.rs                             | 12 +--
+ src/config.rs                                 |  2 +-
+ src/config/model.rs                           | 10 ---
+ src/distribution.rs                           | 46 ++++++++++
+ src/main.rs                                   | 17 ++--
+ src/remote/attach.rs                          | 10 ++-
+ src/update.rs                                 | 84 ++++++++++++++-----
  website/install.ps1                           |  5 +-
- 11 files changed, 115 insertions(+), 19 deletions(-)
+ 18 files changed, 189 insertions(+), 77 deletions(-)
+ create mode 100644 src/distribution.rs
 
 diff --git a/build.rs b/build.rs
-index 66ed262012bbc648b98adf9e5489a8c85dda6353..ed1c0a5ccca102b0793170f894618c4251df74e4 100644
+index 66ed262012bbc648b98adf9e5489a8c85dda6353..b09fd7c814f71b72a49ba1ce6b949ea492373c6f 100644
 --- a/build.rs
 +++ b/build.rs
-@@ -44,6 +44,8 @@ fn main() {
-     println!("cargo:rerun-if-env-changed=HERDR_BUILD_CHANNEL");
+@@ -41,7 +41,6 @@ fn main() {
+     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE");
+     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
+     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
+-    println!("cargo:rerun-if-env-changed=HERDR_BUILD_CHANNEL");
      println!("cargo:rerun-if-env-changed=HERDR_BUILD_ID");
      println!("cargo:rerun-if-env-changed=HERDR_BUILD_COMMIT");
-+    println!("cargo:rerun-if-env-changed=HERDR_PREVIEW_MANIFEST_URL");
-+    println!("cargo:rerun-if-env-changed=HERDR_WINDOWS_INSTALLER_URL");
      println!("cargo:rerun-if-env-changed=ZIG");
- 
-     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
 index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..a9ec8950f8a972eed24fec438af96c1c558ac120 100644
 --- a/scripts/package_windows_conpty.py
@@ -191,16 +198,265 @@ index 062c2cfedf0a7d343fc7e2eb896e9b246d83c4b1..746462a5cd9570533584ddcf4a074d55
      if ($null -ne $server -and -not $server.HasExited) {
          Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
      }
+diff --git a/src/build_info.rs b/src/build_info.rs
+index 1fdedfbb7a000939e74f5dcdfcd3c55ab0dc45d1..40c8b3eddcc6a0c0774b03a5517d877603c1052d 100644
+--- a/src/build_info.rs
++++ b/src/build_info.rs
+@@ -3,7 +3,7 @@
+ pub const BASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+ 
+ pub fn channel() -> &'static str {
+-    non_empty(option_env!("HERDR_BUILD_CHANNEL")).unwrap_or("stable")
++    crate::distribution::UPDATE_CHANNEL
+ }
+ 
+ pub fn build_id() -> Option<&'static str> {
+@@ -38,7 +38,8 @@ fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
+ #[cfg(test)]
+ mod tests {
+     #[test]
+-    fn stable_version_defaults_to_cargo_version() {
+-        assert!(!super::version().is_empty());
++    fn distribution_channel_owns_local_build_identity() {
++        assert_eq!(super::channel(), "preview");
++        assert!(super::version().starts_with(&format!("{}-preview", super::BASE_VERSION)));
+     }
+ }
+diff --git a/src/cli.rs b/src/cli.rs
+index 9d7389b5170af663ea70846e6fde8ab579c0631d..ee812e6bffba5f7face70a0ced2cf3367b023251 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -109,8 +109,7 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
+     match args.first().map(|arg| arg.as_str()) {
+         Some("set") => channel_set(&args[1..]),
+         Some("show") if args.len() == 1 => {
+-            let config = crate::config::Config::load().config;
+-            println!("{}", config.update.channel.as_str());
++            println!("{}", crate::build_info::channel());
+             Ok(0)
+         }
+         Some("help" | "--help" | "-h") => {
+@@ -126,10 +125,18 @@ fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
+ 
+ fn channel_set(args: &[String]) -> std::io::Result<i32> {
+     let Some(channel) = parse_channel_set_arg(args) else {
+-        eprintln!("usage: herdr channel set <stable|preview>");
++        eprintln!("usage: herdr channel set preview");
+         return Ok(2);
+     };
+ 
++    if channel != crate::distribution::UPDATE_CHANNEL {
++        eprintln!(
++            "herdr-win update channel is fixed to {}.",
++            crate::distribution::UPDATE_CHANNEL
++        );
++        return Ok(1);
++    }
++
+     if let Some(reason) = channel_set_rejection(
+         channel,
+         crate::update::preview_channel_rejection_for_current_install(),
+@@ -236,8 +243,8 @@ fn channel_set_install_action(
+ 
+ fn print_channel_help() {
+     eprintln!("herdr channel commands:");
+-    eprintln!("  herdr channel show                  print the configured update channel");
+-    eprintln!("  herdr channel set <stable|preview>  choose the update channel");
++    eprintln!("  herdr channel show         print the fixed distribution channel");
++    eprintln!("  herdr channel set preview  keep the herdr-win preview channel");
+ }
+ 
+ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
+diff --git a/src/cli/status.rs b/src/cli/status.rs
+index 49b3c129f5ed807ccca6bf4989a44407ef400431..23edaf7af016ecaa67303a7b75b744e929bc60a3 100644
+--- a/src/cli/status.rs
++++ b/src/cli/status.rs
+@@ -93,10 +93,7 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
+ 
+     println!("client:");
+     println!("  version: {}", crate::build_info::version());
+-    println!(
+-        "  channel: {}",
+-        crate::config::Config::load().config.update.channel.as_str()
+-    );
++    println!("  channel: {}", crate::build_info::channel());
+     println!("  protocol: {}", crate::protocol::PROTOCOL_VERSION);
+     println!();
+     println!("server:");
+@@ -125,10 +122,7 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
+     }
+ 
+     println!("version: {}", crate::build_info::version());
+-    println!(
+-        "channel: {}",
+-        crate::config::Config::load().config.update.channel.as_str()
+-    );
++    println!("channel: {}", crate::build_info::channel());
+     println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
+     println!("binary: {}", current_exe_label());
+     Ok(())
+@@ -252,7 +246,7 @@ struct UpdateStatusJson {
+ fn client_status_json() -> ClientStatusJson {
+     ClientStatusJson {
+         version: crate::build_info::version(),
+-        channel: crate::config::Config::load().config.update.channel.as_str(),
++        channel: crate::build_info::channel(),
+         protocol: crate::protocol::PROTOCOL_VERSION,
+         binary: current_exe_label(),
+         session: crate::session::active_name(),
+diff --git a/src/config.rs b/src/config.rs
+index f07f66cee70db2a79abfab02986390ca26ff5796..76ca0724907e09889a4d03faf1990c6b17e5e475 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -22,7 +22,7 @@ pub use self::{
+         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
+         ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
+         SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+-        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
++        ToastHerdrPosition, MAX_TOAST_DELAY_SECONDS,
+     },
+     sidebar::{
+         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
+diff --git a/src/config/model.rs b/src/config/model.rs
+index 72c810514b4340c0d2071ec70763c9ad2f69995c..de5e8d5f59062b155aad3e40ef79ffd0247c3c8e 100644
+--- a/src/config/model.rs
++++ b/src/config/model.rs
+@@ -19,15 +19,6 @@ pub enum UpdateChannelConfig {
+     Preview,
+ }
+ 
+-impl UpdateChannelConfig {
+-    pub fn as_str(self) -> &'static str {
+-        match self {
+-            Self::Stable => "stable",
+-            Self::Preview => "preview",
+-        }
+-    }
+-}
+-
+ #[derive(Debug, Clone, Copy, Deserialize)]
+ #[serde(default)]
+ pub struct UpdateConfig {
+@@ -1127,7 +1118,6 @@ manifest_check = false
+ "#;
+         let config: Config = toml::from_str(toml).unwrap();
+         assert_eq!(config.update.channel, UpdateChannelConfig::Preview);
+-        assert_eq!(config.update.channel.as_str(), "preview");
+         assert!(!config.update.version_check);
+         assert!(!config.update.manifest_check);
+     }
+diff --git a/src/distribution.rs b/src/distribution.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4189af9d12e51f90c47b8c31e0572011a6fd802f
+--- /dev/null
++++ b/src/distribution.rs
+@@ -0,0 +1,46 @@
++//! Compile-time distribution configuration for herdr-win.
++
++pub(crate) const UPDATE_CHANNEL: &str = "preview";
++pub(crate) const PREVIEW_MANIFEST_URL: &str =
++    "https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json";
++// herdr-win has no stable channel. Keep dormant stable code fork-owned so an
++// accidental channel regression fails to parse instead of contacting upstream.
++pub(crate) const STABLE_MANIFEST_URL: &str = PREVIEW_MANIFEST_URL;
++
++// Keep the installer pinned to a reviewed control commit. The installer reads
++// PREVIEW_MANIFEST_URL to select the current immutable Windows package.
++#[cfg(windows)]
++pub(crate) const WINDOWS_INSTALLER_URL: &str = "https://raw.githubusercontent.com/User-3090/herdr-win/d87208e06674802576d98bdeebf093479bfcffa7/website/install.ps1";
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const FORK_RAW_PREFIX: &str = "https://raw.githubusercontent.com/User-3090/herdr-win/";
++
++    #[test]
++    fn preview_distribution_is_fork_owned() {
++        assert_eq!(UPDATE_CHANNEL, "preview");
++        assert_eq!(STABLE_MANIFEST_URL, PREVIEW_MANIFEST_URL);
++        assert_eq!(
++            PREVIEW_MANIFEST_URL,
++            format!("{FORK_RAW_PREFIX}master/website/preview.json")
++        );
++        assert!(!PREVIEW_MANIFEST_URL.contains("herdr.dev"));
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn windows_installer_is_pinned_to_a_fork_commit() {
++        let Some(path) = WINDOWS_INSTALLER_URL.strip_prefix(FORK_RAW_PREFIX) else {
++            panic!("Windows installer URL is not fork-owned");
++        };
++        let Some((revision, file)) = path.split_once('/') else {
++            panic!("Windows installer URL has no revision");
++        };
++        assert_eq!(revision.len(), 40);
++        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
++        assert_eq!(file, "website/install.ps1");
++        assert!(!WINDOWS_INSTALLER_URL.contains("herdr.dev"));
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 85cedc40fdb87081b6c0a1199d30fe59c2c10c19..eb06ba6426b1332bd91a12482b2da8635343d822 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -63,6 +63,7 @@ mod cli;
+ mod client;
+ mod config;
+ mod detect;
++mod distribution;
+ mod events;
+ mod ghostty;
+ mod handoff_runtime;
+@@ -146,12 +147,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
+ # new_cwd = "follow"
+ 
+ [update]
+-# Update channel used by background version checks and `herdr update`.
+-# Defaults to "stable" on Linux/macOS and "preview" on Windows.
+-# Set explicitly to choose stable releases or opt-in preview builds.
+-# channel = "stable"
++# The herdr-win update channel and sources are fixed by src/distribution.rs.
++# User configuration cannot redirect the updater away from the fork preview feed.
+ 
+-# Check herdr.dev for new Herdr versions in the background.
++# Check the configured herdr-win feed for new versions in the background.
+ # version_check = true
+ 
+ # Check herdr.dev for remote agent-detection manifest updates in the background.
+@@ -576,8 +575,8 @@ fn main() -> io::Result<()> {
+                 "Stop the running server via the API socket",
+             ),
+             (
+-                "herdr channel set <stable|preview>",
+-                "Choose the stable or preview update channel",
++                "herdr channel show",
++                "Show the fixed herdr-win update channel",
+             ),
+             (
+                 "herdr server reload-config",
+@@ -587,10 +586,6 @@ fn main() -> io::Result<()> {
+                 "herdr config reset-keys",
+                 "Back up config.toml and remove custom keybindings",
+             ),
+-            (
+-                "herdr channel <subcommand>",
+-                "Manage the stable or preview update channel",
+-            ),
+             (
+                 "herdr api <subcommand>",
+                 "Inspect socket API metadata and live runtime state",
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
-index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..26a708e12ad4abb7f22ee04b7edc1f86f9e7d481 100644
+index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..e3d1ab9bcd06c673c1275606ca179cbd84e57520 100644
 --- a/src/remote/attach.rs
 +++ b/src/remote/attach.rs
-@@ -24,13 +24,20 @@ const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+@@ -23,14 +23,16 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
+ const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
  const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
  const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
- const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 -const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-+const DEFAULT_PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
  const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
  const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
  pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
@@ -208,16 +464,13 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..26a708e12ad4abb7f22ee04b7edc1f86
  pub(crate) const REMOTE_KEYBINDINGS_ENV_VAR: &str = "HERDR_REMOTE_KEYBINDINGS";
  
 +fn preview_update_manifest_url() -> &'static str {
-+    option_env!("HERDR_PREVIEW_MANIFEST_URL")
-+        .map(str::trim)
-+        .filter(|value| !value.is_empty())
-+        .unwrap_or(DEFAULT_PREVIEW_UPDATE_MANIFEST_URL)
++    crate::distribution::PREVIEW_MANIFEST_URL
 +}
 +
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum RemoteKeybindings {
      Local,
-@@ -1551,7 +1558,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1551,7 +1553,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
          let build_id = crate::build_info::build_id().ok_or_else(|| {
              io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
          })?;
@@ -226,68 +479,67 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..26a708e12ad4abb7f22ee04b7edc1f86
          let manifest: RemotePreviewManifest =
              serde_json::from_slice(&manifest_bytes).map_err(|err| {
                  io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
+@@ -1570,7 +1572,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+     }
+ 
+     let current_version = current_version();
+-    let manifest_bytes = fetch_remote_manifest(STABLE_UPDATE_MANIFEST_URL)?;
++    let manifest_bytes = fetch_remote_manifest(crate::distribution::STABLE_MANIFEST_URL)?;
+     let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
+         .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
+     let release = manifest.release_for_version(&current_version).ok_or_else(|| {
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..e6afb017b3709535c111b7120a771f2bec596bb7 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341babeeeaa 100644
 --- a/src/update.rs
 +++ b/src/update.rs
-@@ -24,7 +24,9 @@ use interprocess::local_socket::traits::Stream as _;
+@@ -1,6 +1,6 @@
+ //! Self-update mechanism.
+ //!
+-//! Checks the hosted herdr.dev update manifest for newer versions.
++//! Checks the configured distribution manifest for newer versions.
+ //! Manual `herdr update` downloads and installs the binary.
+ //! Background checks only surface availability and release notes.
+ //! Uses `curl` as a subprocess for HTTP — no additional Rust HTTP dependencies.
+@@ -23,8 +23,6 @@ use std::time::{Duration, Instant};
+ use interprocess::local_socket::traits::Stream as _;
  use serde::{Deserialize, Deserializer};
  
- const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 -const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-+const DEFAULT_PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-+#[cfg(windows)]
-+const DEFAULT_WINDOWS_INSTALLER_URL: &str = "https://herdr.dev/install.ps1";
  const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
  const HERDR_UPDATE_COMMAND: &str = "herdr update";
  const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
-@@ -42,6 +44,26 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+@@ -42,6 +40,11 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
  const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
  #[cfg(not(windows))]
  const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 +
-+fn custom_preview_update_manifest_url() -> Option<&'static str> {
-+    option_env!("HERDR_PREVIEW_MANIFEST_URL").and_then(|value| {
-+        let value = value.trim();
-+        (!value.is_empty()).then_some(value)
-+    })
-+}
-+
 +fn preview_update_manifest_url() -> &'static str {
-+    custom_preview_update_manifest_url().unwrap_or(DEFAULT_PREVIEW_UPDATE_MANIFEST_URL)
-+}
-+
-+#[cfg(windows)]
-+fn windows_installer_url() -> &'static str {
-+    option_env!("HERDR_WINDOWS_INSTALLER_URL")
-+        .map(str::trim)
-+        .filter(|value| !value.is_empty())
-+        .unwrap_or(DEFAULT_WINDOWS_INSTALLER_URL)
++    crate::distribution::PREVIEW_MANIFEST_URL
 +}
 +
  fn fake_release_notes_body(version: &str) -> String {
      let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
          .ok()
-@@ -107,7 +129,17 @@ enum UpdateChannel {
+@@ -107,9 +110,9 @@ enum UpdateChannel {
  
  impl UpdateChannel {
      fn configured() -> Self {
 -        match crate::config::Config::load().config.update.channel {
-+        Self::resolve(
-+            custom_preview_update_manifest_url().is_some(),
-+            crate::config::Config::load().config.update.channel,
-+        )
-+    }
-+
-+    fn resolve(custom_preview_feed: bool, configured: crate::config::UpdateChannelConfig) -> Self {
-+        if custom_preview_feed {
-+            return Self::Preview;
-+        }
-+        match configured {
-             crate::config::UpdateChannelConfig::Stable => Self::Stable,
-             crate::config::UpdateChannelConfig::Preview => Self::Preview,
+-            crate::config::UpdateChannelConfig::Stable => Self::Stable,
+-            crate::config::UpdateChannelConfig::Preview => Self::Preview,
++        match crate::distribution::UPDATE_CHANNEL {
++            "preview" => Self::Preview,
++            _ => Self::Stable,
          }
-@@ -287,7 +319,7 @@ fn fetch_update_manifest() -> Result<UpdateManifest, String> {
+     }
+ 
+@@ -283,11 +286,11 @@ impl ReleaseInfo {
+ }
+ 
+ fn fetch_update_manifest() -> Result<UpdateManifest, String> {
+-    fetch_json_manifest(STABLE_UPDATE_MANIFEST_URL)
++    fetch_json_manifest(crate::distribution::STABLE_MANIFEST_URL)
  }
  
  fn fetch_preview_manifest() -> Result<PreviewManifest, String> {
@@ -296,18 +548,31 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..e6afb017b3709535c111b7120a771f2b
  }
  
  fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
-@@ -639,15 +671,19 @@ fn install_windows_update_with_installer(
-             "-ExecutionPolicy",
-             "Bypass",
-             "-Command",
+@@ -628,19 +631,12 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+ }
+ 
+ #[cfg(windows)]
+-fn install_windows_update_with_installer(
+-    channel: UpdateChannel,
+-    expected_build_id: Option<&str>,
+-) -> Result<(), String> {
++fn windows_installer_command(channel: UpdateChannel, expected_build_id: Option<&str>) -> Command {
++    let installer_command = format!("irm '{}' | iex", crate::distribution::WINDOWS_INSTALLER_URL);
+     let mut command = Command::new("powershell");
+     command
+-        .args([
+-            "-NoProfile",
+-            "-ExecutionPolicy",
+-            "Bypass",
+-            "-Command",
 -            "irm https://herdr.dev/install.ps1 | iex",
-+            "irm $env:HERDR_WINDOWS_INSTALLER_URL | iex",
-         ])
+-        ])
++        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
++        .arg(installer_command)
          .env("HERDR_CHANNEL", channel.as_str())
-+        .env("HERDR_WINDOWS_INSTALLER_URL", windows_installer_url())
          // Drop any inherited PSModulePath. When herdr is launched from
          // PowerShell 7, its Core module paths come first and Windows
-         // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
+@@ -648,10 +644,21 @@ fn install_windows_update_with_installer(
          // Get-FileHash. Removing it lets 5.1 compute its own default path.
          // See PowerShell/PowerShell#8635.
          .env_remove("PSModulePath");
@@ -317,7 +582,20 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..e6afb017b3709535c111b7120a771f2b
      if let Some(build_id) = expected_build_id {
          command.env("HERDR_EXPECTED_BUILD_ID", build_id);
      }
-@@ -2246,6 +2282,23 @@ fn platform_target() -> (&'static str, &'static str) {
+-    let status = command
++    command
++}
++
++#[cfg(windows)]
++fn install_windows_update_with_installer(
++    channel: UpdateChannel,
++    expected_build_id: Option<&str>,
++) -> Result<(), String> {
++    let status = windows_installer_command(channel, expected_build_id)
+         .status()
+         .map_err(|err| format!("failed to run Windows installer: {err}"))?;
+ 
+@@ -2246,6 +2253,43 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -326,14 +604,34 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..e6afb017b3709535c111b7120a771f2b
 +    use super::*;
 +
 +    #[test]
-+    fn custom_preview_feed_locks_the_existing_preview_channel() {
++    fn fork_distribution_locks_the_existing_preview_channel() {
 +        assert_eq!(
-+            UpdateChannel::resolve(true, crate::config::UpdateChannelConfig::Stable),
-+            UpdateChannel::Preview
++            UpdateChannel::configured().as_str(),
++            crate::distribution::UPDATE_CHANNEL
 +        );
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn windows_installer_command_uses_distribution_sources() {
++        let command = windows_installer_command(UpdateChannel::Preview, Some("build-id"));
++        let arguments = command
++            .get_args()
++            .map(|argument| argument.to_string_lossy())
++            .collect::<Vec<_>>()
++            .join(" ");
++        assert!(arguments.contains(crate::distribution::WINDOWS_INSTALLER_URL));
++
++        let manifest = command.get_envs().find_map(|(name, value)| {
++            if name == std::ffi::OsStr::new("HERDR_MANIFEST_URL") {
++                value.map(|value| value.to_string_lossy().into_owned())
++            } else {
++                None
++            }
++        });
 +        assert_eq!(
-+            UpdateChannel::resolve(false, crate::config::UpdateChannelConfig::Stable),
-+            UpdateChannel::Stable
++            manifest.as_deref(),
++            Some(crate::distribution::PREVIEW_MANIFEST_URL)
 +        );
 +    }
 +}
