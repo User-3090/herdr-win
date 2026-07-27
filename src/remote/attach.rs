@@ -1510,6 +1510,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
     let output = crate::noninteractive_process::curl_command()
         .args([
             "-sfL",
+            "-H",
+            "Cache-Control: no-cache",
             "--retry",
             "3",
             "--connect-timeout",

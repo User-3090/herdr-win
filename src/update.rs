@@ -300,6 +300,8 @@ where
     let output = crate::noninteractive_process::curl_command()
         .args([
             "-sfL",
+            "-H",
+            "Cache-Control: no-cache",
             "--retry",
             "3",
             "--connect-timeout",
@@ -396,6 +398,28 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
     )
 }
 
+fn is_fork_build_id(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(upstream) = parts.next() else {
+        return false;
+    };
+    let Some(control) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && upstream.len() == 12
+        && control.len() == 12
+        && upstream.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && control.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn preview_transition_may_be_stale(current: &str, latest: &str, current_is_archived: bool) -> bool {
+    current != latest
+        && is_fork_build_id(current)
+        && is_fork_build_id(latest)
+        && !current_is_archived
+}
+
 fn release_info_from_preview_manifest(
     manifest: &PreviewManifest,
 ) -> Result<Option<ReleaseInfo>, String> {
@@ -413,6 +437,14 @@ fn release_info_from_preview_manifest(
         && crate::build_info::build_id().is_some_and(|current| current == build_id)
     {
         return Ok(None);
+    }
+    if let Some(current) = crate::build_info::build_id() {
+        if preview_transition_may_be_stale(current, build_id, manifest.builds.contains_key(current))
+        {
+            return Err(format!(
+                "preview manifest does not include current build {current}; refusing a possible downgrade"
+            ));
+        }
     }
 
     let version = Version::parse(&manifest.base_version).ok_or_else(|| {
@@ -645,7 +677,11 @@ fn windows_installer_command(channel: UpdateChannel, expected_build_id: Option<&
         // See PowerShell/PowerShell#8635.
         .env_remove("PSModulePath");
     if channel == UpdateChannel::Preview {
-        command.env("HERDR_MANIFEST_URL", preview_update_manifest_url());
+        let manifest_url = expected_build_id.map_or_else(
+            || preview_update_manifest_url().to_string(),
+            |build_id| format!("{}?build_id={build_id}", preview_update_manifest_url()),
+        );
+        command.env("HERDR_MANIFEST_URL", manifest_url);
     }
     if let Some(build_id) = expected_build_id {
         command.env("HERDR_EXPECTED_BUILD_ID", build_id);
@@ -2265,10 +2301,25 @@ mod cross_platform_tests {
         );
     }
 
+    #[test]
+    fn preview_transition_rejects_unknown_older_manifest() {
+        assert!(preview_transition_may_be_stale(
+            "dc2506ea8cb5.db56546f1a7e",
+            "e536bd8bd99d.d87208e06674",
+            false
+        ));
+        assert!(!preview_transition_may_be_stale(
+            "e536bd8bd99d.d87208e06674",
+            "dc2506ea8cb5.db56546f1a7e",
+            true
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_installer_command_uses_distribution_sources() {
-        let command = windows_installer_command(UpdateChannel::Preview, Some("build-id"));
+        let build_id = "dc2506ea8cb5.db56546f1a7e";
+        let command = windows_installer_command(UpdateChannel::Preview, Some(build_id));
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy())
@@ -2283,10 +2334,11 @@ mod cross_platform_tests {
                 None
             }
         });
-        assert_eq!(
-            manifest.as_deref(),
-            Some(crate::distribution::PREVIEW_MANIFEST_URL)
+        let expected_manifest = format!(
+            "{}?build_id={build_id}",
+            crate::distribution::PREVIEW_MANIFEST_URL
         );
+        assert_eq!(manifest.as_deref(), Some(expected_manifest.as_str()));
     }
 }
 

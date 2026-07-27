@@ -1,4 +1,4 @@
-From df28fe6da82288bf19fcaf54fc04077f581fea57 Mon Sep 17 00:00:00 2001
+From a9bef674b66b5d0d41c00ad15452ee6d6bd5ed98 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 07:40:36 +0200
 Subject: [PATCH 4/4] fix(windows): harden package, installer, and update
@@ -6,25 +6,25 @@ Subject: [PATCH 4/4] fix(windows): harden package, installer, and update
 
 Produce deterministic ConPTY package archives, keep installer staging paths short for Windows PowerShell 5.1, normalize vendor patch inventory paths, and centralize herdr-win preview distribution sources so local and nightly builds cannot fall back to upstream while reusing Herdr update mechanics.
 ---
- build.rs                                      |  1 -
- scripts/package_windows_conpty.py             |  9 +-
- scripts/preview.py                            | 13 +--
- scripts/test_package_windows_conpty.py        | 10 +++
- scripts/test_preview.py                       |  4 +
- scripts/test_vendor_libghostty_vt.py          |  4 +-
- scripts/test_vendor_portable_pty.py           |  4 +-
- .../windows_install_conpty_package_test.ps1   | 11 ++-
- src/build_info.rs                             |  7 +-
- src/cli.rs                                    | 17 ++--
- src/cli/status.rs                             | 12 +--
- src/config.rs                                 |  2 +-
- src/config/model.rs                           | 10 ---
- src/distribution.rs                           | 46 ++++++++++
- src/main.rs                                   | 17 ++--
- src/remote/attach.rs                          | 10 ++-
- src/update.rs                                 | 84 ++++++++++++++-----
- website/install.ps1                           |  5 +-
- 18 files changed, 189 insertions(+), 77 deletions(-)
+ build.rs                                      |   1 -
+ scripts/package_windows_conpty.py             |   9 +-
+ scripts/preview.py                            |  13 +-
+ scripts/test_package_windows_conpty.py        |  10 ++
+ scripts/test_preview.py                       |   4 +
+ scripts/test_vendor_libghostty_vt.py          |   4 +-
+ scripts/test_vendor_portable_pty.py           |   4 +-
+ .../windows_install_conpty_package_test.ps1   |  11 +-
+ src/build_info.rs                             |   7 +-
+ src/cli.rs                                    |  17 ++-
+ src/cli/status.rs                             |  12 +-
+ src/config.rs                                 |   2 +-
+ src/config/model.rs                           |  10 --
+ src/distribution.rs                           |  46 ++++++
+ src/main.rs                                   |  17 +--
+ src/remote/attach.rs                          |  12 +-
+ src/update.rs                                 | 136 +++++++++++++++---
+ website/install.ps1                           |   5 +-
+ 18 files changed, 243 insertions(+), 77 deletions(-)
  create mode 100644 src/distribution.rs
 
 diff --git a/build.rs b/build.rs
@@ -448,7 +448,7 @@ index 85cedc40fdb87081b6c0a1199d30fe59c2c10c19..eb06ba6426b1332bd91a12482b2da863
                  "herdr api <subcommand>",
                  "Inspect socket API metadata and live runtime state",
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
-index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..e3d1ab9bcd06c673c1275606ca179cbd84e57520 100644
+index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..3967e4fd8abe6d023f398c047cafd71303ef8fc5 100644
 --- a/src/remote/attach.rs
 +++ b/src/remote/attach.rs
 @@ -23,14 +23,16 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -470,7 +470,16 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..e3d1ab9bcd06c673c1275606ca179cbd
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum RemoteKeybindings {
      Local,
-@@ -1551,7 +1553,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1508,6 +1510,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
+     let output = crate::noninteractive_process::curl_command()
+         .args([
+             "-sfL",
++            "-H",
++            "Cache-Control: no-cache",
+             "--retry",
+             "3",
+             "--connect-timeout",
+@@ -1551,7 +1555,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
          let build_id = crate::build_info::build_id().ok_or_else(|| {
              io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
          })?;
@@ -479,7 +488,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..e3d1ab9bcd06c673c1275606ca179cbd
          let manifest: RemotePreviewManifest =
              serde_json::from_slice(&manifest_bytes).map_err(|err| {
                  io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-@@ -1570,7 +1572,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1570,7 +1574,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
      }
  
      let current_version = current_version();
@@ -489,7 +498,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..e3d1ab9bcd06c673c1275606ca179cbd
          .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
      let release = manifest.release_for_version(&current_version).ok_or_else(|| {
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341babeeeaa 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..dc9e81dc7fdf500a1dfc41883c6b8e7c2ecb5e4c 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -548,7 +557,60 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341
  }
  
  fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
-@@ -628,19 +631,12 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -297,6 +300,8 @@ where
+     let output = crate::noninteractive_process::curl_command()
+         .args([
+             "-sfL",
++            "-H",
++            "Cache-Control: no-cache",
+             "--retry",
+             "3",
+             "--connect-timeout",
+@@ -393,6 +398,28 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
+     )
+ }
+ 
++fn is_fork_build_id(value: &str) -> bool {
++    let mut parts = value.split('.');
++    let Some(upstream) = parts.next() else {
++        return false;
++    };
++    let Some(control) = parts.next() else {
++        return false;
++    };
++    parts.next().is_none()
++        && upstream.len() == 12
++        && control.len() == 12
++        && upstream.bytes().all(|byte| byte.is_ascii_hexdigit())
++        && control.bytes().all(|byte| byte.is_ascii_hexdigit())
++}
++
++fn preview_transition_may_be_stale(current: &str, latest: &str, current_is_archived: bool) -> bool {
++    current != latest
++        && is_fork_build_id(current)
++        && is_fork_build_id(latest)
++        && !current_is_archived
++}
++
+ fn release_info_from_preview_manifest(
+     manifest: &PreviewManifest,
+ ) -> Result<Option<ReleaseInfo>, String> {
+@@ -411,6 +438,14 @@ fn release_info_from_preview_manifest(
+     {
+         return Ok(None);
+     }
++    if let Some(current) = crate::build_info::build_id() {
++        if preview_transition_may_be_stale(current, build_id, manifest.builds.contains_key(current))
++        {
++            return Err(format!(
++                "preview manifest does not include current build {current}; refusing a possible downgrade"
++            ));
++        }
++    }
+ 
+     let version = Version::parse(&manifest.base_version).ok_or_else(|| {
+         format!(
+@@ -628,19 +663,12 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
@@ -572,12 +634,16 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341
          .env("HERDR_CHANNEL", channel.as_str())
          // Drop any inherited PSModulePath. When herdr is launched from
          // PowerShell 7, its Core module paths come first and Windows
-@@ -648,10 +644,21 @@ fn install_windows_update_with_installer(
+@@ -648,10 +676,25 @@ fn install_windows_update_with_installer(
          // Get-FileHash. Removing it lets 5.1 compute its own default path.
          // See PowerShell/PowerShell#8635.
          .env_remove("PSModulePath");
 +    if channel == UpdateChannel::Preview {
-+        command.env("HERDR_MANIFEST_URL", preview_update_manifest_url());
++        let manifest_url = expected_build_id.map_or_else(
++            || preview_update_manifest_url().to_string(),
++            |build_id| format!("{}?build_id={build_id}", preview_update_manifest_url()),
++        );
++        command.env("HERDR_MANIFEST_URL", manifest_url);
 +    }
      if let Some(build_id) = expected_build_id {
          command.env("HERDR_EXPECTED_BUILD_ID", build_id);
@@ -595,7 +661,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341
          .status()
          .map_err(|err| format!("failed to run Windows installer: {err}"))?;
  
-@@ -2246,6 +2253,43 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2246,6 +2289,59 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -611,10 +677,25 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341
 +        );
 +    }
 +
++    #[test]
++    fn preview_transition_rejects_unknown_older_manifest() {
++        assert!(preview_transition_may_be_stale(
++            "dc2506ea8cb5.db56546f1a7e",
++            "e536bd8bd99d.d87208e06674",
++            false
++        ));
++        assert!(!preview_transition_may_be_stale(
++            "e536bd8bd99d.d87208e06674",
++            "dc2506ea8cb5.db56546f1a7e",
++            true
++        ));
++    }
++
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_installer_command_uses_distribution_sources() {
-+        let command = windows_installer_command(UpdateChannel::Preview, Some("build-id"));
++        let build_id = "dc2506ea8cb5.db56546f1a7e";
++        let command = windows_installer_command(UpdateChannel::Preview, Some(build_id));
 +        let arguments = command
 +            .get_args()
 +            .map(|argument| argument.to_string_lossy())
@@ -629,10 +710,11 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..4fd879f45548424ea0fe2baf8923f341
 +                None
 +            }
 +        });
-+        assert_eq!(
-+            manifest.as_deref(),
-+            Some(crate::distribution::PREVIEW_MANIFEST_URL)
++        let expected_manifest = format!(
++            "{}?build_id={build_id}",
++            crate::distribution::PREVIEW_MANIFEST_URL
 +        );
++        assert_eq!(manifest.as_deref(), Some(expected_manifest.as_str()));
 +    }
 +}
 +
