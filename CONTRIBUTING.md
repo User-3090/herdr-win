@@ -43,6 +43,10 @@ by the canonical queue.
 7. Replay the checked-in mailboxes again on a fresh upstream checkout. Never
    rely on conflict resolution that exists only in a local branch.
 
+Keep the queue small and responsibility-oriented rather than mirroring development
+commit history. Never hand-edit a diff to force application; regenerate the owning
+mailbox from its reviewed logical commit.
+
 Repository branding, GitHub Actions, patch metadata, and release orchestration
 must not be included in product mailboxes.
 
@@ -58,6 +62,18 @@ by the `HERDR_RELEASE_IMMUTABILITY_ENABLED=true` repository variable. The
 workflow must still verify the actual release is immutable, generate the manifest
 with the tested replay's generator, commit only `website/preview.json`, and fail
 closed if `master` advances to an untested control revision.
+
+Publication also fails closed on replay conflict, source drift, missing or mutable
+assets, digest mismatch, wrong installer pin, or feed content that was not fetched
+and verified independently. Preview builds must identify themselves as previews
+and use only fork-owned update/installer sources.
+
+Nightly release work is ephemeral: never create or force-push an integration
+branch, merge upstream into a release branch, resolve replay conflicts
+automatically, or publish releases from ordinary pushes. A conflict fails closed.
+On a same-source rerun, the existing immutable release is canonical; validate and
+reuse its assets, derive the manifest digest from its ZIP, and never replace or
+repoint it.
 
 ## Verification
 
@@ -79,6 +95,21 @@ cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
 Use the nightly workflow for the signed ConPTY package, enhanced-input,
 PowerShell 5.1 installer, and system-fallback gates that depend on GitHub's
 Windows runner.
+
+Workflow changes require `actionlint` plus review of triggers, permissions,
+credential persistence, immutable source identity, artifact digests, and failure
+behavior. Native package or installer changes require the Windows nightly gates
+or equivalent real Windows evidence.
+
+## Documentation
+
+Keep the public fork README concise about installation, automatic updates,
+upstream attribution, and the unchanged `herdr` runtime identity. Keep root
+`README.md` and `docs/next/README.md` byte-for-byte identical. Product
+documentation carried in nightly source belongs in the logical mailbox that owns
+the behavior. Do not edit changelog, release notes, website, or broad docs unless
+changed behavior requires it, and never edit generated preview/version
+documentation directories.
 
 ## Pull requests and commits
 
