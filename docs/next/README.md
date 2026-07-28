@@ -1,20 +1,19 @@
 # herdr-win
 
-**An unofficial, upstream-first Windows build of [Herdr](https://github.com/ogulcancelik/herdr).**
+**An unofficial, upstream-first Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr).**
 
-[Windows nightlies](https://github.com/User-3090/herdr-win/releases) ·
-[upstream Herdr](https://github.com/ogulcancelik/herdr) ·
-[maintained delta](patches/delta/README.md)
+[![Patch replay](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml) [![Windows nightly](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/User-3090/herdr-win/blob/master/rust-toolchain.toml) [![Upstream](https://img.shields.io/badge/upstream-ogulcancelik%2Fherdr-181717?logo=github)](https://github.com/ogulcancelik/herdr) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/User-3090/herdr-win/blob/master/LICENSE)
 
-`herdr-win` keeps a small set of Windows-focused changes replayable on top of
-the latest upstream `master`. It is meant to be a friendly drop-in build for
-people using Herdr natively on Windows, not a separate product or a competing
-upstream.
+`herdr-win` publishes a native Windows x86_64 build by replaying a small, explicit patch queue on current upstream `master`. It is a distribution and patch control plane—not a separate product line—and keeps the Windows delta reviewable, replayable, and suitable for upstream integration.
 
-## The repository is `herdr-win`; the program is `herdr`
+[Install](#install-a-windows-nightly) · [Patch queue](#maintained-windows-delta) · [Upstream review](#for-upstream-maintainers) · [Nightlies](#how-nightlies-work) · [Contributing](#contributing) · [Upstream docs](https://herdr.dev/docs/)
 
-Only the fork's repository and release-channel identity change. Runtime-facing
-names stay compatible with upstream:
+> [!NOTE]
+> General Herdr documentation, behavior, and issue ownership remain upstream. Fork identity appears only in repository, release, and update-channel presentation; the executable and runtime identity stay `herdr`. The explicit Windows behavior delta is mapped below.
+
+## Identity and compatibility
+
+Only the fork's repository and release-channel identity change. Runtime-facing names stay compatible with upstream:
 
 | Surface | Name |
 | --- | --- |
@@ -23,15 +22,11 @@ names stay compatible with upstream:
 | Cargo package | `herdr` |
 | Configuration, state, sessions, sockets, and protocol | `herdr` |
 
-You can switch between an upstream Herdr build and a herdr-win build without
-migrating configuration or learning a second command. Stop running sessions
-before replacing the executable.
+You can switch between an upstream Herdr build and a herdr-win build without migrating configuration or learning a second command. Stop running sessions before replacing the executable.
 
 ## Install a Windows nightly
 
-Nightlies currently target Windows x86_64. From the newest
-[herdr-win prerelease](https://github.com/User-3090/herdr-win/releases), download
-both:
+Nightlies currently target Windows x86_64. From the newest [herdr-win prerelease](https://github.com/User-3090/herdr-win/releases), download both:
 
 - `herdr-windows-x86_64.zip`
 - `herdr-windows-x86_64.zip.sha256`
@@ -46,46 +41,42 @@ $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInv
 if ($actual -ne $expected) { throw "herdr-win checksum mismatch" }
 ```
 
-Extract the ZIP into a new, empty directory and keep the complete directory
-together. It contains `herdr.exe`, the pinned Microsoft ConPTY runtime, its
-integrity marker, and third-party notices. Then run `herdr.exe` directly or add
-that directory to your user `PATH`.
+Extract the ZIP into a new, empty directory and keep the complete directory together. It contains `herdr.exe`, the pinned Microsoft ConPTY runtime, its integrity marker, and third-party notices. Then run `herdr.exe` directly or add that directory to your user `PATH`.
 
-The fork executable is not code-signed, so Windows may show a SmartScreen
-warning. The bundled Microsoft ConPTY binaries are signature-checked during
-packaging.
+> [!WARNING]
+> The fork executable is not code-signed, so Windows may show a SmartScreen warning. Verify the sidecar before running it. The bundled Microsoft ConPTY binaries are signature-checked during packaging.
 
-The first herdr-win install is manual. After that, the build reuses Herdr's
-existing preview update path against the fork-owned nightly manifest. It checks
-at startup and every 30 minutes while running, shows Herdr's normal update-ready
-indicator when a newer build exists, and installs the verified fork ZIP through
-`herdr update`. The manifest advances only after the Windows nightly passes and
-its immutable prerelease is published. Local and nightly builds read the same
-checked-in fork distribution configuration; no update URL or channel environment
-variables are required, and there is no fallback to upstream update sources.
+### Automatic preview updates
 
-The installer at `herdr.dev` still belongs to upstream. Use the fork release for
-the initial install, and run `herdr update` outside Herdr after detaching when an
-update is ready.
+The first herdr-win install is manual. After that, the build reuses Herdr's existing preview update path against the fork-owned nightly manifest. It checks at startup and every 30 minutes while running, shows Herdr's normal update-ready indicator when a newer build exists, and installs the verified fork ZIP through `herdr update`. The manifest is generated from the tested package only after its immutable prerelease is published; a final independent gate verifies that clients can see the new feed entry. Local and nightly builds read the same checked-in fork distribution configuration; no update URL or channel environment variables are required, and there is no fallback to upstream update sources.
 
-## What the maintained delta covers
+The installer at `herdr.dev` belongs to upstream and does not install this fork. Use the fork release for the initial install, then run `herdr update` outside Herdr after detaching when an update is ready.
 
-The canonical queue is intentionally small and grouped by responsibility:
+## Maintained Windows delta
 
-1. Windows terminal appearance, input, cursor, and color behavior.
-2. Native Windows notifications and reliable audio playback.
-3. Windows remote attach plus bounded remote clipboard-image transport.
-4. Deterministic ConPTY packaging, fork-owned updates, and hardened PowerShell
-   installation checks.
+The release product delta is exactly the ordered mailbox queue in [`patches/delta/series`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/series). [`BASE`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/BASE) records the upstream commit used for the latest reviewed refresh.
 
-Because this channel publishes only a Windows executable, it cannot
-automatically install the matching nightly binary on a Linux or macOS remote.
-Use a pre-provisioned matching target or provide a matching build through
-`HERDR_REMOTE_BINARY` when attaching from a nightly.
+| Patch | Review scope |
+| --- | --- |
+| [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
+| [`0002`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0002-windows-desktop-integration.patch) | **Desktop integration:** Unicode-safe native notifications and reliable Windows MediaPlayer audio paths. |
+| [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a small fork-specific Sandbox adapter. |
+| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-package-hardening.patch) | **Packaging and updates:** deterministic ConPTY packaging, hardened PowerShell installation, and fork-owned distribution/update sources. |
 
-See [`patches/delta/README.md`](patches/delta/README.md) for the exact queue and
-refresh policy. [`patches/upstream/`](patches/upstream/README.md) is a frozen
-legacy archive retained so existing patch links continue to work.
+Because this channel publishes only a Windows executable, it cannot automatically install the matching nightly binary on a Linux or macOS remote. Use a pre-provisioned matching target or provide a matching build through `HERDR_REMOTE_BINARY` when attaching from a nightly.
+
+See the [queue documentation](https://github.com/User-3090/herdr-win/blob/master/patches/delta/README.md) for its refresh policy. [`patches/upstream/`](https://github.com/User-3090/herdr-win/tree/master/patches/upstream) is a frozen legacy archive retained so existing patch links continue to work.
+
+## For upstream maintainers
+
+You do not need to infer product changes from fork branch history. The four mailboxes above are the complete maintained behavior delta:
+
+1. start at the exact commit recorded by [`BASE`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/BASE);
+2. apply the filenames from [`series`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/series) in order with `git am --3way`;
+3. review each mailbox's rationale, full-index diff, tests, and documentation as one responsibility-oriented unit; and
+4. use the replay and verification procedure in [`CONTRIBUTING.md`](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md) to reproduce the queue on a fresh upstream checkout.
+
+The mailboxes are review units, not a request to merge each one unchanged. Patch 0003 includes a fork-specific preinstalled-binary adapter for Herdr Sandbox, and patch 0004 contains fork-only distribution URLs; their generic remote and packaging improvements can be separated from that wiring if upstream adopts them. Repository branding, workflows, release manifests, and publication automation remain outside the product queue.
 
 ## How nightlies work
 
@@ -93,38 +84,25 @@ The scheduled workflow:
 
 1. checks out the current upstream Herdr `master`;
 2. applies `patches/delta/series` without resolving conflicts automatically;
-3. runs Windows formatting, lint, focused tests, ConPTY, installer, and runtime
-   probes;
-4. publishes an immutable prerelease identified by both the upstream and
-   herdr-win control revisions;
-5. advances the fork preview manifest only after that release is verified.
+3. runs pre-publication Windows formatting, lint, focused tests, ConPTY, installer, and runtime probes;
+4. publishes an immutable prerelease identified by both the upstream and herdr-win control revisions;
+5. generates and pushes the preview manifest only after that release is verified; and
+6. independently verifies that the public update feed exposes the tested build.
 
-If a patch no longer applies or a gate fails, no release is published. Ordinary
-pushes do not build or publish binaries. For release purposes this repository is
-the control plane; the nightly always builds a fresh upstream checkout rather
-than treating a long-lived integration branch as release source.
+A replay, build, package, or publication failure prevents the subsequent release state. The final public-feed check can fail after the immutable prerelease and manifest commit already exist; that leaves the workflow failed for diagnosis rather than mutating published artifacts. Ordinary pushes do not build or publish binaries. For release purposes this repository is the control plane; the nightly always builds a fresh upstream checkout rather than treating a long-lived integration branch as release source.
 
-## Documentation and support
+## Documentation and issue routing
 
-Use the [upstream documentation](https://herdr.dev/docs/) for the `herdr` CLI,
-configuration, agent integrations, and general behavior. Fork-specific behavior
-and limitations are documented here and in the maintained patch queue.
+Use the [upstream documentation](https://herdr.dev/docs/) for the `herdr` CLI, configuration, agent integrations, and general behavior. Fork-specific behavior and limitations are documented here and in the maintained patch queue.
 
-When reporting a problem, include the herdr-win release tag, Windows version,
-terminal, shell, and a minimal reproduction. Please reproduce a problem with an
-upstream build before reporting it upstream; fork-only failures belong in this
-repository.
+For a Windows-fork problem, open a [herdr-win issue](https://github.com/User-3090/herdr-win/issues) with the release tag, Windows version, terminal, shell, and a minimal reproduction. Reproduce a problem with an upstream build before reporting it upstream; fork-only failures belong here.
 
 ## Contributing
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing the queue or automation.
-AI agents must also follow [`AGENTS.md`](AGENTS.md).
+Read [`CONTRIBUTING.md`](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md) before changing the queue or automation. AI agents must also follow [`AGENTS.md`](https://github.com/User-3090/herdr-win/blob/master/AGENTS.md).
 
 ## Attribution and license
 
-Herdr is created and maintained upstream by
-[Can Çelik](https://github.com/ogulcancelik). Consider
-[sponsoring upstream Herdr](https://github.com/sponsors/ogulcancelik) if the
-project is useful to you.
+Herdr is created and maintained upstream by [Can Çelik](https://github.com/ogulcancelik). Consider [sponsoring upstream Herdr](https://github.com/sponsors/ogulcancelik) if the project is useful to you.
 
-herdr-win is distributed under the upstream [Apache License 2.0](LICENSE).
+herdr-win is distributed under the upstream [Apache License 2.0](https://github.com/User-3090/herdr-win/blob/master/LICENSE).
