@@ -1,28 +1,28 @@
-From 0e3eab37526199e38ad321ad53f1648beed8e1d4 Mon Sep 17 00:00:00 2001
+From f1259959065ba97a0186b5cdf90915dd00472214 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
-Date: Wed, 29 Jul 2026 14:38:29 +0200
+Date: Sun, 26 Jul 2026 07:35:54 +0200
 Subject: [PATCH 1/4] feat(windows): preserve terminal appearance
 
+Transport bounded host color and appearance events, keep software and native cursors visible with host and child-selected colors, and follow host appearance for otherwise unconfigured themes.
 ---
  docs/next/CHANGELOG.md                        |   1 +
- docs/next/api/herdr-api.schema.json           |   2 +-
  .../src/content/docs/configuration.mdx        |   2 +-
  .../src/content/docs/ja/configuration.mdx     |   2 +-
  .../src/content/docs/zh-cn/configuration.mdx  |   2 +-
  .../website/src/data/config-reference.json    |   4 +-
  src/app/mod.rs                                |  56 ++-
- src/client/input.rs                           | 117 ++++++-
+ src/client/input.rs                           |  94 +++++-
  src/client/input/windows_vti.rs               |  82 ++++-
- src/client/mod.rs                             | 225 ++++++++++--
+ src/client/mod.rs                             | 189 ++++++++---
  src/config/theme.rs                           |   6 +-
  src/main.rs                                   |   2 +-
  src/pane.rs                                   |   1 +
  src/pane/cursor.rs                            |   1 +
  src/pane/osc.rs                               | 187 +++++++++-
  src/pane/terminal.rs                          | 109 +++++-
- src/protocol/render_ansi.rs                   | 328 +++++++++++++++++-
- src/protocol/wire.rs                          |  92 ++++-
- src/raw_input.rs                              | 154 +++++++-
+ src/protocol/render_ansi.rs                   | 319 +++++++++++++++++-
+ src/protocol/wire.rs                          |  59 ++++
+ src/raw_input.rs                              | 112 +++++-
  src/server/headless.rs                        |  16 +-
  src/server/render_stream.rs                   |   5 +-
  src/terminal_theme.rs                         |  33 +-
@@ -30,7 +30,7 @@ Subject: [PATCH 1/4] feat(windows): preserve terminal appearance
  tests/client_mode.rs                          |  10 +
  tests/cross_area.rs                           |  10 +
  tests/multi_client.rs                         |  10 +
- 26 files changed, 1346 insertions(+), 117 deletions(-)
+ 25 files changed, 1203 insertions(+), 115 deletions(-)
 
 diff --git a/docs/next/CHANGELOG.md b/docs/next/CHANGELOG.md
 index f17668dd7f4bc744f5b38a530fb590a880b24bf1..b21c4c7b2c99c6d63cf187befca4c55ae68d173e 100644
@@ -44,18 +44,6 @@ index f17668dd7f4bc744f5b38a530fb590a880b24bf1..b21c4c7b2c99c6d63cf187befca4c55a
  - The session navigator now uses connected tree glyphs, groups matches by workspace, and automatically selects the first result when a search begins. (#1611)
  
  ### Fixed
-diff --git a/docs/next/api/herdr-api.schema.json b/docs/next/api/herdr-api.schema.json
-index 59a0c6a3314334c7fc2e7de1f5df8d1605967ac5..b4704cd15c0138077575267bf1fd8e8dba7a1c6b 100644
---- a/docs/next/api/herdr-api.schema.json
-+++ b/docs/next/api/herdr-api.schema.json
-@@ -1,6 +1,6 @@
- {
-   "$schema": "https://json-schema.org/draft/2020-12/schema",
--  "protocol": 18,
-+  "protocol": 19,
-   "schema_version": 1,
-   "schemas": {
-     "error_response": {
 diff --git a/docs/next/website/src/content/docs/configuration.mdx b/docs/next/website/src/content/docs/configuration.mdx
 index df6dc8d3f205408ce672fd2602798f83485d68a6..e7706befe7edd8b95cda7b934e28b915e8829548 100644
 --- a/docs/next/website/src/content/docs/configuration.mdx
@@ -221,7 +209,7 @@ index 1733e234658039578a9334338f67dff67a68b6d2..a4ebffa50c67747ba3686208d66a1ade
          let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
  
 diff --git a/src/client/input.rs b/src/client/input.rs
-index 28d38bda17f8c43c86ad7f3c3d4a6865a09bea4d..49a5b52e8c854b762a7965269d14155d26e0c1e2 100644
+index 28d38bda17f8c43c86ad7f3c3d4a6865a09bea4d..34c85477ceec0871d358bb3727200ffdffae1e2d 100644
 --- a/src/client/input.rs
 +++ b/src/client/input.rs
 @@ -43,8 +43,8 @@ pub fn stdin_reader_loop(
@@ -297,28 +285,24 @@ index 28d38bda17f8c43c86ad7f3c3d4a6865a09bea4d..49a5b52e8c854b762a7965269d14155d
  #[cfg(windows)]
  fn windows_event_is_control_key(event: &crossterm::event::Event) -> bool {
      use crossterm::event::{Event, KeyModifiers};
-@@ -401,10 +418,16 @@ fn windows_client_input_event_from_raw(
+@@ -401,9 +418,13 @@ fn windows_client_input_event_from_raw(
          crate::raw_input::RawInputEvent::OuterFocusLost => {
              Some(crate::protocol::ClientInputEvent::FocusLost)
          }
 -        crate::raw_input::RawInputEvent::HostDefaultColor { .. }
 -        | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
 -        | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
--        | crate::raw_input::RawInputEvent::Unsupported => None,
 +        crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
 +            Some(crate::protocol::ClientInputEvent::HostDefaultColor { kind, color })
-+        }
-+        crate::raw_input::RawInputEvent::HostPaletteColors { colors } => {
-+            Some(crate::protocol::ClientInputEvent::HostPaletteColors { colors })
 +        }
 +        crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => Some(
 +            crate::protocol::ClientInputEvent::HostColorSchemeChanged(appearance),
 +        ),
-+        crate::raw_input::RawInputEvent::Unsupported => None,
++        crate::raw_input::RawInputEvent::HostPaletteColors { .. }
+         | crate::raw_input::RawInputEvent::Unsupported => None,
      }
  }
- 
-@@ -697,6 +720,78 @@ mod windows_tests {
+@@ -697,6 +718,59 @@ mod windows_tests {
          );
      }
  
@@ -372,25 +356,6 @@ index 28d38bda17f8c43c86ad7f3c3d4a6865a09bea4d..49a5b52e8c854b762a7965269d14155d
 +            vec![crate::protocol::ClientInputEvent::HostColorSchemeChanged(
 +                crate::terminal_theme::HostAppearance::Light,
 +            )]
-+        );
-+
-+        let palette = framer
-+            .push(b"\x1b]4;7;rgb:4444/5555/6666\x1b\\")
-+            .into_iter()
-+            .filter_map(windows_client_input_event_from_raw)
-+            .collect::<Vec<_>>();
-+        assert_eq!(
-+            palette,
-+            vec![crate::protocol::ClientInputEvent::HostPaletteColors {
-+                colors: vec![(
-+                    7,
-+                    crate::terminal_theme::RgbColor {
-+                        r: 0x44,
-+                        g: 0x55,
-+                        b: 0x66,
-+                    },
-+                )],
-+            }]
 +        );
 +    }
 +
@@ -522,36 +487,27 @@ index 8966112e0db17822c1da5d67f686c96985483183..34ad3797d0e4140d2c49f2b890a41552
      fn vti_win32_input_mode_bracketed_paste_key_records_emit_single_paste() {
          let records = win32_input_mode_encoded_key_bytes(
 diff --git a/src/client/mod.rs b/src/client/mod.rs
-index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b0703bc32 100644
+index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..c2c2f8a7f695ab0830214e3e8dabaf242f103ab6 100644
 --- a/src/client/mod.rs
 +++ b/src/client/mod.rs
-@@ -48,6 +48,14 @@ use crate::server::socket_paths::client_socket_path;
+@@ -47,6 +47,7 @@ use crate::protocol::{
+ use crate::server::socket_paths::client_socket_path;
  
  static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
++type SharedHostCursorColor = Arc<Mutex<Option<crate::terminal_theme::RgbColor>>>;
  
-+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-+struct HostCursorRestore {
-+    original_color: Option<crate::terminal_theme::RgbColor>,
-+    dirty: bool,
-+}
-+
-+type SharedHostCursorRestore = Arc<Mutex<HostCursorRestore>>;
-+
  // ---------------------------------------------------------------------------
  // Client state
- // ---------------------------------------------------------------------------
-@@ -91,6 +99,10 @@ struct ClientState {
+@@ -91,6 +92,8 @@ struct ClientState {
      repaint_pending: bool,
      /// Whether this client draws the cursor into frame cells instead of using the host cursor.
      draw_host_cursor: bool,
 +    /// Cursor fill color reported by the outer terminal through OSC 12.
 +    host_cursor_color: Option<crate::terminal_theme::RgbColor>,
-+    /// Original host cursor color and whether Herdr changed the physical cursor.
-+    host_cursor_restore: SharedHostCursorRestore,
  }
  
  #[derive(Debug, Default)]
-@@ -225,6 +237,62 @@ impl ClientState {
+@@ -225,6 +228,59 @@ impl ClientState {
      fn request_repaint(&mut self) {
          self.repaint_pending = true;
      }
@@ -584,21 +540,15 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
 +    let mut stdout = io::stdout();
 +    let _ = write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
 +    let _ = stdout.flush();
-+    if encoded.cursor_color_changed() {
-+        if let Ok(mut restore) = state.host_cursor_restore.lock() {
-+            restore.dirty = true;
-+        }
-+    }
 +    state.blit_encoder.commit(frame_data, encoded);
 +    state.repaint_pending = false;
 +}
 +
-+fn update_host_cursor_color(state: &mut ClientState, color: crate::terminal_theme::RgbColor) {
-+    if let Ok(mut restore) = state.host_cursor_restore.lock() {
-+        if !restore.dirty && restore.original_color.is_none() {
-+            restore.original_color = Some(color);
-+        }
-+    }
++fn update_host_cursor_color(
++    state: &mut ClientState,
++    restore_color: &SharedHostCursorColor,
++    color: crate::terminal_theme::RgbColor,
++) {
 +    if state.host_cursor_color == Some(color) {
 +        return;
 +    }
@@ -607,6 +557,9 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
 +        .then(|| state.blit_encoder.last_frame().cloned())
 +        .flatten();
 +    state.host_cursor_color = Some(color);
++    if let Ok(mut restore_color) = restore_color.lock() {
++        *restore_color = Some(color);
++    }
 +    if let Some(frame) = cached_frame {
 +        state.request_full_redraw();
 +        render_semantic_frame(state, frame);
@@ -614,7 +567,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
  }
  
  // ---------------------------------------------------------------------------
-@@ -369,7 +437,7 @@ fn setup_terminal_with_capabilities(
+@@ -369,7 +425,7 @@ fn setup_terminal_with_capabilities(
          }
          push_keyboard_enhancement_flags()?;
      } else {
@@ -623,11 +576,11 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
              write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
          }
          if mouse_capture {
-@@ -414,19 +482,25 @@ fn setup_terminal_with_capabilities(
+@@ -414,19 +470,25 @@ fn setup_terminal_with_capabilities(
      Ok(TerminalGuard {
          reset_modify_other_keys: modify_other_keys_mode.is_some(),
          reset_host_color_scheme_reports: host_color_scheme_reports,
-+        host_cursor_restore: Arc::new(Mutex::new(HostCursorRestore::default())),
++        host_cursor_color: Arc::new(Mutex::new(None)),
          #[cfg(windows)]
          restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
      })
@@ -646,15 +599,15 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
  struct TerminalGuard {
      reset_modify_other_keys: bool,
      reset_host_color_scheme_reports: bool,
-+    host_cursor_restore: SharedHostCursorRestore,
++    host_cursor_color: SharedHostCursorColor,
      #[cfg(windows)]
      restore_windows_input_mode: Option<u32>,
  }
-@@ -447,13 +521,30 @@ fn write_host_color_scheme_report_mode(
+@@ -447,13 +509,28 @@ fn write_host_color_scheme_report_mode(
  fn write_terminal_restore_postlude(
      writer: &mut impl io::Write,
      reset_host_color_scheme_reports: bool,
-+    host_cursor_restore: HostCursorRestore,
++    host_cursor_color: Option<crate::terminal_theme::RgbColor>,
  ) -> io::Result<()> {
      if reset_host_color_scheme_reports {
          writer.write_all(
@@ -662,35 +615,33 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
          )?;
      }
 -    // Restore a visible cursor and reset DECSCUSR back to the terminal default.
-+    if host_cursor_restore.dirty {
-+        let cursor_color = host_cursor_restore.original_color.map_or_else(
-+            || {
-+                crate::terminal_theme::osc_reset_default_color_sequence(
-+                    crate::terminal_theme::DefaultColorKind::Cursor,
-+                )
-+                .to_owned()
-+            },
-+            |color| {
-+                crate::terminal_theme::osc_set_default_color_sequence(
-+                    crate::terminal_theme::DefaultColorKind::Cursor,
-+                    color,
-+                )
-+            },
-+        );
-+        writer.write_all(cursor_color.as_bytes())?;
-+    }
++    let cursor_color = host_cursor_color.map_or_else(
++        || {
++            crate::terminal_theme::osc_reset_default_color_sequence(
++                crate::terminal_theme::DefaultColorKind::Cursor,
++            )
++            .to_owned()
++        },
++        |color| {
++            crate::terminal_theme::osc_set_default_color_sequence(
++                crate::terminal_theme::DefaultColorKind::Cursor,
++                color,
++            )
++        },
++    );
++    writer.write_all(cursor_color.as_bytes())?;
      writer.write_all(b"\x1b[?25h\x1b[0 q")?;
      writer.flush()
  }
-@@ -569,6 +660,7 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+@@ -569,6 +646,7 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
  fn restore_terminal_state(
      reset_modify_other_keys: bool,
      reset_host_color_scheme_reports: bool,
-+    host_cursor_restore: HostCursorRestore,
++    host_cursor_color: Option<crate::terminal_theme::RgbColor>,
      #[cfg(windows)] restore_windows_input_mode: Option<u32>,
  ) {
      let _ = clear_received_kitty_graphics(&mut io::stdout());
-@@ -595,7 +687,11 @@ fn restore_terminal_state(
+@@ -595,7 +673,11 @@ fn restore_terminal_state(
      }
  
      ratatui::restore();
@@ -698,73 +649,65 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
 +    let _ = write_terminal_restore_postlude(
 +        &mut io::stdout(),
 +        reset_host_color_scheme_reports,
-+        host_cursor_restore,
++        host_cursor_color,
 +    );
  
      #[cfg(windows)]
      if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
-@@ -647,9 +743,15 @@ fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Res
+@@ -647,9 +729,11 @@ fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Res
  
  impl Drop for TerminalGuard {
      fn drop(&mut self) {
-+        let host_cursor_restore = self
-+            .host_cursor_restore
-+            .lock()
-+            .map(|restore| *restore)
-+            .unwrap_or_default();
++        let host_cursor_color = self.host_cursor_color.lock().ok().and_then(|color| *color);
          restore_terminal_state(
              self.reset_modify_other_keys,
              self.reset_host_color_scheme_reports,
-+            host_cursor_restore,
++            host_cursor_color,
              #[cfg(windows)]
              self.restore_windows_input_mode,
          );
-@@ -1204,13 +1306,19 @@ fn run_client_with_mode(
+@@ -1204,13 +1288,16 @@ fn run_client_with_mode(
      // Install a panic hook to restore the terminal on panic (same as monolithic).
      let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
      let panic_resets_host_color_scheme_reports = terminal_guard.reset_host_color_scheme_reports;
-+    let panic_host_cursor_restore = terminal_guard.host_cursor_restore.clone();
++    let panic_host_cursor_color = terminal_guard.host_cursor_color.clone();
      #[cfg(windows)]
      let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
      let original_hook = std::panic::take_hook();
      std::panic::set_hook(Box::new(move |info| {
-+        let host_cursor_restore = panic_host_cursor_restore
-+            .lock()
-+            .map(|restore| *restore)
-+            .unwrap_or_default();
++        let host_cursor_color = panic_host_cursor_color.lock().ok().and_then(|color| *color);
          restore_terminal_state(
              panic_resets_modify_other_keys,
              panic_resets_host_color_scheme_reports,
-+            host_cursor_restore,
++            host_cursor_color,
              #[cfg(windows)]
              panic_restore_windows_input_mode,
          );
-@@ -1240,6 +1348,7 @@ fn run_client_with_mode(
+@@ -1240,6 +1327,7 @@ fn run_client_with_mode(
              loop_config,
              negotiated_encoding,
              attach_escape,
-+            terminal_guard.host_cursor_restore.clone(),
++            terminal_guard.host_cursor_color.clone(),
          )
          .await
      });
-@@ -1284,6 +1393,7 @@ async fn run_client_loop(
+@@ -1284,6 +1372,7 @@ async fn run_client_loop(
      config: ClientLoopConfig,
      negotiated_encoding: RenderEncoding,
      attach_escape: Option<AttachEscapeState>,
-+    host_cursor_restore: SharedHostCursorRestore,
++    restore_host_cursor_color: SharedHostCursorColor,
  ) -> Result<(), ClientError> {
      #[cfg(windows)]
      let _ = config.mouse_scroll_lines;
-@@ -1306,6 +1416,8 @@ async fn run_client_loop(
+@@ -1306,6 +1395,7 @@ async fn run_client_loop(
          redraw_on_focus_gained: config.redraw_on_focus_gained,
          repaint_pending: false,
          draw_host_cursor,
 +        host_cursor_color: None,
-+        host_cursor_restore,
      };
      debug!(?negotiated_encoding, "client render encoding active");
      let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
-@@ -1417,6 +1529,14 @@ async fn run_client_loop(
+@@ -1417,6 +1507,14 @@ async fn run_client_loop(
                      }
                  } else {
                      let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
@@ -773,13 +716,13 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
 +                        color,
 +                    }] = events.as_slice()
 +                    {
-+                        update_host_cursor_color(&mut state, *color);
++                        update_host_cursor_color(&mut state, &restore_host_cursor_color, *color);
 +                        continue;
 +                    }
                      if crate::raw_input::events_require_host_surface_redraw(
                          &events,
                          state.redraw_on_focus_gained,
-@@ -1481,10 +1601,31 @@ async fn run_client_loop(
+@@ -1481,10 +1579,31 @@ async fn run_client_loop(
                  }
              }
              #[cfg(windows)]
@@ -794,7 +737,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
 +                        color,
 +                    } = event
 +                    {
-+                        update_host_cursor_color(&mut state, *color);
++                        update_host_cursor_color(&mut state, &restore_host_cursor_color, *color);
 +                    }
 +                }
 +                events.retain(|event| {
@@ -812,7 +755,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
                  let raw_events = events
                      .iter()
                      .map(crate::protocol::ClientInputEvent::to_raw_input_event)
-@@ -1495,6 +1636,9 @@ async fn run_client_loop(
+@@ -1495,6 +1614,9 @@ async fn run_client_loop(
                  ) {
                      state.request_repaint();
                  }
@@ -822,7 +765,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
                  let msg = ClientMessage::InputEvents { events };
                  if let Err(e) = write_to_server(&mut write_stream, &msg) {
                      return Err(ClientError::ConnectionLost(e));
-@@ -1516,32 +1660,7 @@ async fn run_client_loop(
+@@ -1516,32 +1638,7 @@ async fn run_client_loop(
              }
              ClientLoopEvent::ServerMessage(msg) => match msg {
                  ServerMessage::Frame(frame_data) => {
@@ -856,7 +799,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
                  }
                  ServerMessage::Terminal(frame) => {
                      if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
-@@ -2155,7 +2274,7 @@ fn query_host_terminal_theme() {
+@@ -2155,7 +2252,7 @@ fn query_host_terminal_theme() {
  }
  
  fn should_query_host_terminal_theme() -> bool {
@@ -865,7 +808,7 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
  }
  
  fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-@@ -2476,8 +2595,8 @@ mod tests {
+@@ -2476,8 +2573,8 @@ mod tests {
      }
  
      #[test]
@@ -876,57 +819,47 @@ index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..19061844f5b006e24c75b3430b414d4b
      }
  
      #[test]
-@@ -2492,14 +2611,48 @@ mod tests {
+@@ -2492,20 +2589,36 @@ mod tests {
      #[test]
      fn terminal_restore_postlude_restores_visible_default_cursor() {
          let mut output = Vec::new();
 -        write_terminal_restore_postlude(&mut output, false).unwrap();
-+        write_terminal_restore_postlude(
-+            &mut output,
-+            false,
-+            HostCursorRestore {
-+                original_color: None,
-+                dirty: true,
-+            },
-+        )
-+        .unwrap();
+-        assert_eq!(output, b"\x1b[?25h\x1b[0 q");
++        write_terminal_restore_postlude(&mut output, false, None).unwrap();
 +        assert_eq!(output, b"\x1b]112\x1b\\\x1b[?25h\x1b[0 q");
 +    }
 +
-+    #[test]
-+    fn terminal_restore_postlude_leaves_unchanged_cursor_color_alone() {
-+        let mut output = Vec::new();
-+        write_terminal_restore_postlude(&mut output, false, HostCursorRestore::default()).unwrap();
-         assert_eq!(output, b"\x1b[?25h\x1b[0 q");
-     }
- 
 +    #[test]
 +    fn terminal_restore_postlude_restores_queried_cursor_color() {
 +        let mut output = Vec::new();
 +        write_terminal_restore_postlude(
 +            &mut output,
 +            false,
-+            HostCursorRestore {
-+                original_color: Some(crate::terminal_theme::RgbColor {
-+                    r: 0x12,
-+                    g: 0x34,
-+                    b: 0x56,
-+                }),
-+                dirty: true,
-+            },
++            Some(crate::terminal_theme::RgbColor {
++                r: 0x12,
++                g: 0x34,
++                b: 0x56,
++            }),
 +        )
 +        .unwrap();
 +        assert_eq!(output, b"\x1b]12;rgb:12/34/56\x1b\\\x1b[?25h\x1b[0 q");
-+    }
-+
+     }
+ 
      #[test]
      fn terminal_restore_postlude_disables_color_scheme_reports_when_enabled() {
          let mut output = Vec::new();
 -        write_terminal_restore_postlude(&mut output, true).unwrap();
-+        write_terminal_restore_postlude(&mut output, true, HostCursorRestore::default()).unwrap();
++        write_terminal_restore_postlude(&mut output, true, None).unwrap();
  
          let mut expected = Vec::new();
          expected.extend_from_slice(
+             crate::terminal_theme::HOST_COLOR_SCHEME_REPORT_DISABLE_SEQUENCE.as_bytes(),
+         );
+-        expected.extend_from_slice(b"\x1b[?25h\x1b[0 q");
++        expected.extend_from_slice(b"\x1b]112\x1b\\\x1b[?25h\x1b[0 q");
+         assert_eq!(output, expected);
+     }
+ 
 diff --git a/src/config/theme.rs b/src/config/theme.rs
 index fc601d3f576f7ea10ea9ceba45a15c437788fa6d..1e51c2f9a24099a78b237939800191a46c0eb20c 100644
 --- a/src/config/theme.rs
@@ -1488,7 +1421,7 @@ index 76ab20d3985670dccc0cca7ed222b66f9050bc9c..6be084b37998ccbae2ddeccaa94e72a1
      fn process_pty_bytes_returns_cursor_color_query_response_from_foreground_fallback() {
          let (tx, mut rx) = mpsc::channel(4);
 diff --git a/src/protocol/render_ansi.rs b/src/protocol/render_ansi.rs
-index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401738d3755 100644
+index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..d898c89099d228338abe281553fb56a0f567aed1 100644
 --- a/src/protocol/render_ansi.rs
 +++ b/src/protocol/render_ansi.rs
 @@ -21,6 +21,7 @@
@@ -1499,22 +1432,15 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
  //! - `ESC ] 52 ; c ; <base64> BEL` — OSC 52 clipboard write
  //!
  //! The goal is minimal output: skip unchanged cells, batch adjacent changes,
-@@ -50,6 +51,14 @@ pub(crate) struct EncodedBlit {
+@@ -50,6 +51,7 @@ pub(crate) struct EncodedBlit {
      pub(crate) full: bool,
      next_last_visible_cursor: Option<(u16, u16)>,
      next_last_cursor_shape: u8,
 +    next_last_cursor_color: Option<crate::terminal_theme::RgbColor>,
-+    cursor_color_changed: bool,
-+}
-+
-+impl EncodedBlit {
-+    pub(crate) fn cursor_color_changed(&self) -> bool {
-+        self.cursor_color_changed
-+    }
  }
  
  /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
-@@ -58,6 +67,7 @@ pub(crate) struct BlitEncoder {
+@@ -58,6 +60,7 @@ pub(crate) struct BlitEncoder {
      last_frame: Option<FrameData>,
      last_visible_cursor: Option<(u16, u16)>,
      last_cursor_shape: u8,
@@ -1522,7 +1448,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
  }
  
  impl BlitEncoder {
-@@ -95,6 +105,11 @@ impl BlitEncoder {
+@@ -95,6 +98,11 @@ impl BlitEncoder {
          let mut bytes = Vec::new();
          let mut next_last_visible_cursor = self.last_visible_cursor;
          let mut next_last_cursor_shape = self.last_cursor_shape;
@@ -1534,23 +1460,21 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
          blit_frame_to_with_cursor_memory_and_clear_policy(
              &mut bytes,
              frame,
-@@ -105,6 +120,10 @@ impl BlitEncoder {
+@@ -105,6 +113,9 @@ impl BlitEncoder {
              clear_before_full_redraw,
              suppress_visible_cursor,
          );
-+        let cursor_color_changed = next_last_cursor_color != self.last_cursor_color;
-+        if cursor_color_changed {
++        if next_last_cursor_color != self.last_cursor_color {
 +            insert_cursor_color_change(&mut bytes, next_last_cursor_color);
 +        }
          if let Some(stats) = prof_stats {
              crate::render_prof::duration_since("ansi_encode.total", prof_started);
              crate::render_prof::counter("ansi_encode.bytes", bytes.len() as u64);
-@@ -122,12 +141,15 @@ impl BlitEncoder {
+@@ -122,12 +133,14 @@ impl BlitEncoder {
              full,
              next_last_visible_cursor,
              next_last_cursor_shape,
 +            next_last_cursor_color,
-+            cursor_color_changed,
          }
      }
  
@@ -1561,7 +1485,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
          self.last_frame = Some(frame);
      }
  
-@@ -138,21 +160,120 @@ impl BlitEncoder {
+@@ -138,21 +151,120 @@ impl BlitEncoder {
      pub(crate) fn last_frame(&self) -> Option<&FrameData> {
          self.last_frame.as_ref()
      }
@@ -1684,7 +1608,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
  #[derive(Clone, Copy, Default)]
  struct ProfBlitStats {
      scanned_cells: u64,
-@@ -1034,6 +1155,7 @@ mod tests {
+@@ -1034,6 +1146,7 @@ mod tests {
                  y: 1,
                  visible: true,
                  shape: 0,
@@ -1692,7 +1616,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1101,6 +1223,7 @@ mod tests {
+@@ -1101,6 +1214,7 @@ mod tests {
                  y: 1,
                  visible: true,
                  shape: 0,
@@ -1700,7 +1624,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1141,6 +1264,7 @@ mod tests {
+@@ -1141,6 +1255,7 @@ mod tests {
                  y: 1,
                  visible: true,
                  shape: 0,
@@ -1708,7 +1632,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1181,11 +1305,12 @@ mod tests {
+@@ -1181,11 +1296,12 @@ mod tests {
                  y: 1,
                  visible: true,
                  shape: 6,
@@ -1722,7 +1646,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
  
          assert_eq!(drawn.cells[5].modifier, REVERSED_MODIFIER);
          assert_eq!(frame.cells[5].modifier, 0);
-@@ -1207,6 +1332,189 @@ mod tests {
+@@ -1207,6 +1323,189 @@ mod tests {
          );
      }
  
@@ -1912,7 +1836,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
      #[test]
      fn drawn_cursor_ignores_hidden_cursor() {
          let frame = FrameData {
-@@ -1218,12 +1526,13 @@ mod tests {
+@@ -1218,12 +1517,13 @@ mod tests {
                  y: 0,
                  visible: false,
                  shape: 0,
@@ -1927,7 +1851,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
      }
  
      #[test]
-@@ -1237,6 +1546,7 @@ mod tests {
+@@ -1237,6 +1537,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 6,
@@ -1935,7 +1859,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1284,6 +1594,7 @@ mod tests {
+@@ -1284,6 +1585,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 0,
@@ -1943,7 +1867,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1297,6 +1608,7 @@ mod tests {
+@@ -1297,6 +1599,7 @@ mod tests {
                  y: 1,
                  visible: false,
                  shape: 0,
@@ -1951,7 +1875,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1532,6 +1844,7 @@ mod tests {
+@@ -1532,6 +1835,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 0,
@@ -1959,7 +1883,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1558,6 +1871,7 @@ mod tests {
+@@ -1558,6 +1862,7 @@ mod tests {
                  y: 0,
                  visible: false,
                  shape: 0,
@@ -1967,7 +1891,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1606,6 +1920,7 @@ mod tests {
+@@ -1606,6 +1911,7 @@ mod tests {
                  y: 0,
                  visible: false,
                  shape: 0,
@@ -1975,7 +1899,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1628,6 +1943,7 @@ mod tests {
+@@ -1628,6 +1934,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 0,
@@ -1983,7 +1907,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1657,6 +1973,7 @@ mod tests {
+@@ -1657,6 +1964,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 0,
@@ -1991,7 +1915,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1668,6 +1985,7 @@ mod tests {
+@@ -1668,6 +1976,7 @@ mod tests {
              y: 2,
              visible: true,
              shape: 0,
@@ -1999,7 +1923,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
          });
  
          let mut output = Vec::new();
-@@ -1697,6 +2015,7 @@ mod tests {
+@@ -1697,6 +2006,7 @@ mod tests {
                  y: 1,
                  visible: true,
                  shape: 0,
@@ -2007,7 +1931,7 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1782,6 +2101,7 @@ mod tests {
+@@ -1782,6 +2092,7 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 0,
@@ -2016,19 +1940,10 @@ index 6cee4fdea0e08ee660a3bc12d38e9364d26c4696..e3399f1323bcefe998fc48b553cdb401
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
 diff --git a/src/protocol/wire.rs b/src/protocol/wire.rs
-index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8b942a7ee 100644
+index 0d4b14bba78671852588c2a5add9402f1be1e0e5..7a73d5a5c4ca89610f5a61a3cdcefdd30de70653 100644
 --- a/src/protocol/wire.rs
 +++ b/src/protocol/wire.rs
-@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
- // ---------------------------------------------------------------------------
- 
- /// Current protocol version. Bumped when wire format changes incompatibly.
--pub const PROTOCOL_VERSION: u32 = 18;
-+pub const PROTOCOL_VERSION: u32 = 19;
- 
- /// Maximum allowed frame payload size (2 MB). Frames larger than this are
- /// rejected to prevent denial-of-service via oversized length prefixes.
-@@ -130,6 +130,14 @@ pub enum ClientInputEvent {
+@@ -130,6 +130,11 @@ pub enum ClientInputEvent {
      },
      FocusGained,
      FocusLost,
@@ -2036,14 +1951,11 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
 +        kind: crate::terminal_theme::DefaultColorKind,
 +        color: crate::terminal_theme::RgbColor,
 +    },
-+    HostPaletteColors {
-+        colors: Vec<(u8, crate::terminal_theme::RgbColor)>,
-+    },
 +    HostColorSchemeChanged(crate::terminal_theme::HostAppearance),
  }
  
  impl ClientKeyKind {
-@@ -309,6 +317,20 @@ impl ClientInputEvent {
+@@ -309,6 +314,15 @@ impl ClientInputEvent {
              Self::Paste { text } => crate::raw_input::RawInputEvent::Paste(text.clone()),
              Self::FocusGained => crate::raw_input::RawInputEvent::OuterFocusGained,
              Self::FocusLost => crate::raw_input::RawInputEvent::OuterFocusLost,
@@ -2053,18 +1965,13 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
 +                    color: *color,
 +                }
 +            }
-+            Self::HostPaletteColors { colors } => {
-+                crate::raw_input::RawInputEvent::HostPaletteColors {
-+                    colors: colors.clone(),
-+                }
-+            }
 +            Self::HostColorSchemeChanged(appearance) => {
 +                crate::raw_input::RawInputEvent::HostColorSchemeChanged(*appearance)
 +            }
          }
      }
  }
-@@ -476,6 +498,9 @@ pub struct CursorState {
+@@ -476,6 +490,9 @@ pub struct CursorState {
      /// Cursor shape as a DECSCUSR parameter.
      #[serde(default)]
      pub shape: CursorShapeParam,
@@ -2074,7 +1981,7 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
  }
  
  /// A rendered frame to be displayed by the client.
-@@ -1089,6 +1114,27 @@ mod tests {
+@@ -1089,6 +1106,17 @@ mod tests {
                      row: 4,
                      modifiers: 0,
                  },
@@ -2086,23 +1993,13 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
 +                        b: 0x33,
 +                    },
 +                },
-+                ClientInputEvent::HostPaletteColors {
-+                    colors: vec![(
-+                        7,
-+                        crate::terminal_theme::RgbColor {
-+                            r: 0x44,
-+                            g: 0x55,
-+                            b: 0x66,
-+                        },
-+                    )],
-+                },
 +                ClientInputEvent::HostColorSchemeChanged(
 +                    crate::terminal_theme::HostAppearance::Dark,
 +                ),
              ],
          };
          let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-@@ -1128,6 +1174,43 @@ mod tests {
+@@ -1128,6 +1156,30 @@ mod tests {
              }
              other => panic!("expected backspace key event, got {other:?}"),
          }
@@ -2123,19 +2020,6 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
 +                color,
 +            } if color == background
 +        ));
-+        let palette_color = crate::terminal_theme::RgbColor {
-+            r: 0x44,
-+            g: 0x55,
-+            b: 0x66,
-+        };
-+        assert!(matches!(
-+            ClientInputEvent::HostPaletteColors {
-+                colors: vec![(7, palette_color)],
-+            }
-+            .to_raw_input_event(),
-+            crate::raw_input::RawInputEvent::HostPaletteColors { colors }
-+                if colors == vec![(7, palette_color)]
-+        ));
 +        assert!(matches!(
 +            ClientInputEvent::HostColorSchemeChanged(crate::terminal_theme::HostAppearance::Light,)
 +                .to_raw_input_event(),
@@ -2146,7 +2030,7 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
      }
  
      #[test]
-@@ -1322,6 +1405,11 @@ mod tests {
+@@ -1322,6 +1374,11 @@ mod tests {
                  y: 0,
                  visible: true,
                  shape: 6,
@@ -2158,7 +2042,7 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
              }),
              hyperlinks: vec!["https://example.com".to_owned()],
              graphics: Vec::new(),
-@@ -1507,6 +1595,7 @@ mod tests {
+@@ -1507,6 +1564,7 @@ mod tests {
                  y: 5,
                  visible: true,
                  shape: 0,
@@ -2166,7 +2050,7 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
              }),
              hyperlinks: Vec::new(),
              graphics: Vec::new(),
-@@ -1790,6 +1879,7 @@ mod tests {
+@@ -1790,6 +1848,7 @@ mod tests {
              y: 0,
              visible: true,
              shape: 0,
@@ -2175,7 +2059,7 @@ index 0d4b14bba78671852588c2a5add9402f1be1e0e5..a939d80594bf852327bdd82eeee308e8
          let frame = FrameData::from_ratatui_buffer(&buffer, Some(cursor.clone()));
  
 diff --git a/src/raw_input.rs b/src/raw_input.rs
-index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80daf61d6de 100644
+index 6b59b3927e79562cd93eb0ef20841899c0b43aee..ce33050059941dc83cf158d14e9f28598cea0a73 100644
 --- a/src/raw_input.rs
 +++ b/src/raw_input.rs
 @@ -182,6 +182,11 @@ impl RawInputFramer {
@@ -2206,7 +2090,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
  
  impl RawInputByteFramer {
      pub(crate) fn for_host_input() -> Self {
-@@ -231,15 +238,34 @@ impl RawInputByteFramer {
+@@ -231,15 +238,19 @@ impl RawInputByteFramer {
      }
  
      pub(crate) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
@@ -2214,23 +2098,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
 +            self.held_incomplete_default_color_response = false;
 +        }
          self.buffer.extend_from_slice(data);
--        self.drain_available_chunks()
-+        let chunks = self.drain_available_chunks();
-+        if self.buffer.len() > MAX_INCOMPLETE_DEFAULT_COLOR_RESPONSE_BYTES
-+            && starts_with_incomplete_default_color_response(&self.buffer)
-+        {
-+            tracing::warn!(
-+                len = self.buffer.len(),
-+                "discarding oversized unterminated host color response"
-+            );
-+            self.buffer.clear();
-+            self.discard_until = Some(ControlStringFamily::Osc);
-+            self.discarded_tail_bytes = 0;
-+            self.host_color_replies_awaited = 0;
-+            self.held_pending_color_esc = false;
-+            self.held_incomplete_default_color_response = false;
-+        }
-+        chunks
+         self.drain_available_chunks()
      }
  
 -    /// Hold a lone trailing ESC for one idle flush so an OSC 10/11 reply split
@@ -2243,7 +2111,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
      }
  
      pub(crate) fn enable_host_color_scheme_change_tracking(&mut self) {
-@@ -332,6 +358,20 @@ impl RawInputByteFramer {
+@@ -332,6 +343,20 @@ impl RawInputByteFramer {
          }
  
          if starts_with_incomplete_default_color_response(&self.buffer) {
@@ -2264,7 +2132,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
              tracing::trace!(
                  len = self.buffer.len(),
                  "waiting for host color response terminator"
-@@ -402,9 +442,29 @@ impl RawInputByteFramer {
+@@ -402,9 +427,29 @@ impl RawInputByteFramer {
          tracing::debug!(bytes = ?self.buffer, "dropping incomplete raw input buffer after timeout");
          self.lone_escape_recently_flushed = false;
          self.buffer.clear();
@@ -2294,21 +2162,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
      fn drain_available_chunks(&mut self) -> Vec<Vec<u8>> {
          let mut chunks = Vec::new();
  
-@@ -436,6 +496,13 @@ impl RawInputByteFramer {
-                 let Some(terminator_len) =
-                     control_string_terminator_for_family(&self.buffer, family)
-                 else {
-+                    if self.discarded_tail_bytes.saturating_add(self.buffer.len())
-+                        > MAX_DISCARDED_CONTROL_TAIL_BYTES
-+                    {
-+                        self.buffer.clear();
-+                        self.discard_until = None;
-+                        self.discarded_tail_bytes = 0;
-+                    }
-                     break;
-                 };
-                 self.buffer.drain(..terminator_len);
-@@ -464,6 +531,7 @@ impl RawInputByteFramer {
+@@ -464,6 +509,7 @@ impl RawInputByteFramer {
                  self.host_color_query_sent();
              }
              self.held_pending_color_esc = false;
@@ -2316,7 +2170,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
              chunks.push(self.buffer[..consumed].to_vec());
              self.buffer.drain(..consumed);
          }
-@@ -517,7 +585,6 @@ pub(crate) fn events_require_host_surface_redraw(
+@@ -517,7 +563,6 @@ pub(crate) fn events_require_host_surface_redraw(
              .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
  }
  
@@ -2324,7 +2178,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
  pub(crate) fn events_require_host_terminal_theme_query(events: &[RawInputEvent]) -> bool {
      events
          .iter()
-@@ -798,7 +865,10 @@ fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
+@@ -798,7 +843,10 @@ fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
          Some(ControlString::Incomplete {
              family: ControlStringFamily::Osc
          })
@@ -2336,7 +2190,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
  }
  
  fn starts_with_incomplete_host_color_scheme_report(buffer: &[u8]) -> bool {
-@@ -1305,6 +1375,25 @@ mod tests {
+@@ -1305,6 +1353,25 @@ mod tests {
          );
      }
  
@@ -2362,7 +2216,7 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
      #[test]
      fn parses_legacy_up_arrow() {
          let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[A").unwrap() else {
-@@ -2530,11 +2619,59 @@ mod tests {
+@@ -2530,11 +2597,41 @@ mod tests {
              }
          ));
  
@@ -2401,28 +2255,10 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..e364acfa9b61f22f710afa489139d80d
 +        assert_eq!(framer.push(b"x"), vec![b"x".to_vec()]);
 +    }
 +
-+    #[test]
-+    fn continuously_streamed_unterminated_color_response_is_bounded() {
-+        let mut framer = RawInputByteFramer::default();
-+        framer.host_color_query_sent();
-+
-+        let mut malformed = b"\x1b]12;rgb:".to_vec();
-+        malformed.extend(std::iter::repeat_n(
-+            b'1',
-+            MAX_INCOMPLETE_DEFAULT_COLOR_RESPONSE_BYTES,
-+        ));
-+        assert!(framer.push(&malformed).is_empty());
-+
-+        assert!(framer.buffer.is_empty());
-+        assert_eq!(framer.discard_until, Some(ControlStringFamily::Osc));
-+        assert_eq!(framer.push(b"tail\x1b\\x"), vec![b"x".to_vec()]);
-+        assert_eq!(framer.push(b"y"), vec![b"y".to_vec()]);
-+    }
-+
      #[test]
      fn flushes_lone_escape_when_not_awaiting_host_color_reply() {
          let mut framer = RawInputByteFramer::default();
-@@ -2561,14 +2698,15 @@ mod tests {
+@@ -2561,14 +2658,15 @@ mod tests {
  
          let mut framer = RawInputByteFramer::default();
          framer.host_color_query_sent();

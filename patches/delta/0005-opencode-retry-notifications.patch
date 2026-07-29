@@ -1,0 +1,127 @@
+From 7aab732184f814b925ce28ca6e41612321c1efbb Mon Sep 17 00:00:00 2001
+From: User-3090 <71881005+User-3090@users.noreply.github.com>
+Date: Wed, 29 Jul 2026 09:20:36 +0200
+Subject: [PATCH 4/4] fix(opencode): ignore retryable provider errors
+
+---
+ .../assets/opencode/herdr-agent-state.js      | 20 ++++++++-
+ .../assets/opencode/herdr-agent-state.test.ts | 42 +++++++++++++++++++
+ src/integration/mod.rs                        |  2 +-
+ 3 files changed, 61 insertions(+), 3 deletions(-)
+
+diff --git a/src/integration/assets/opencode/herdr-agent-state.js b/src/integration/assets/opencode/herdr-agent-state.js
+index 7626505045e0ada70d5735e5c2debd1122f21b77..173f16fefd450df4c58e48b27b6419bf4a8826e5 100644
+--- a/src/integration/assets/opencode/herdr-agent-state.js
++++ b/src/integration/assets/opencode/herdr-agent-state.js
+@@ -2,7 +2,7 @@
+ // managed by herdr; reinstalling or updating the integration overwrites this file.
+ // add custom hooks/plugins beside this file instead of editing it.
+ // HERDR_INTEGRATION_ID=opencode
+-// HERDR_INTEGRATION_VERSION=9
++// HERDR_INTEGRATION_VERSION=10
+ 
+ import net from "node:net";
+ 
+@@ -52,6 +52,18 @@ function stateFromSessionStatus(status) {
+     : undefined;
+ }
+ 
++function isRetryableSessionError(error) {
++  if (error?.name !== "APIError") {
++    return false;
++  }
++
++  const data = error.data;
++  return (
++    data?.isRetryable === true ||
++    (typeof data?.statusCode === "number" && data.statusCode >= 500)
++  );
++}
++
+ function request(method, params) {
+   const pending = requestChain.then(() => requestOnce(method, params));
+   requestChain = pending.catch(() => {});
+@@ -186,9 +198,13 @@ export const HerdrAgentStatePlugin = async () => {
+           break;
+         case "permission.asked":
+         case "question.asked":
+-        case "session.error":
+           await reportState("blocked", sessionID);
+           break;
++        case "session.error":
++          if (!isRetryableSessionError(properties.error)) {
++            await reportState("blocked", sessionID);
++          }
++          break;
+         case "session.idle":
+           await reportState("idle", sessionID);
+           break;
+diff --git a/src/integration/assets/opencode/herdr-agent-state.test.ts b/src/integration/assets/opencode/herdr-agent-state.test.ts
+index be21fd714b06b1f292b115481e0b4c12ab1e522c..4115e64dad0962a7254819a57e7f0a7c8d519164 100644
+--- a/src/integration/assets/opencode/herdr-agent-state.test.ts
++++ b/src/integration/assets/opencode/herdr-agent-state.test.ts
+@@ -129,6 +129,48 @@ test("reports retry status as working", async () => {
+   expect(requests.map(requestSessionID)).toEqual(["root-session"]);
+ });
+ 
++test("ignores provider errors OpenCode will retry", async () => {
++  const plugin = await loadPlugin();
++
++  for (const data of [
++    { message: "Request timed out", isRetryable: true },
++    { message: "Service unavailable", isRetryable: false, statusCode: 503 },
++  ]) {
++    await plugin.event({
++      event: {
++        type: "session.error",
++        properties: {
++          sessionID: "root-session",
++          error: { name: "APIError", data },
++        },
++      },
++    });
++  }
++
++  expect(requests).toEqual([]);
++});
++
++test("reports terminal session errors as blocked", async () => {
++  const plugin = await loadPlugin();
++
++  await plugin.event({
++    event: {
++      type: "session.error",
++      properties: {
++        sessionID: "root-session",
++        error: {
++          name: "APIError",
++          data: { message: "Invalid request", isRetryable: false, statusCode: 400 },
++        },
++      },
++    },
++  });
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
+ test("reports child prompts without replacing the root session", async () => {
+   const plugin = await loadPlugin();
+ 
+diff --git a/src/integration/mod.rs b/src/integration/mod.rs
+index 77d8ddda4da93388618f790909f5c23cc5b781a0..657ba5e1934a60c1223f78d27fdf3afece6123e1 100644
+--- a/src/integration/mod.rs
++++ b/src/integration/mod.rs
+@@ -157,7 +157,7 @@ const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
+ ];
+ const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
+ const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
+-const OPENCODE_INTEGRATION_VERSION: u32 = 9;
++const OPENCODE_INTEGRATION_VERSION: u32 = 10;
+ const KILO_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
+ const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/herdr-agent-state.js");
+ const KILO_INTEGRATION_VERSION: u32 = 4;
+-- 
+2.55.0.windows.3
+

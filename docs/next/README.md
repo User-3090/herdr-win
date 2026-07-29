@@ -78,9 +78,9 @@ The release product delta is exactly the ordered mailbox queue in [`patches/delt
 | Patch | Review scope |
 | --- | --- |
 | [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
-| [`0002`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0002-windows-desktop-integration.patch) | **Desktop integration:** Unicode-safe native notifications and reliable Windows MediaPlayer audio paths. |
 | [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a small fork-specific Sandbox adapter. |
 | [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, immutable runtimes and launcher leases, per-user NSIS install/update/uninstall, legacy migration, and fork-owned update sources. |
+| [`0005`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | **OpenCode notifications:** keep retryable provider errors in their active state while still reporting terminal failures as blocked. |
 
 Because this channel publishes only a Windows executable, it cannot automatically install the matching nightly binary on a Linux or macOS remote. Use a pre-provisioned matching target or provide a matching build through `HERDR_REMOTE_BINARY` when attaching from a nightly.
 

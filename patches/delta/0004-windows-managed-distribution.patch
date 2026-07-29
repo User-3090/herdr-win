@@ -1,26 +1,32 @@
-From df81bda92affe3e63cb6f57d9871fcb44f91ded0 Mon Sep 17 00:00:00 2001
+From 3fae17762e25f078e581637a4d3b1df6bb46ccfb Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
-Date: Wed, 29 Jul 2026 16:55:36 +0200
-Subject: [PATCH 4/4] fix(windows): harden managed distribution
+Date: Wed, 29 Jul 2026 09:51:56 +0200
+Subject: [PATCH 3/4] fix(windows): add managed installer distribution
 
-Refs ogulcancelik/herdr#1947
+Add a per-user NSIS distribution with an immutable stable launcher,
+versioned runtimes, lease-aware lazy activation, legacy migration, and
+strict retryable uninstall ownership. Download and verify the installer
+directly for new Windows updates while retaining the portable ZIP for old
+immutable clients. Package and test the native boundary with pinned NSIS,
+PowerShell 5.1/7, fault injection, exact manifest contracts, and a bounded
+kill-on-close installer process job.
 ---
- Cargo.toml                                    |    6 +
+ Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 2059 +++++++++++++++++
- packaging/windows/herdr-installer.nsi         |  405 ++++
+ packaging/windows/herdr-installer-helper.ps1  | 1909 +++++++++++++++++
+ packaging/windows/herdr-installer.nsi         |  390 ++++
  scripts/package_windows_conpty.py             |   17 +-
- scripts/package_windows_installer.ps1         |  423 ++++
+ scripts/package_windows_installer.ps1         |  411 ++++
  scripts/preview.py                            |   26 +-
  scripts/test_package_windows_conpty.py        |   16 +-
  scripts/test_preview.py                       |  133 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  273 +++
+ scripts/test_windows_installer.py             |  265 +++
  .../windows_install_conpty_package_test.ps1   |  144 +-
  scripts/windows_installer_fault_test.ps1      |  169 ++
- scripts/windows_installer_test.ps1            |  503 ++++
+ scripts/windows_installer_test.ps1            |  449 ++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -30,19 +36,19 @@ Refs ogulcancelik/herdr#1947
  src/cli/status.rs                             |   12 +-
  src/config.rs                                 |    2 +-
  src/config/model.rs                           |   10 -
- src/distribution.rs                           |   62 +
+ src/distribution.rs                           |   40 +
  src/main.rs                                   |   19 +-
  src/managed_install.rs                        |  229 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  154 +-
- src/platform/windows/launcher.rs              | 1319 +++++++++++
+ src/platform/windows/launcher.rs              | 1319 ++++++++++++
  src/platform/windows/managed_install.rs       |  687 ++++++
- src/remote/attach.rs                          |   40 +-
+ src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  638 ++++-
+ src/update.rs                                 |  460 +++-
  website/install.ps1                           |    5 +-
- 37 files changed, 7161 insertions(+), 306 deletions(-)
+ 37 files changed, 6717 insertions(+), 286 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/herdr-installer.nsi
  create mode 100644 scripts/package_windows_installer.ps1
@@ -56,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  create mode 100644 src/platform/windows/managed_install.rs
 
 diff --git a/Cargo.toml b/Cargo.toml
-index 05e03235d6e1a09bbac5567c36bf95ef5133dcc8..38dcf2ff98d1ff22082690bf65db41399ccdb437 100644
+index cffcc809c719fc97ab46404247ad5823022b5e55..b87665b0ee0c170afd76b13c6d5d45a3f6b0df7e 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -3,6 +3,7 @@ name = "herdr"
@@ -78,14 +84,22 @@ index 05e03235d6e1a09bbac5567c36bf95ef5133dcc8..38dcf2ff98d1ff22082690bf65db4139
  [dependencies]
  base64 = "0.22.1"
  bincode = { version = "2", features = ["serde"] }
-@@ -54,6 +59,7 @@ windows-sys = { version = "0.61.2", features = [
-     "Win32_Graphics_Gdi",
-     "Win32_Security",
-     "Win32_Security_Authorization",
+@@ -51,6 +56,7 @@ widestring = "1.2.1"
+ windows-sys = { version = "0.61.2", features = [
+     "Wdk_System_Threading",
+     "Win32_Foundation",
 +    "Win32_Storage_FileSystem",
      "Win32_System_DataExchange",
      "Win32_System_Diagnostics_Debug",
      "Win32_System_Diagnostics_ToolHelp",
+@@ -60,6 +66,7 @@ windows-sys = { version = "0.61.2", features = [
+     "Win32_System_Memory",
+     "Win32_System_Ole",
+     "Win32_System_Pipes",
++    "Win32_Security",
+     "Win32_System_Threading",
+     "Win32_UI_Input_Ime",
+     "Win32_UI_Input_KeyboardAndMouse",
 diff --git a/build.rs b/build.rs
 index 66ed262012bbc648b98adf9e5489a8c85dda6353..b09fd7c814f71b72a49ba1ce6b949ea492373c6f 100644
 --- a/build.rs
@@ -128,10 +142,10 @@ index a3726db05cd7efeb29091aaf68339e68f50c3b62..dfb681f74799c988f744d758aadeedc4
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921e9b8a93f
+index 0000000000000000000000000000000000000000..939998b0586e74c73bd3382a839871b0656bbbed
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,2059 @@
+@@ -0,0 +1,1909 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall")]
@@ -165,7 +179,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +$script:TransactionMarkerName = ".herdr-installer-transaction"
 +$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
 +$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
-+$script:InactiveRuntimeRetention = 2
 +
 +function Assert-HerdrBuildId {
 +    param([Parameter(Mandatory = $true)][string]$Value)
@@ -215,16 +228,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +        throw "Refusing to use a volume root as a Herdr install path: $fullPath"
 +    }
 +    return $fullPath.TrimEnd('\')
-+}
-+
-+function Get-HerdrInstallRootPath {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    $fullPath = Get-HerdrFullPath -Path $Path
-+    if ((Join-Path $fullPath "bin").Contains(';')) {
-+        throw "Herdr install paths cannot contain ';' because the managed bin directory must be one PATH entry."
-+    }
-+    return $fullPath
 +}
 +
 +function Test-HerdrPathWithin {
@@ -542,8 +545,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +function Assert-HerdrRuntimeDirectory {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$ExpectedBuildId,
-+        [switch]$OwnershipOnly
++        [Parameter(Mandatory = $true)][string]$ExpectedBuildId
 +    )
 +
 +    Assert-HerdrBuildId -Value $ExpectedBuildId
@@ -582,12 +584,10 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    if (@(Compare-Object $expectedDirectories $actualDirectories -CaseSensitive).Count -ne 0) {
 +        throw "Runtime owned-directory set differs from its manifest-derived layout: $Path"
 +    }
-+    if (-not $OwnershipOnly) {
-+        foreach ($relative in $manifest.Keys) {
-+            $actualHash = Get-HerdrSha256 -Path (Join-Path $Path $relative.Replace('/', '\'))
-+            if ($actualHash -cne [string]$manifest[$relative]) {
-+                throw "Runtime owned-file hash mismatch for $relative in $Path"
-+            }
++    foreach ($relative in $manifest.Keys) {
++        $actualHash = Get-HerdrSha256 -Path (Join-Path $Path $relative.Replace('/', '\'))
++        if ($actualHash -cne [string]$manifest[$relative]) {
++            throw "Runtime owned-file hash mismatch for $relative in $Path"
 +        }
 +    }
 +}
@@ -749,6 +749,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +            ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
 +            throw "Unrecognized content in the Herdr runtime root: $($runtime.FullName)"
 +        }
++        Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
 +    }
 +    $activeBuild = Read-HerdrPointer -Path (Join-Path $stateDir "active")
 +    Assert-HerdrRuntimeDirectory -Path (Join-Path $runtimeRoot $activeBuild) -ExpectedBuildId $activeBuild
@@ -804,7 +805,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +            if (-not $runtime.PSIsContainer -or $runtime.Name -cnotmatch $script:BuildIdPattern) {
 +                throw "Unrecognized remaining runtime during uninstall: $($runtime.FullName)"
 +            }
-+            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name -OwnershipOnly
++            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
 +        }
 +    }
 +    foreach ($pointerName in @("active", "pending")) {
@@ -923,7 +924,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +            }
 +            continue
 +        }
-+        if ($entry.Name -in @("runtime", "metadata", "retired")) {
++        if ($entry.Name -in @("runtime", "metadata")) {
 +            if (-not $entry.PSIsContainer) {
 +                throw "Update installer transaction path is not a directory: $($entry.FullName)"
 +            }
@@ -952,9 +953,11 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +
 +function Remove-HerdrEmptyTransactionShell {
 +    param([string]$Path, [AllowEmptyCollection()][object[]]$Entries)
-+    if ($Entries.Count -ne 0) {
++    if ($Entries.Count -ne 0 -and
++        ($Entries.Count -ne 1 -or $Entries[0].Name -cne $script:TransactionMarkerName -or $Entries[0].PSIsContainer)) {
 +        return $false
 +    }
++    if ($Entries.Count -eq 1) { Remove-Item -LiteralPath $Entries[0].FullName -Force }
 +    Remove-Item -LiteralPath $Path -Force
 +    return $true
 +}
@@ -1020,7 +1023,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +            if (-not $runtime.PSIsContainer -or $runtime.Name -cnotmatch $script:BuildIdPattern) {
 +                throw "Uninstall transaction contains an unrecognized runtime."
 +            }
-+            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name -OwnershipOnly
++            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
 +        }
 +    }
 +}
@@ -1171,7 +1174,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    if (Remove-HerdrEmptyTransactionShell -Path $Path -Entries $entries) {
 +        return
 +    }
-+    Assert-HerdrTransaction -Path $Path -Kind "uninstall" -InstallRoot $InstallRoot
 +    $cleanupNew = Join-Path $Path "cleanup.manifest.new"
 +    if (Test-Path -LiteralPath $cleanupNew) {
 +        Assert-HerdrRegularFile -Path $cleanupNew
@@ -1342,14 +1344,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    return $path
 +}
 +
-+function Get-HerdrGlobalLifecycleLockPath {
-+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
-+        throw "LocalApplicationData is unavailable; the Herdr installer lifecycle lock cannot be located."
-+    }
-+    return [IO.Path]::GetFullPath((Join-Path $localAppData "Herdr\installer-lifecycle.lock"))
-+}
-+
 +function Open-HerdrShareModeLock {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Path,
@@ -1389,52 +1383,28 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
 +        [Parameter(Mandatory = $true)][scriptblock]$Operation,
-+        [int]$TimeoutMilliseconds = 30000,
-+        [string]$GlobalLockPath,
-+        [string]$LegacyRootLockPath
++        [int]$TimeoutMilliseconds = 30000
 +    )
 +
-+    $InstallRoot = Get-HerdrInstallRootPath -Path $InstallRoot
-+    if ([string]::IsNullOrWhiteSpace($GlobalLockPath)) {
-+        $GlobalLockPath = Get-HerdrGlobalLifecycleLockPath
-+    } else {
-+        $GlobalLockPath = Get-HerdrFullPath -Path $GlobalLockPath
-+    }
-+    if ([string]::IsNullOrWhiteSpace($LegacyRootLockPath)) {
-+        $LegacyRootLockPath = Get-HerdrLifecycleLockPath -InstallRoot $InstallRoot
-+    } else {
-+        $LegacyRootLockPath = Get-HerdrFullPath -Path $LegacyRootLockPath
-+    }
-+    if ($GlobalLockPath.Equals($LegacyRootLockPath, [StringComparison]::OrdinalIgnoreCase)) {
-+        throw "Global and root-specific Herdr lifecycle locks must be different files."
-+    }
-+    foreach ($lockPath in @($GlobalLockPath, $LegacyRootLockPath)) {
-+        if (Test-Path -LiteralPath $lockPath) {
-+            Assert-HerdrRegularFile -Path $lockPath
-+            if ((Get-Item -LiteralPath $lockPath -Force).Length -ne 0) {
-+                throw "Persistent Herdr lifecycle lock contains unexpected data: $lockPath"
-+            }
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
++    $lockPath = Get-HerdrLifecycleLockPath -InstallRoot $InstallRoot
++    if (Test-Path -LiteralPath $lockPath) {
++        Assert-HerdrRegularFile -Path $lockPath
++        if ((Get-Item -LiteralPath $lockPath -Force).Length -ne 0) {
++            throw "Persistent Herdr lifecycle lock contains unexpected data: $lockPath"
 +        }
 +    }
-+    # The per-user lock serializes ARP/PATH ownership across custom roots. The
-+    # root-specific lock remains as a compatibility bridge to older helpers.
-+    # Both zero-byte files are permanent rendezvous owners and are never deleted.
-+    $globalLock = Open-HerdrShareModeLock -Path $GlobalLockPath -TimeoutMilliseconds $TimeoutMilliseconds
++    # This zero-byte sibling file is the permanent rendezvous owner across
++    # missing, replaced, and partially uninstalled InstallRoot generations.
++    # Never delete it: every new installer/uninstaller must lock the same path.
++    $lifecycleLock = Open-HerdrShareModeLock -Path $lockPath -TimeoutMilliseconds $TimeoutMilliseconds
 +    try {
-+        if ($globalLock.Length -ne 0) {
-+            throw "Persistent Herdr lifecycle lock contains unexpected data: $GlobalLockPath"
++        if ($lifecycleLock.Length -ne 0) {
++            throw "Persistent Herdr lifecycle lock contains unexpected data: $lockPath"
 +        }
-+        $rootLock = Open-HerdrShareModeLock -Path $LegacyRootLockPath -TimeoutMilliseconds $TimeoutMilliseconds
-+        try {
-+            if ($rootLock.Length -ne 0) {
-+                throw "Persistent Herdr lifecycle lock contains unexpected data: $LegacyRootLockPath"
-+            }
-+            return & $Operation
-+        } finally {
-+            $rootLock.Dispose()
-+        }
++        return & $Operation
 +    } finally {
-+        $globalLock.Dispose()
++        $lifecycleLock.Dispose()
 +    }
 +}
 +
@@ -1530,62 +1500,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    }
 +    foreach ($path in @($LeaseStatus.Stale)) {
 +        Remove-Item -LiteralPath $path -Force
-+    }
-+}
-+
-+function Remove-HerdrRetiredRuntimes {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-+        [Parameter(Mandatory = $true)][string]$RetirementRoot,
-+        [Parameter(Mandatory = $true)][string]$LeasesDir,
-+        [Parameter(Mandatory = $true)][string]$ActiveBuild,
-+        [AllowNull()][string]$PendingBuild,
-+        [Parameter(Mandatory = $true)][object]$LeaseStatus,
-+        [int]$Retain = $script:InactiveRuntimeRetention
-+    )
-+
-+    if ($Retain -lt 0) {
-+        throw "Inactive runtime retention cannot be negative."
-+    }
-+    $protectedBuilds = @($ActiveBuild)
-+    if (-not [string]::IsNullOrWhiteSpace($PendingBuild)) {
-+        $protectedBuilds += $PendingBuild
-+    }
-+    $busyLeases = @($LeaseStatus.Active) + @($LeaseStatus.Ambiguous)
-+    $ownedInactive = New-Object System.Collections.Generic.List[object]
-+    foreach ($runtime in @(Get-ChildItem -LiteralPath $RuntimeRoot -Force -Directory)) {
-+        if ($protectedBuilds -ccontains $runtime.Name) {
-+            continue
-+        }
-+        $leasePath = Join-Path $LeasesDir "$($runtime.Name).lease"
-+        if (@($busyLeases | Where-Object { Test-HerdrPathEntryEqual -Left $_ -Right $leasePath }).Count -gt 0) {
-+            continue
-+        }
-+        try {
-+            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name -OwnershipOnly
-+            $ownedInactive.Add($runtime)
-+        } catch {
-+            Write-Warning "Preserving an inactive runtime whose ownership could not be validated: $($runtime.FullName)"
-+        }
-+    }
-+
-+    $ordered = @($ownedInactive | Sort-Object -Property `
-+        @{ Expression = { $_.LastWriteTimeUtc }; Descending = $true }, `
-+        @{ Expression = { $_.Name }; Descending = $true })
-+    foreach ($runtime in @($ordered | Select-Object -Skip $Retain)) {
-+        try {
-+            if (-not (Test-Path -LiteralPath $RetirementRoot)) {
-+                New-Item -ItemType Directory -Path $RetirementRoot | Out-Null
-+            }
-+            Assert-HerdrRegularDirectory -Path $RetirementRoot
-+            $destination = Join-Path $RetirementRoot $runtime.Name
-+            if (Test-Path -LiteralPath $destination) {
-+                throw "Retired runtime transaction destination already exists: $destination"
-+            }
-+            [IO.Directory]::Move($runtime.FullName, $destination)
-+        } catch {
-+            Write-Warning "Could not prune inactive Herdr runtime $($runtime.FullName): $($_.Exception.Message)"
-+        }
 +    }
 +}
 +
@@ -1748,26 +1662,11 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +                if (Test-Path -LiteralPath $pendingPath) {
 +                    Remove-Item -LiteralPath $pendingPath -Force
 +                }
-+                $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
-+                Remove-HerdrRetiredRuntimes `
-+                    -RuntimeRoot (Join-Path $InstallRoot "runtime") `
-+                    -RetirementRoot (Join-Path $transaction.Path "retired") `
-+                    -LeasesDir (Join-Path $stateDir "leases") `
-+                    -ActiveBuild $BuildId `
-+                    -PendingBuild $null `
-+                    -LeaseStatus $leaseStatus
 +                return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
 +            }
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
 +            $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
 +            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
-+                Remove-HerdrRetiredRuntimes `
-+                    -RuntimeRoot (Join-Path $InstallRoot "runtime") `
-+                    -RetirementRoot (Join-Path $transaction.Path "retired") `
-+                    -LeasesDir (Join-Path $stateDir "leases") `
-+                    -ActiveBuild $activeBuild `
-+                    -PendingBuild $BuildId `
-+                    -LeaseStatus $leaseStatus
 +                return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
 +            }
 +            Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -1777,13 +1676,6 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +            if ((Read-HerdrPointer -Path $activePath) -cne $BuildId -or (Test-Path -LiteralPath $pendingPath)) {
 +                throw "Atomic pending activation did not publish the expected active pointer."
 +            }
-+            Remove-HerdrRetiredRuntimes `
-+                -RuntimeRoot (Join-Path $InstallRoot "runtime") `
-+                -RetirementRoot (Join-Path $transaction.Path "retired") `
-+                -LeasesDir (Join-Path $stateDir "leases") `
-+                -ActiveBuild $BuildId `
-+                -PendingBuild $null `
-+                -LeaseStatus $leaseStatus
 +            return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
 +        } finally {
 +            $coordination.Dispose()
@@ -1813,7 +1705,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    )
 +
 +    Assert-HerdrVersionIdentity -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion -BuildId $BuildId
-+    $InstallRoot = Get-HerdrInstallRootPath -Path $InstallRoot
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    $StageDir = Get-HerdrFullPath -Path $StageDir
 +    Assert-HerdrRegularDirectory -Path $StageDir
 +    Assert-HerdrRegularFile -Path $LauncherPath
@@ -1953,33 +1845,9 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    if (-not (Test-Path -LiteralPath $RegistryPath)) {
 +        return
 +    }
-+    if (-not (Test-HerdrArpRegistrationOwnedByRoot -InstallRoot $InstallRoot -RegistryPath $RegistryPath)) {
++    $registeredRoot = [string](Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation
++    if ([string]::IsNullOrWhiteSpace($registeredRoot) -or -not (Test-HerdrPathEntryEqual -Left $registeredRoot -Right $InstallRoot)) {
 +        throw "Refusing to modify an ARP registration not owned by this Herdr install."
-+    }
-+}
-+
-+function Test-HerdrArpRegistrationOwnedByRoot {
-+    param([Parameter(Mandatory = $true)][string]$InstallRoot, [string]$RegistryPath = $script:ArpKey)
-+
-+    if (-not (Test-Path -LiteralPath $RegistryPath)) {
-+        return $false
-+    }
-+    $registration = Get-ItemProperty -LiteralPath $RegistryPath
-+    $locationProperty = $registration.PSObject.Properties["InstallLocation"]
-+    $registeredRoot = if ($null -eq $locationProperty) { "" } else { [string]$locationProperty.Value }
-+    if (-not [string]::IsNullOrWhiteSpace($registeredRoot)) {
-+        return Test-HerdrPathEntryEqual -Left $registeredRoot -Right $InstallRoot
-+    }
-+    try {
-+        Assert-HerdrManagedRoot -InstallRoot $InstallRoot
-+        return $true
-+    } catch {
-+        try {
-+            Assert-HerdrUninstallRetryRoot -InstallRoot $InstallRoot
-+            return $true
-+        } catch {
-+            return $false
-+        }
 +    }
 +}
 +
@@ -1996,13 +1864,11 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
 +    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
 +    $numeric = $NumericVersion.Split('.')
-+    # InstallLocation is the ownership/recovery anchor. Publish it before all
-+    # presentation fields so an interrupted registration can be repaired.
-+    New-ItemProperty -LiteralPath $RegistryPath -Name "InstallLocation" -Value $InstallRoot -PropertyType String -Force | Out-Null
 +    $values = @{
 +        DisplayName = "Herdr"
 +        DisplayVersion = $DisplayVersion
 +        Publisher = "herdr-win"
++        InstallLocation = $InstallRoot
 +        DisplayIcon = "$launcher,0"
 +        UninstallString = ('"' + $uninstaller + '"')
 +        QuietUninstallString = ('"' + $uninstaller + '" /S')
@@ -2042,7 +1908,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +    if ($ParentPid -lt 0 -or $ParentPid -gt [uint32]::MaxValue) {
 +        throw "PARENT_PID must be a valid 32-bit process ID."
 +    }
-+    $InstallRoot = Get-HerdrInstallRootPath -Path $InstallRoot
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
 +        $result = Install-HerdrLayout `
@@ -2069,7 +1935,7 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
 +    )
 +
-+    $InstallRoot = Get-HerdrInstallRootPath -Path $InstallRoot
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
 +    $legacyRoot = Get-HerdrLegacyReleasesRoot
 +    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $legacyRoot
@@ -2146,14 +2012,12 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +        [int]$LifecycleLockTimeoutMilliseconds = 30000
 +    )
 +
-+    $InstallRoot = Get-HerdrInstallRootPath -Path $InstallRoot
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
-+        $removeArp = Test-HerdrArpRegistrationOwnedByRoot -InstallRoot $InstallRoot
++        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
 +        Invoke-HerdrUninstallLayout -InstallRoot $InstallRoot
 +        Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
-+        if ($removeArp) {
-+            Remove-HerdrArpRegistration -InstallRoot $InstallRoot
-+        }
++        Remove-HerdrArpRegistration -InstallRoot $InstallRoot
 +    }
 +}
 +
@@ -2193,10 +2057,10 @@ index 0000000000000000000000000000000000000000..faeb70af5a2327388be02d59a05e3921
 +}
 diff --git a/packaging/windows/herdr-installer.nsi b/packaging/windows/herdr-installer.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..841e8686e3ca471ef67255ebd7a491b1eb6cc739
+index 0000000000000000000000000000000000000000..559eee5128a133314f0c48e419608baac18873e9
 --- /dev/null
 +++ b/packaging/windows/herdr-installer.nsi
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,390 @@
 +!ifndef HERDR_STAGE_DIR
 +  !error "HERDR_STAGE_DIR is required"
 +!endif
@@ -2360,26 +2224,11 @@ index 0000000000000000000000000000000000000000..841e8686e3ca471ef67255ebd7a491b1
 +
 +Function .onInit
 +  SetShellVarContext current
-+  SetRegView 64
 +  ${IfNot} ${RunningX64}
 +    Push "Herdr requires 64-bit Windows."
 +    Call FailInstall
 +  ${EndIf}
 +  Call WaitForUpdaterStartGate
-+
-+  ; Explicit /D owns this invocation. Otherwise continue an existing custom
-+  ; installation from its per-user ARP registration instead of forking roots.
-+  ${GetParameters} $0
-+  ClearErrors
-+  ${GetOptions} "$0" "/D=" $1
-+  IfErrors install_root_from_arp install_root_ready
-+install_root_from_arp:
-+  ClearErrors
-+  ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr" "InstallLocation"
-+  IfErrors install_root_ready
-+  StrCmp $1 "" install_root_ready
-+  StrCpy $INSTDIR $1
-+install_root_ready:
 +
 +  StrCpy $ParentPid "0"
 +  StrCpy $ParentPidProvided "0"
@@ -2654,10 +2503,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..a375524e0f1fcfc939c8fcbce3843c9c
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..37a2591f67ca317226ca4d42c6acd77670343d56
+index 0000000000000000000000000000000000000000..5d35d2db678cbbf238af501917239948ef9eb2a0
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,411 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -3065,19 +2914,7 @@ index 0000000000000000000000000000000000000000..37a2591f67ca317226ca4d42c6acd776
 +    Assert-X86Pe -Path $temporaryOutput
 +    Move-Item -LiteralPath $temporaryOutput -Destination $OutputPath
 +} finally {
-+    $cleanupError = $null
-+    for ($attempt = 0; $attempt -lt 5 -and (Test-Path -LiteralPath $workingRoot); $attempt++) {
-+        try {
-+            Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction Stop
-+            $cleanupError = $null
-+        } catch {
-+            $cleanupError = $_.Exception.Message
-+            Start-Sleep -Milliseconds 200
-+        }
-+    }
-+    if (Test-Path -LiteralPath $workingRoot) {
-+        Write-Warning "Could not remove verified NSIS staging directory $workingRoot after bounded retries: $cleanupError"
-+    }
++    Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
 +}
 +
 +Write-Host "Created Herdr installer: $OutputPath"
@@ -3390,10 +3227,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e24766f6c
+index 0000000000000000000000000000000000000000..4141b9ab500fbecdb00bdc1778771a041ea78d8f
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,265 @@
 +from __future__ import annotations
 +
 +import re
@@ -3438,8 +3275,6 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +        self.assertIn("[IO.FileOptions]::WriteThrough", helper)
 +        self.assertIn("$stream.Flush($true)", helper)
 +        self.assertIn("Get-HerdrLeaseStatus", helper)
-+        self.assertIn("Remove-HerdrRetiredRuntimes", helper)
-+        self.assertIn("InactiveRuntimeRetention = 2", helper)
 +        self.assertIn('Status = "Pending"', helper)
 +        self.assertIn("Pending; staged until old sessions exit.", helper)
 +
@@ -3453,11 +3288,10 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +        self.assertIn("uninstall.pending", helper)
 +        self.assertIn("Assert-HerdrUninstallRetryRoot", helper)
 +
-+    def test_global_lock_serializes_arp_and_keeps_the_legacy_root_bridge(self) -> None:
++    def test_persistent_sibling_lock_serializes_outer_lifecycle(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
 +        self.assertIn('"$leaf.installer-lifecycle.lock"', helper)
-+        self.assertIn('"Herdr\\installer-lifecycle.lock"', helper)
-+        self.assertIn("compatibility bridge to older helpers", helper)
++        self.assertIn("permanent rendezvous owner", helper)
 +        self.assertIn("[IO.FileShare]::None", helper)
 +        self.assertIn("Invoke-HerdrLifecycleOperation", helper)
 +        install_entry = helper[helper.index("function Invoke-HerdrInstall {") :]
@@ -3512,9 +3346,6 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +        self.assertIn("/TIMEOUT=120000", nsi)
 +        self.assertIn('ReadEnvStr $StartGate "HERDR_INSTALLER_START_GATE_V1"', nsi)
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
-+        self.assertIn('ReadRegStr $1 HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Herdr" "InstallLocation"', nsi)
-+        self.assertIn('${GetOptions} "$0" "/D=" $1', nsi)
-+        self.assertIn("SetRegView 64", nsi)
 +        self.assertIn("IntCmp $0 600", nsi)
 +        self.assertIn("SetErrorLevel 1", nsi)
 +        self.assertIn("SetErrorLevel 0", nsi)
@@ -3595,8 +3426,6 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +        self.assertIn("must match DisplayVersion's major, minor, and patch", packager)
 +        self.assertIn("HERDR_DISPLAY_VERSION", packager)
 +        self.assertIn("HERDR_NUMERIC_VERSION", packager)
-+        self.assertIn("for ($attempt = 0; $attempt -lt 5", packager)
-+        self.assertIn("after bounded retries", packager)
 +        self.assertNotIn("Microsoft.Windows.Console.ConPTY", packager)
 +
 +    def test_updater_owns_a_bounded_kill_on_close_installer_job(self) -> None:
@@ -3615,10 +3444,10 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +        self.assertIn("HERDR_INSTALLER_START_GATE_V1", updater)
 +        self.assertIn("new_kill_on_close", updater)
 +        self.assertIn("terminate_and_wait", updater)
-+        self.assertIn("terminate_unassigned_windows_installer", updater)
-+        self.assertIn("child.kill()", updater)
 +
-+    def test_conpty_smoke_reuses_only_legacy_path_helpers(self) -> None:
++    def test_conpty_archive_validation_no_longer_assigns_website_installer_ownership(
++        self,
++    ) -> None:
 +        package_test = (PROJECT_ROOT / "scripts/test_package_windows_conpty.py").read_text(
 +            encoding="utf-8"
 +        )
@@ -3626,14 +3455,14 @@ index 0000000000000000000000000000000000000000..203f6b9636ceb1fa7cebae8213b2478e
 +            PROJECT_ROOT / "scripts/windows_install_conpty_package_test.ps1"
 +        ).read_text(encoding="utf-8")
 +        self.assertNotIn("website/install.ps1", package_test.replace("\\", "/"))
-+        self.assertIn("website\\install.ps1", package_smoke)
-+        self.assertIn("[System.Management.Automation.Language.Parser]::ParseFile", package_smoke)
-+        self.assertIn(
-+            '@("Prepend-PathEntry", "Update-PathRegistryEntry")', package_smoke
++        path_contract, archive_validation = package_smoke.split(
++            "$archive = (Resolve-Path -LiteralPath $ArchivePath).Path", maxsplit=1
 +        )
-+        self.assertIn("Invoke-Expression $definition.Extent.Text", package_smoke)
-+        self.assertNotIn("& $installerPath", package_smoke)
-+        self.assertIn('"validate"', package_smoke)
++        self.assertEqual(package_smoke.count("website\\install.ps1"), 1)
++        self.assertIn("website\\install.ps1", path_contract)
++        self.assertIn("Update-PathRegistryEntry", path_contract)
++        self.assertNotIn("website\\install.ps1", archive_validation)
++        self.assertIn('"validate"', archive_validation)
 +
 +        old_installer = (PROJECT_ROOT / "website/install.ps1").read_text(encoding="utf-8")
 +        self.assertIn("Where-Object { $_.PSIsContainer }", old_installer)
@@ -4001,10 +3830,10 @@ index 0000000000000000000000000000000000000000..3524a5b883c541e4ef078f98b387ca81
 +Write-Host "Windows installer fault matrix passed."
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b343c58d084
+index 0000000000000000000000000000000000000000..767eb76edc4c8cdd72a2fa4b7b8d854d2c6e657b
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,449 @@
 +[CmdletBinding()]
 +param()
 +
@@ -4085,7 +3914,7 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +        [long]$ParentPid = 0,
 +        [int]$LockTimeoutMilliseconds = 3000
 +    )
-+    return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -GlobalLockPath $script:TestGlobalLifecycleLockPath -Operation {
++    return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
 +        Install-HerdrLayout `
 +            -InstallRoot $Root `
 +            -StageDir $Stage `
@@ -4109,7 +3938,7 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +        [scriptblock]$ProcessProvider = { @() },
 +        [int]$LockTimeoutMilliseconds = 3000
 +    )
-+    Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -GlobalLockPath $script:TestGlobalLifecycleLockPath -Operation {
++    Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
 +        Invoke-HerdrUninstallLayout `
 +            -InstallRoot $Root `
 +            -ProcessProvider $ProcessProvider `
@@ -4143,15 +3972,14 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +}
 +
 +function Start-TestLifecycleTransactionOwner {
-+    param([string]$HelperPath, [string]$InstallRoot, [string]$GlobalLockPath, [string]$ReadyPath, [int]$Seconds = 3)
++    param([string]$HelperPath, [string]$InstallRoot, [string]$ReadyPath, [int]$Seconds = 3)
 +    $escapedHelper = $HelperPath.Replace("'", "''")
 +    $escapedRoot = $InstallRoot.Replace("'", "''")
-+    $escapedGlobalLock = $GlobalLockPath.Replace("'", "''")
 +    $escapedReady = $ReadyPath.Replace("'", "''")
 +    $command = @"
 +`$ErrorActionPreference = 'Stop'
 +. '$escapedHelper'
-+Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -GlobalLockPath '$escapedGlobalLock' -TimeoutMilliseconds 3000 -Operation {
++Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -TimeoutMilliseconds 3000 -Operation {
 +    `$transaction = New-HerdrTransaction -Kind 'fresh' -InstallRoot '$escapedRoot'
 +    New-Item -ItemType Directory -Path (Join-Path `$transaction.Path 'root') | Out-Null
 +    Write-HerdrDurableText -Path (Join-Path `$transaction.Path 'root\live.txt') -Text 'live'
@@ -4176,23 +4004,16 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +
 +$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("hi-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 +New-Item -ItemType Directory -Path $tempRoot | Out-Null
-+$script:TestGlobalLifecycleLockPath = Join-Path $tempRoot "global-installer-lifecycle.lock"
 +$junctionPath = $null
 +$childProcesses = New-Object System.Collections.Generic.List[Diagnostics.Process]
 +$registryPath = "HKCU:\Software\HerdrInstallerTests\$([Guid]::NewGuid().ToString('N'))"
 +try {
 +    $id1 = "0123456789ab.cdef01234567"
 +    $id2 = "fedcba987654.3210fedcba98"
-+    $id3 = "111111111111.222222222222"
-+    $id4 = "333333333333.444444444444"
 +    $display1 = "0.9.0-preview.$id1"
 +    $display2 = "0.9.1-preview.$id2"
 +    $numeric1 = "0.9.0.0"
 +    $numeric2 = "0.9.1.0"
-+    $display3 = "0.9.2-preview.$id3"
-+    $display4 = "0.9.3-preview.$id4"
-+    $numeric3 = "0.9.2.0"
-+    $numeric4 = "0.9.3.0"
 +    $launcher1 = Join-Path $tempRoot "launcher-one.exe"
 +    $launcher2 = Join-Path $tempRoot "launcher-two.exe"
 +    $uninstaller = Join-Path $tempRoot "uninstall.exe"
@@ -4201,8 +4022,6 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    Write-TestFile -Path $uninstaller -Text "uninstaller"
 +    $stage1 = New-TestStage -Root $tempRoot -Name "stage-one" -PayloadText "payload-one"
 +    $stage2 = New-TestStage -Root $tempRoot -Name "stage-two" -PayloadText "payload-two"
-+    $stage3 = New-TestStage -Root $tempRoot -Name "stage-three" -PayloadText "payload-three"
-+    $stage4 = New-TestStage -Root $tempRoot -Name "stage-four" -PayloadText "payload-four"
 +    $legacyReleases = Join-Path $tempRoot "legacy-home\releases"
 +    $legacyLock = Join-Path $tempRoot "legacy-home\install.lock"
 +    New-Item -ItemType Directory -Path $legacyReleases -Force | Out-Null
@@ -4211,33 +4030,26 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    # second real PowerShell process before any recovery/classification runs.
 +    $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
 +    $concurrencyReady = Join-Path $tempRoot "concurrency-ready"
-+    $transactionOwner = Start-TestLifecycleTransactionOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -GlobalLockPath $script:TestGlobalLifecycleLockPath -ReadyPath $concurrencyReady -Seconds 3
++    $transactionOwner = Start-TestLifecycleTransactionOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -ReadyPath $concurrencyReady -Seconds 3
 +    $childProcesses.Add($transactionOwner)
 +    Wait-TestPath -Path $concurrencyReady -TimeoutMilliseconds 15000
 +    $liveTransaction = [IO.File]::ReadAllText($concurrencyReady)
 +    Assert-HerdrTransaction -Path $liveTransaction -Kind "fresh" -InstallRoot $concurrencyRoot
 +    Assert-Throws {
-+        Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -GlobalLockPath $script:TestGlobalLifecycleLockPath -TimeoutMilliseconds 250 -Operation {
++        Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 250 -Operation {
 +            Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
 +        }
 +    } "Timed out after 250 ms" "A second lifecycle invocation entered while the first owned a live transaction."
-+    Assert-Throws {
-+        Invoke-HerdrLifecycleOperation -InstallRoot (Join-Path $tempRoot "other-install-root") -GlobalLockPath $script:TestGlobalLifecycleLockPath -TimeoutMilliseconds 250 -Operation {
-+            throw "cross-root operation entered"
-+        }
-+    } "Timed out after 250 ms" "Different install roots bypassed the global ARP/PATH lifecycle lock."
 +    Assert-True (Test-Path -LiteralPath (Join-Path $liveTransaction "root\live.txt")) "Contending lifecycle invocation deleted a live transaction."
 +    if (-not $transactionOwner.WaitForExit(10000)) { throw "Lifecycle transaction owner did not exit within 10 seconds." }
 +    if ($transactionOwner.ExitCode -ne 0) { throw "Lifecycle transaction owner exited with $($transactionOwner.ExitCode)." }
-+    Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -GlobalLockPath $script:TestGlobalLifecycleLockPath -TimeoutMilliseconds 3000 -Operation {
++    Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 3000 -Operation {
 +        Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
 +    }
 +    Assert-True (-not (Test-Path -LiteralPath $liveTransaction)) "Completed lifecycle transaction was not recovered after lock release."
 +    $persistentLifecycleLock = Get-HerdrLifecycleLockPath -InstallRoot $concurrencyRoot
 +    Assert-HerdrRegularFile -Path $persistentLifecycleLock
 +    Assert-Equal (Get-Item -LiteralPath $persistentLifecycleLock).Length ([long]0) "Persistent lifecycle lock is not an empty regular file."
-+    Assert-HerdrRegularFile -Path $script:TestGlobalLifecycleLockPath
-+    Assert-Equal (Get-Item -LiteralPath $script:TestGlobalLifecycleLockPath).Length ([long]0) "Global lifecycle lock is not an empty regular file."
 +
 +    # Exact record parsing and PATH idempotence remain strict.
 +    $recordRoot = Join-Path $tempRoot "records"
@@ -4258,11 +4070,6 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    $pathOnce = Add-HerdrPathEntry -PathValue $pathInput -Entry $binEntry
 +    Assert-Equal (Add-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) $pathOnce "PATH insertion was not idempotent."
 +    Assert-Equal (Remove-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) "C:\Other;;C:\Keep" "PATH removal changed unrelated entries."
-+    Assert-Throws {
-+        Invoke-HerdrLifecycleOperation -InstallRoot (Join-Path $tempRoot "invalid;root") -GlobalLockPath $script:TestGlobalLifecycleLockPath -Operation {
-+            throw "invalid root entered lifecycle"
-+        }
-+    } "cannot contain ';'" "A delimiter-bearing install root reached PATH publication."
 +
 +    # A complete fresh tree is built in a sibling transaction and retries clean
 +    # both complete and partial pre-publication artifacts.
@@ -4290,16 +4097,6 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    Assert-True (-not (Test-HerdrRecognizedLegacyPayload -Path (Join-Path $installRoot "bin"))) "Old installer could mistake managed bin for legacy payload."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh bootstrap differs from launcher input."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh runtime dispatcher is missing."
-+
-+    $invalidRecovery = "$installRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
-+    New-Item -ItemType Directory -Path $invalidRecovery | Out-Null
-+    Write-TestFile -Path (Join-Path $invalidRecovery $script:TransactionMarkerName) -Text "foreign-marker"
-+    Write-TestFile -Path (Join-Path $invalidRecovery "cleanup.manifest.new") -Text "preserve"
-+    Assert-Throws {
-+        Remove-HerdrRecoverableUninstallTransaction -Path $invalidRecovery -InstallRoot $installRoot
-+    } "marker is invalid" "Uninstall recovery deleted content before validating transaction ownership."
-+    Assert-True (Test-Path -LiteralPath (Join-Path $invalidRecovery "cleanup.manifest.new")) "Invalid transaction content was deleted before marker validation."
-+    Remove-Item -LiteralPath $invalidRecovery -Recurse -Force
 +
 +    # Runtime and pointer crash artifacts are external and recoverable. A real
 +    # second PowerShell process holds the old build lease across the upgrade.
@@ -4366,24 +4163,6 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    [IO.File]::WriteAllBytes($runtimePayload, $ownedPayloadBytes)
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +
-+    # Inactive payload integrity does not brick maintenance. Exact manifest
-+    # ownership permits bounded retirement while active/pending runtimes remain
-+    # strict and leased old processes remain protected.
-+    $inactivePayload = Join-Path $installRoot "runtime\$id1\herdr.exe"
-+    [IO.File]::WriteAllText($inactivePayload, "corrupt inactive payload", $script:Utf8NoBom)
-+    (Get-Item -LiteralPath (Join-Path $installRoot "runtime\$id1")).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-10)
-+    $third = Invoke-TestInstall -Root $installRoot -Stage $stage3 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id3 -DisplayVersion $display3 -NumericVersion $numeric3 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    Assert-Equal $third.Status "Activated" "Inactive payload corruption blocked a newer managed update."
-+    $fourth = Invoke-TestInstall -Root $installRoot -Stage $stage4 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id4 -DisplayVersion $display4 -NumericVersion $numeric4 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    Assert-Equal $fourth.Status "Activated" "Fourth managed runtime did not activate."
-+    $retainedRuntimeNames = @(Get-ChildItem -LiteralPath (Join-Path $installRoot "runtime") -Directory | ForEach-Object { $_.Name })
-+    Assert-Equal $retainedRuntimeNames.Count 3 "Managed runtime retention is not bounded to active plus two inactive builds."
-+    Assert-True ($retainedRuntimeNames -ccontains $id2) "Newest retained inactive runtime was removed."
-+    Assert-True ($retainedRuntimeNames -ccontains $id3) "Previous inactive runtime was removed."
-+    Assert-True ($retainedRuntimeNames -ccontains $id4) "Active runtime was removed."
-+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1"))) "Owned corrupt inactive runtime was not retired."
-+    Assert-HerdrManagedRoot -InstallRoot $installRoot
-+
 +    # Legacy publication uses the canonical lock, preserves an exact backup and
 +    # permits only the supplied parent runtime whether Windows reports its
 +    # visible junction path or its physical release path.
@@ -4413,16 +4192,12 @@ index 0000000000000000000000000000000000000000..3dd459c375abea4f429e945aaadf9b34
 +    Assert-Equal $recovered.Status "Activated" "Legacy backup recovery did not finish migration."
 +    Assert-HerdrManagedRoot -InstallRoot $rollbackRoot
 +
-+    # ARP stores truthful identity, repairs an interrupted key only for an exact
-+    # owned root, and preserves registrations owned by another installation.
-+    New-Item -Path $registryPath -Force | Out-Null
-+    Assert-True (Test-HerdrArpRegistrationOwnedByRoot -InstallRoot $installRoot -RegistryPath $registryPath) "Incomplete ARP registration was not recoverable from its exact managed root."
-+    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display4 -NumericVersion $numeric4 -RegistryPath $registryPath
++    # ARP stores the truthful display/numeric identity and preserves mismatches.
++    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
 +    $arp = Get-ItemProperty -LiteralPath $registryPath
-+    Assert-Equal ([string]$arp.DisplayVersion) $display4 "ARP display version is not truthful."
++    Assert-Equal ([string]$arp.DisplayVersion) $display2 "ARP display version is not truthful."
 +    Assert-Equal ([int]$arp.VersionMajor) 0 "ARP major version is wrong."
 +    Set-ItemProperty -LiteralPath $registryPath -Name InstallLocation -Value (Join-Path $tempRoot "someone-else")
-+    Assert-True (-not (Test-HerdrArpRegistrationOwnedByRoot -InstallRoot $installRoot -RegistryPath $registryPath)) "Mismatched ARP key was treated as owned."
 +    Assert-Throws { Remove-HerdrArpRegistration -InstallRoot $installRoot -RegistryPath $registryPath } "not owned" "Mismatched ARP key was removed."
 +    Remove-Item -LiteralPath $registryPath -Recurse -Force
 +
@@ -4738,32 +4513,22 @@ index 72c810514b4340c0d2071ec70763c9ad2f69995c..de5e8d5f59062b155aad3e40ef79ffd0
      }
 diff --git a/src/distribution.rs b/src/distribution.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a7e1f4b98b9902d9f2238b5d043c8e06d889275
+index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435dab97b38
 --- /dev/null
 +++ b/src/distribution.rs
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,40 @@
 +//! Compile-time distribution configuration for herdr-win.
 +
 +pub(crate) const UPDATE_CHANNEL: &str = "preview";
 +pub(crate) const PREVIEW_MANIFEST_URL: &str =
 +    "https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json";
-+pub(crate) const RELEASES_URL: &str = "https://github.com/User-3090/herdr-win/releases";
 +// herdr-win has no stable channel. Keep dormant stable code fork-owned so an
 +// accidental channel regression fails to parse instead of contacting upstream.
 +pub(crate) const STABLE_MANIFEST_URL: &str = PREVIEW_MANIFEST_URL;
 +
-+pub(crate) fn preview_release_tag(build_id: &str) -> String {
-+    format!("windows-nightly-{}", build_id.replace('.', "-"))
-+}
-+
 +#[cfg(windows)]
 +pub(crate) const WINDOWS_RELEASE_DOWNLOAD_PREFIX: &str =
 +    "https://github.com/User-3090/herdr-win/releases/download/";
-+
-+#[cfg(windows)]
-+pub(crate) fn windows_installer_download_url(tag: &str) -> String {
-+    format!("{WINDOWS_RELEASE_DOWNLOAD_PREFIX}{tag}/herdr-windows-x86_64-installer.exe")
-+}
 +
 +#[cfg(test)]
 +mod tests {
@@ -4780,14 +4545,6 @@ index 0000000000000000000000000000000000000000..8a7e1f4b98b9902d9f2238b5d043c8e0
 +            format!("{FORK_RAW_PREFIX}master/website/preview.json")
 +        );
 +        assert!(!PREVIEW_MANIFEST_URL.contains("herdr.dev"));
-+        assert_eq!(
-+            RELEASES_URL,
-+            "https://github.com/User-3090/herdr-win/releases"
-+        );
-+        assert_eq!(
-+            preview_release_tag("0123456789ab.cdef01234567"),
-+            "windows-nightly-0123456789ab-cdef01234567"
-+        );
 +    }
 +
 +    #[cfg(windows)]
@@ -4798,10 +4555,6 @@ index 0000000000000000000000000000000000000000..8a7e1f4b98b9902d9f2238b5d043c8e0
 +            "https://github.com/User-3090/herdr-win/releases/download/"
 +        );
 +        assert!(!WINDOWS_RELEASE_DOWNLOAD_PREFIX.contains("herdr.dev"));
-+        assert_eq!(
-+            windows_installer_download_url("windows-nightly-test"),
-+            "https://github.com/User-3090/herdr-win/releases/download/windows-nightly-test/herdr-windows-x86_64-installer.exe"
-+        );
 +    }
 +}
 diff --git a/src/main.rs b/src/main.rs
@@ -5106,7 +4859,7 @@ index 0000000000000000000000000000000000000000..78ce2b1e2d14892c9aec49728025a71e
 +    }
 +}
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
-index 5c2f26f163205dea1f36a34e8296dc3ba64975e6..0cb11c72d258e1959ce0c3e123cb56d5d8ccd366 100644
+index 8a9a2ee0a0de4814baea3213192b69b8c2123f95..fc10c9f6bcf2479cbdae7fd12d7b44803bd020ec 100644
 --- a/src/platform/mod.rs
 +++ b/src/platform/mod.rs
 @@ -39,6 +39,31 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command)
@@ -5142,13 +4895,13 @@ index 5c2f26f163205dea1f36a34e8296dc3ba64975e6..0cb11c72d258e1959ce0c3e123cb56d5
  fn configure_background_command_platform(_command: &mut std::process::Command) {}
  
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf48807622af8325f 100644
+index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b3150c39714f 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
 @@ -3,7 +3,8 @@ use std::{
      ffi::c_void,
      mem::{size_of, MaybeUninit},
-     path::{Path, PathBuf},
+     path::PathBuf,
 -    ptr::{copy_nonoverlapping, null_mut},
 +    process::{Child, ExitStatus},
 +    ptr::{copy_nonoverlapping, null, null_mut},
@@ -5162,9 +4915,9 @@ index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf4880762
 -            STATUS_SUCCESS, UNICODE_STRING,
 +            STATUS_SUCCESS, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
          },
-         Security::{
-             Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT},
-@@ -33,13 +34,17 @@ use windows_sys::{
+         System::{
+             Console::GetConsoleWindow,
+@@ -28,12 +29,16 @@ use windows_sys::{
                      TH32CS_SNAPPROCESS,
                  },
              },
@@ -5174,7 +4927,6 @@ index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf4880762
 +                JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 +                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 +            },
-             LibraryLoader::GetModuleHandleW,
              Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
              Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
              Threading::{
@@ -5184,7 +4936,7 @@ index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf4880762
                  PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
              },
          },
-@@ -71,6 +76,14 @@ use windows_sys::{
+@@ -60,6 +65,14 @@ use windows_sys::{
  use super::{ClipboardImage, ForegroundJob, Signal};
  
  mod clipboard_image;
@@ -5199,7 +4951,7 @@ index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf4880762
  
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
-@@ -782,6 +795,108 @@ pub fn process_exists(pid: u32) -> bool {
+@@ -683,6 +696,108 @@ pub fn process_exists(pid: u32) -> bool {
      ok && exit_code == STILL_ACTIVE
  }
  
@@ -5308,8 +5060,8 @@ index 83fbc528de28a0a2532e5be9231fe4f370da143c..f67b9e023bf24b1c05093deaf4880762
  pub fn write_clipboard(bytes: &[u8]) -> bool {
      let Ok(text) = std::str::from_utf8(bytes) else {
          return false;
-@@ -1615,6 +1730,37 @@ mod tests {
-         },
+@@ -1369,6 +1484,37 @@ mod tests {
+         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
      };
  
 +    #[test]
@@ -7365,7 +7117,7 @@ index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33
 +    io::Error::new(io::ErrorKind::InvalidData, message)
 +}
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
-index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19c6111726 100644
+index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9ab8b39e1 100644
 --- a/src/remote/attach.rs
 +++ b/src/remote/attach.rs
 @@ -23,14 +23,16 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -7387,43 +7139,7 @@ index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum RemoteKeybindings {
      Local,
-@@ -337,7 +339,7 @@ struct RemotePreviewManifest {
-     build_id: String,
-     protocol: u32,
-     assets: BTreeMap<String, RemoteAssetRef>,
--    #[serde(default)]
-+    #[serde(default, deserialize_with = "deserialize_remote_preview_builds")]
-     builds: BTreeMap<String, RemotePreviewBuildMetadata>,
- }
- 
-@@ -347,6 +349,26 @@ struct RemotePreviewBuildMetadata {
-     assets: BTreeMap<String, RemoteAssetRef>,
- }
- 
-+fn deserialize_remote_preview_builds<'de, D>(
-+    deserializer: D,
-+) -> Result<BTreeMap<String, RemotePreviewBuildMetadata>, D::Error>
-+where
-+    D: serde::Deserializer<'de>,
-+{
-+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-+    Ok(match value {
-+        Some(serde_json::Value::Object(object)) => object
-+            .into_iter()
-+            .filter_map(|(build_id, build)| {
-+                serde_json::from_value::<RemotePreviewBuildMetadata>(build)
-+                    .ok()
-+                    .map(|metadata| (build_id, metadata))
-+            })
-+            .collect(),
-+        _ => BTreeMap::new(),
-+    })
-+}
-+
- fn deserialize_remote_manifest_releases<'de, D>(
-     deserializer: D,
- ) -> Result<BTreeMap<String, RemoteReleaseMetadata>, D::Error>
-@@ -1513,6 +1535,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
+@@ -1508,6 +1510,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -7432,7 +7148,7 @@ index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19
              "--retry",
              "3",
              "--connect-timeout",
-@@ -1556,7 +1580,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1551,7 +1555,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
          let build_id = crate::build_info::build_id().ok_or_else(|| {
              io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
          })?;
@@ -7441,7 +7157,7 @@ index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19
          let manifest: RemotePreviewManifest =
              serde_json::from_slice(&manifest_bytes).map_err(|err| {
                  io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-@@ -1575,7 +1599,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1570,7 +1574,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
      }
  
      let current_version = current_version();
@@ -7450,7 +7166,7 @@ index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19
      let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
          .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
      let release = manifest.release_for_version(&current_version).ok_or_else(|| {
-@@ -2113,7 +2137,7 @@ fn run_client_process(
+@@ -2103,7 +2107,7 @@ fn run_client_process(
      reattach_command: &str,
      keybindings: RemoteKeybindings,
  ) -> io::Result<()> {
@@ -7459,24 +7175,6 @@ index 59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b..b0bedddad8bd3ff1302710f25fb45f19
      let status = Command::new(exe)
          .arg("client")
          .env(
-@@ -3303,6 +3327,9 @@ mod tests {
-                     }
-                 },
-                 "builds": {
-+                    "malformed-old": {
-+                        "assets": {}
-+                    },
-                     "2026-06-02-old": {
-                         "protocol": 11,
-                         "assets": {
-@@ -3323,6 +3350,7 @@ mod tests {
-         assert_eq!(protocol, 11);
-         assert_eq!(asset.url(), "https://example.com/old");
-         assert_eq!(asset.sha256(), Some("old"));
-+        assert!(!manifest.builds.contains_key("malformed-old"));
-     }
- 
-     #[test]
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
 index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..257f1f36587a72aca1f8b59219ae1c682233bcc5 100644
 --- a/src/server/autodetect.rs
@@ -7518,7 +7216,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570ffab43d7 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..2b47d3c0c83deacc7a47d440c7fb798c5e77bf2d 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -7586,12 +7284,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
          }
      }
  
-@@ -121,10 +130,11 @@ impl UpdateChannel {
-     }
- }
- 
--#[derive(Debug, Clone)]
-+#[derive(Debug, Clone, PartialEq, Eq)]
+@@ -125,6 +134,7 @@ impl UpdateChannel {
  struct AssetRef {
      url: String,
      sha256: Option<String>,
@@ -7624,47 +7317,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
                  })
              }
              _ => Err(serde::de::Error::custom(
-@@ -203,7 +218,7 @@ struct PreviewManifest {
-     protocol: u32,
-     notes: String,
-     assets: BTreeMap<String, AssetRef>,
--    #[serde(default)]
-+    #[serde(default, deserialize_with = "deserialize_preview_builds")]
-     builds: BTreeMap<String, PreviewBuildMetadata>,
- }
- 
-@@ -213,9 +228,30 @@ struct PreviewBuildMetadata {
-     commit: String,
-     built_at: String,
-     protocol: u32,
-+    tag: String,
-     assets: BTreeMap<String, AssetRef>,
- }
- 
-+fn deserialize_preview_builds<'de, D>(
-+    deserializer: D,
-+) -> Result<BTreeMap<String, PreviewBuildMetadata>, D::Error>
-+where
-+    D: Deserializer<'de>,
-+{
-+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-+    Ok(match value {
-+        Some(serde_json::Value::Object(object)) => object
-+            .into_iter()
-+            .filter_map(|(build_id, build)| {
-+                serde_json::from_value::<PreviewBuildMetadata>(build)
-+                    .ok()
-+                    .map(|metadata| (build_id, metadata))
-+            })
-+            .collect(),
-+        _ => BTreeMap::new(),
-+    })
-+}
-+
- #[derive(Deserialize)]
- struct HomebrewFormula {
-     versions: HomebrewFormulaVersions,
-@@ -273,6 +309,7 @@ struct ReleaseInfo {
+@@ -273,6 +288,7 @@ struct ReleaseInfo {
      target_protocol: Option<u32>,
      download_url: String,
      sha256: Option<String>,
@@ -7672,7 +7325,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
      notes_body: String,
  }
  
-@@ -283,11 +320,11 @@ impl ReleaseInfo {
+@@ -283,11 +299,11 @@ impl ReleaseInfo {
  }
  
  fn fetch_update_manifest() -> Result<UpdateManifest, String> {
@@ -7686,7 +7339,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
  }
  
  fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
-@@ -297,6 +334,8 @@ where
+@@ -297,6 +313,8 @@ where
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -7695,7 +7348,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
              "--retry",
              "3",
              "--connect-timeout",
-@@ -338,6 +377,55 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
+@@ -338,6 +356,46 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
      }
  }
  
@@ -7708,11 +7361,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +}
 +
 +#[cfg(windows)]
-+fn validate_windows_installer_asset(
-+    asset_key: &str,
-+    asset: &AssetRef,
-+    expected_tag: Option<&str>,
-+) -> Result<(), String> {
++fn validate_windows_installer_asset(asset_key: &str, asset: &AssetRef) -> Result<(), String> {
 +    if asset.format.as_deref() != Some("nsis") {
 +        return Err(format!(
 +            "Windows update asset {asset_key} must declare format nsis"
@@ -7731,16 +7380,11 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +            "Windows update asset {asset_key} has an invalid lowercase SHA-256 digest"
 +        ));
 +    }
-+    let valid_url = match expected_tag {
-+        Some(tag) => asset.url == crate::distribution::windows_installer_download_url(tag),
-+        None => {
-+            asset
-+                .url
-+                .starts_with(crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX)
-+                && asset.url.ends_with("/herdr-windows-x86_64-installer.exe")
-+        }
-+    };
-+    if !valid_url {
++    if !asset
++        .url
++        .starts_with(crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX)
++        || !asset.url.ends_with("/herdr-windows-x86_64-installer.exe")
++    {
 +        return Err(format!(
 +            "Windows update asset {asset_key} must use the immutable herdr-win NSIS release URL"
 +        ));
@@ -7751,7 +7395,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
  fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
      let current = Version::current();
      let latest = Version::parse(&manifest.version)
-@@ -356,11 +444,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+@@ -356,11 +414,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
      }
  
      let (os, arch) = platform_target();
@@ -7762,11 +7406,11 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
          .get(&asset_key)
          .ok_or_else(|| format!("no binary for {asset_key} in update manifest"))?;
 +    #[cfg(windows)]
-+    validate_windows_installer_asset(&asset_key, asset, None)?;
++    validate_windows_installer_asset(&asset_key, asset)?;
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -373,6 +463,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+@@ -373,6 +433,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
          target_protocol: manifest.protocol,
          download_url,
          sha256: asset.sha256.clone(),
@@ -7774,7 +7418,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
          notes_body,
      }))
  }
-@@ -393,6 +484,32 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
+@@ -393,6 +454,32 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
      )
  }
  
@@ -7807,7 +7451,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
  fn release_info_from_preview_manifest(
      manifest: &PreviewManifest,
  ) -> Result<Option<ReleaseInfo>, String> {
-@@ -403,14 +520,37 @@ fn release_info_from_preview_manifest(
+@@ -403,14 +490,24 @@ fn release_info_from_preview_manifest(
          ));
      }
      let build_id = manifest.build_id.trim();
@@ -7817,18 +7461,6 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +        return Err(
 +            "preview manifest build_id must be two lowercase 12-hex commit prefixes".into(),
 +        );
-+    }
-+    let upstream_prefix = &build_id[..12];
-+    if manifest.commit.len() != 40
-+        || !manifest
-+            .commit
-+            .bytes()
-+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-+        || !manifest.commit.starts_with(upstream_prefix)
-+    {
-+        return Err(format!(
-+            "preview manifest commit must be the full lowercase commit beginning with {upstream_prefix}"
-+        ));
      }
      if crate::build_info::is_preview()
          && crate::build_info::build_id().is_some_and(|current| current == build_id)
@@ -7839,68 +7471,32 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +        if preview_transition_may_be_stale(current, build_id, manifest.builds.contains_key(current))
 +        {
 +            return Err(format!(
-+                "preview manifest does not include current build {current}; refusing a possible downgrade. Install the current preview manually from {} if this client fell outside retained history",
-+                crate::distribution::RELEASES_URL
++                "preview manifest does not include current build {current}; refusing a possible downgrade"
 +            ));
 +        }
 +    }
  
      let version = Version::parse(&manifest.base_version).ok_or_else(|| {
          format!(
-@@ -423,29 +563,34 @@ fn release_info_from_preview_manifest(
+@@ -423,7 +520,7 @@ fn release_info_from_preview_manifest(
          return Err("preview manifest notes are empty".into());
      }
      let (os, arch) = platform_target();
 -    let asset_key = format!("{os}-{arch}");
--    if let Some(archived) = manifest.builds.get(build_id) {
--        if archived.base_version != manifest.base_version
--            || archived.commit != manifest.commit
--            || archived.built_at != manifest.built_at
--            || archived.protocol != manifest.protocol
--        {
--            tracing::warn!(
--                build_id,
--                "preview manifest archived build metadata differs from top-level metadata"
--            );
--        }
 +    let asset_key = update_asset_key(os, arch);
-+    let archived = manifest
-+        .builds
-+        .get(build_id)
-+        .ok_or_else(|| format!("preview manifest does not archive its current build {build_id}"))?;
-+    if archived.base_version != manifest.base_version
-+        || archived.commit != manifest.commit
-+        || archived.built_at != manifest.built_at
-+        || archived.protocol != manifest.protocol
-+        || archived.assets != manifest.assets
-+    {
-+        return Err(format!(
-+            "preview manifest archived metadata differs from current build {build_id}"
-+        ));
-+    }
-+    let expected_tag = crate::distribution::preview_release_tag(build_id);
-+    if archived.tag != expected_tag {
-+        return Err(format!(
-+            "preview manifest build {build_id} uses tag {}, expected {expected_tag}",
-+            archived.tag
-+        ));
-     }
-     let asset = manifest
-         .assets
-         .get(&asset_key)
--        .or_else(|| {
--            manifest
--                .builds
--                .get(build_id)
--                .and_then(|build| build.assets.get(&asset_key))
--        })
+     if let Some(archived) = manifest.builds.get(build_id) {
+         if archived.base_version != manifest.base_version
+             || archived.commit != manifest.commit
+@@ -446,6 +543,8 @@ fn release_info_from_preview_manifest(
+                 .and_then(|build| build.assets.get(&asset_key))
+         })
          .ok_or_else(|| format!("no binary for {asset_key} in preview manifest"))?;
 +    #[cfg(windows)]
-+    validate_windows_installer_asset(&asset_key, asset, Some(&archived.tag))?;
++    validate_windows_installer_asset(&asset_key, asset)?;
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -458,6 +603,7 @@ fn release_info_from_preview_manifest(
+@@ -458,6 +557,7 @@ fn release_info_from_preview_manifest(
          target_protocol: Some(manifest.protocol),
          download_url,
          sha256: asset.sha256.clone(),
@@ -7908,7 +7504,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
          notes_body,
      }))
  }
-@@ -628,53 +774,169 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -628,53 +728,143 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
@@ -7974,7 +7570,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +    }
 +    Err("failed to allocate a unique Windows update directory".to_string())
 +}
-+
+ 
 +#[cfg(windows)]
 +fn download_windows_installer(release: &ReleaseInfo) -> Result<DownloadedWindowsInstaller, String> {
 +    if release.asset_format.as_deref() != Some("nsis") {
@@ -7987,7 +7583,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +    let root = create_windows_update_temp_root()?;
 +    let path = root.join("herdr-windows-x86_64-installer.exe");
 +    let download = DownloadedWindowsInstaller { root, path };
- 
++
 +    let status = crate::noninteractive_process::curl_command()
 +        .args(["-sfL", "--max-time", "120", "-o"])
 +        .arg(&download.path)
@@ -8041,30 +7637,6 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 -        .join("bin")
 -        .join("herdr.exe"))
 +#[cfg(windows)]
-+fn terminate_unassigned_windows_installer(
-+    child: &mut std::process::Child,
-+    failure: String,
-+) -> String {
-+    let kill_error = child.kill().err();
-+    match crate::platform::wait_child_bounded(child, WINDOWS_INSTALLER_CLEANUP_TIMEOUT) {
-+        Ok(Some(_)) => failure,
-+        Ok(None) => match kill_error {
-+            Some(err) => format!("{failure}; direct cleanup failed: {err}"),
-+            None => format!(
-+                "{failure}; direct cleanup exceeded its {} second timeout",
-+                WINDOWS_INSTALLER_CLEANUP_TIMEOUT.as_secs()
-+            ),
-+        },
-+        Err(wait_err) => match kill_error {
-+            Some(err) => {
-+                format!("{failure}; direct cleanup failed: {err}; wait failed: {wait_err}")
-+            }
-+            None => format!("{failure}; direct cleanup wait failed: {wait_err}"),
-+        },
-+    }
-+}
-+
-+#[cfg(windows)]
 +fn install_windows_update_with_installer(release: &ReleaseInfo) -> Result<(), String> {
 +    let installer = download_windows_installer(release)?;
 +    let start_gate = installer.root.join("installer.start");
@@ -8074,10 +7646,8 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +        .spawn()
 +        .map_err(|err| format!("failed to start Windows installer: {err}"))?;
 +    if let Err(err) = job.assign(&child) {
-+        // The NSIS start gate prevents descendants before assignment. If the
-+        // caller's job policy rejects nesting, terminate this one process
-+        // directly rather than closing an empty job and orphaning the child.
-+        return Err(terminate_unassigned_windows_installer(
++        return Err(terminate_windows_installer(
++            &job,
 +            &mut child,
 +            format!("failed to assign Windows installer process job: {err}"),
 +        ));
@@ -8116,7 +7686,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
  }
  
  // ---------------------------------------------------------------------------
-@@ -2024,22 +2286,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2024,22 +2214,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      #[cfg(windows)]
      {
          let _ = options;
@@ -8151,7 +7721,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
      }
  
      #[cfg(not(windows))]
-@@ -2079,6 +2339,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2079,6 +2267,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      Ok(release.version)
  }
  
@@ -8159,7 +7729,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2507,203 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2246,6 +2435,135 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -8189,28 +7759,6 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +        ));
 +    }
 +
-+    #[test]
-+    fn preview_manifest_ignores_malformed_irrelevant_archives() {
-+        let manifest: PreviewManifest = serde_json::from_str(
-+            r#"{
-+                "channel": "preview",
-+                "base_version": "0.7.5",
-+                "build_id": "bbbbbbbbbbbb.222222222222",
-+                "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-+                "built_at": "2026-07-28T00:00:00Z",
-+                "protocol": 77,
-+                "notes": "notes",
-+                "assets": {},
-+                "builds": {
-+                    "malformed-old": {"assets": {}}
-+                }
-+            }"#,
-+        )
-+        .unwrap();
-+
-+        assert!(manifest.builds.is_empty());
-+    }
-+
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_installer_command_uses_verified_local_asset_parent_and_start_gate() {
@@ -8234,28 +7782,6 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +
 +    #[cfg(windows)]
 +    #[test]
-+    fn unassigned_windows_installer_cleanup_terminates_the_gated_child() {
-+        let mut child = Command::new("powershell.exe")
-+            .args([
-+                "-NoLogo",
-+                "-NoProfile",
-+                "-NonInteractive",
-+                "-Command",
-+                "Start-Sleep -Seconds 30",
-+            ])
-+            .spawn()
-+            .expect("spawn gated installer stand-in");
-+
-+        let failure = "job assignment failed".to_string();
-+        assert_eq!(
-+            terminate_unassigned_windows_installer(&mut child, failure.clone()),
-+            failure
-+        );
-+        assert!(child.try_wait().unwrap().is_some());
-+    }
-+
-+    #[cfg(windows)]
-+    #[test]
 +    fn windows_manifest_requires_fork_nsis_asset_and_sha256() {
 +        let valid = AssetRef {
 +            url: format!(
@@ -8265,48 +7791,40 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +            sha256: Some("a".repeat(64)),
 +            format: Some("nsis".to_string()),
 +        };
-+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &valid, None).is_ok());
++        assert!(validate_windows_installer_asset("windows-x86_64-installer", &valid).is_ok());
 +
 +        let mut invalid = valid.clone();
 +        invalid.format = Some("zip".to_string());
-+        assert!(
-+            validate_windows_installer_asset("windows-x86_64-installer", &invalid, None).is_err()
-+        );
++        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
 +        invalid = valid.clone();
 +        invalid.sha256 = None;
-+        assert!(
-+            validate_windows_installer_asset("windows-x86_64-installer", &invalid, None).is_err()
-+        );
++        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
 +        invalid = valid;
 +        invalid.url = "https://example.com/herdr-windows-x86_64-installer.exe".to_string();
-+        assert!(
-+            validate_windows_installer_asset("windows-x86_64-installer", &invalid, None).is_err()
-+        );
++        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
 +    }
 +
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_preview_selects_installer_without_removing_legacy_zip() {
 +        let build_id = "bbbbbbbbbbbb.222222222222";
-+        let tag = crate::distribution::preview_release_tag(build_id);
 +        let installer = AssetRef {
-+            url: crate::distribution::windows_installer_download_url(&tag),
++            url: format!(
++                "{}preview-test/herdr-windows-x86_64-installer.exe",
++                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
++            ),
 +            sha256: Some("b".repeat(64)),
 +            format: Some("nsis".to_string()),
 +        };
 +        let legacy_zip = AssetRef {
 +            url: format!(
-+                "{}{tag}/herdr-windows-x86_64.zip",
-+                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX,
++                "{}preview-test/herdr-windows-x86_64.zip",
++                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
 +            ),
 +            sha256: Some("a".repeat(64)),
 +            format: Some("zip".to_string()),
 +        };
-+        let assets = BTreeMap::from([
-+            ("windows-x86_64".to_string(), legacy_zip),
-+            ("windows-x86_64-installer".to_string(), installer),
-+        ]);
-+        let mut manifest = PreviewManifest {
++        let manifest = PreviewManifest {
 +            channel: "preview".to_string(),
 +            base_version: "9.9.9".to_string(),
 +            build_id: build_id.to_string(),
@@ -8314,31 +7832,20 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +            built_at: "2026-07-28T00:00:00Z".to_string(),
 +            protocol: 77,
 +            notes: "### Changed\n- Managed installer".to_string(),
-+            assets: assets.clone(),
-+            builds: BTreeMap::from([
-+                (
-+                    build_id.to_string(),
-+                    PreviewBuildMetadata {
-+                        base_version: "9.9.9".to_string(),
-+                        commit: "b".repeat(40),
-+                        built_at: "2026-07-28T00:00:00Z".to_string(),
-+                        protocol: 77,
-+                        tag: tag.clone(),
-+                        assets,
-+                    },
-+                ),
-+                (
-+                    "111111111111.aaaaaaaaaaaa".to_string(),
-+                    PreviewBuildMetadata {
-+                        base_version: "9.9.8".to_string(),
-+                        commit: "a".repeat(40),
-+                        built_at: "2026-07-27T00:00:00Z".to_string(),
-+                        protocol: 76,
-+                        tag: "windows-nightly-111111111111-aaaaaaaaaaaa".to_string(),
-+                        assets: BTreeMap::new(),
-+                    },
-+                ),
++            assets: BTreeMap::from([
++                ("windows-x86_64".to_string(), legacy_zip),
++                ("windows-x86_64-installer".to_string(), installer),
 +            ]),
++            builds: BTreeMap::from([(
++                "111111111111.aaaaaaaaaaaa".to_string(),
++                PreviewBuildMetadata {
++                    base_version: "9.9.8".to_string(),
++                    commit: "a".repeat(40),
++                    built_at: "2026-07-27T00:00:00Z".to_string(),
++                    protocol: 76,
++                    assets: BTreeMap::new(),
++                },
++            )]),
 +        };
 +
 +        let release = release_info_from_preview_manifest(&manifest)
@@ -8352,18 +7859,13 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
 +            release.sha256.as_deref(),
 +            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 +        );
-+
-+        manifest.builds.get_mut(build_id).unwrap().tag = "windows-nightly-wrong".to_string();
-+        assert!(release_info_from_preview_manifest(&manifest)
-+            .unwrap_err()
-+            .contains("expected windows-nightly-bbbbbbbbbbbb-222222222222"));
 +    }
 +}
 +
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2783,7 @@ mod tests {
+@@ -2325,6 +2643,7 @@ mod tests {
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -8371,7 +7873,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2702,6 +3161,7 @@ mod tests {
+@@ -2702,6 +3021,7 @@ mod tests {
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -8379,7 +7881,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3404,7 @@ mod tests {
+@@ -2944,6 +3264,7 @@ mod tests {
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -8387,7 +7889,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3540,7 @@ mod tests {
+@@ -3079,6 +3400,7 @@ mod tests {
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -8395,7 +7897,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3849,7 @@ mod tests {
+@@ -3387,7 +3709,7 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
@@ -8404,7 +7906,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3861,7 @@ mod tests {
+@@ -3399,7 +3721,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -8413,7 +7915,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..41dd23f1accbbc56de61472709930570
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3883,7 @@ mod tests {
+@@ -3421,7 +3743,7 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);
