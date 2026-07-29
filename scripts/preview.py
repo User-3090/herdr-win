@@ -14,10 +14,12 @@ ASSET_TARGETS = (
     "macos-x86_64",
     "macos-aarch64",
     "windows-x86_64",
+    "windows-x86_64-installer",
 )
 EXPECTED_ASSET_NAMES = {
     **{target: f"herdr-{target}" for target in ASSET_TARGETS},
     "windows-x86_64": "herdr-windows-x86_64.zip",
+    "windows-x86_64-installer": "herdr-windows-x86_64-installer.exe",
 }
 HIDDEN_SUBJECTS = (
     "docs: update website manifest",
@@ -181,17 +183,21 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
 
 
 def asset_objects(urls: dict[str, str], shas: dict[str, str]) -> dict[str, dict[str, str]]:
+    for target in ("windows-x86_64", "windows-x86_64-installer"):
+        windows_sha = shas.get(target)
+        if not windows_sha or not re.fullmatch(r"[0-9a-f]{64}", windows_sha):
+            raise ValueError(f"{target} requires a lowercase SHA-256 digest")
+
     assets: dict[str, dict[str, str]] = {}
     for target in ASSET_TARGETS:
-        url = urls[target]
-        entry = {"url": url}
         sha = shas.get(target)
-        if sha:
-            entry["sha256"] = sha
-        if target.startswith("windows-"):
-            if not sha or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
-                raise ValueError(f"{target} requires a SHA-256 digest")
+        if not sha:
+            continue
+        entry = {"url": urls[target], "sha256": sha}
+        if target == "windows-x86_64":
             entry["format"] = "zip"
+        elif target == "windows-x86_64-installer":
+            entry["format"] = "nsis"
         assets[target] = entry
     return assets
 
@@ -209,11 +215,13 @@ def build_manifest(
     shas: dict[str, str],
     retain: int,
 ) -> str:
+    if not re.fullmatch(r"[0-9a-f]{12}\.[0-9a-f]{12}", build_id):
+        raise ValueError("build_id must be two lowercase 12-hex commit prefixes")
     urls = default_asset_urls(repo, tag)
     assets = asset_objects(urls, shas)
     current = read_json(output) or {}
-    builds = current.get("builds") if isinstance(current.get("builds"), dict) else {}
-    builds = dict(builds)
+    current_builds = current.get("builds")
+    builds: dict[str, Any] = dict(current_builds) if isinstance(current_builds, dict) else {}
     builds[build_id] = {
         "base_version": normalize_version(base_version),
         "commit": commit,

@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::env;
-#[cfg(not(windows))]
 use std::fs;
 #[cfg(not(windows))]
 use std::io;
@@ -16,8 +15,9 @@ use std::io;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 #[cfg(not(windows))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(not(windows))]
 use interprocess::local_socket::traits::Stream as _;
@@ -40,6 +40,12 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(not(windows))]
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const WINDOWS_INSTALLER_TIMEOUT: Duration = Duration::from_secs(180);
+#[cfg(windows)]
+const WINDOWS_INSTALLER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const WINDOWS_INSTALLER_START_GATE_ENV: &str = "HERDR_INSTALLER_START_GATE_V1";
 
 fn preview_update_manifest_url() -> &'static str {
     crate::distribution::PREVIEW_MANIFEST_URL
@@ -128,6 +134,7 @@ impl UpdateChannel {
 struct AssetRef {
     url: String,
     sha256: Option<String>,
+    format: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for AssetRef {
@@ -140,6 +147,7 @@ impl<'de> Deserialize<'de> for AssetRef {
             serde_json::Value::String(url) if !url.trim().is_empty() => Ok(Self {
                 url: url.trim().to_string(),
                 sha256: None,
+                format: None,
             }),
             serde_json::Value::Object(mut object) => {
                 let url = object
@@ -149,12 +157,16 @@ impl<'de> Deserialize<'de> for AssetRef {
                 let sha256 = object
                     .remove("sha256")
                     .and_then(|value| value.as_str().map(str::to_string));
+                let format = object
+                    .remove("format")
+                    .and_then(|value| value.as_str().map(str::to_string));
                 if url.trim().is_empty() {
                     return Err(serde::de::Error::custom("asset url must not be empty"));
                 }
                 Ok(Self {
                     url: url.trim().to_string(),
                     sha256: sha256.filter(|value| !value.trim().is_empty()),
+                    format: format.filter(|value| !value.trim().is_empty()),
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -276,6 +288,7 @@ struct ReleaseInfo {
     target_protocol: Option<u32>,
     download_url: String,
     sha256: Option<String>,
+    asset_format: Option<String>,
     notes_body: String,
 }
 
@@ -343,6 +356,46 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
     }
 }
 
+fn update_asset_key(os: &str, arch: &str) -> String {
+    if os == "windows" {
+        format!("{os}-{arch}-installer")
+    } else {
+        format!("{os}-{arch}")
+    }
+}
+
+#[cfg(windows)]
+fn validate_windows_installer_asset(asset_key: &str, asset: &AssetRef) -> Result<(), String> {
+    if asset.format.as_deref() != Some("nsis") {
+        return Err(format!(
+            "Windows update asset {asset_key} must declare format nsis"
+        ));
+    }
+    let sha256 = asset
+        .sha256
+        .as_deref()
+        .ok_or_else(|| format!("Windows update asset {asset_key} is missing sha256"))?;
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "Windows update asset {asset_key} has an invalid lowercase SHA-256 digest"
+        ));
+    }
+    if !asset
+        .url
+        .starts_with(crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX)
+        || !asset.url.ends_with("/herdr-windows-x86_64-installer.exe")
+    {
+        return Err(format!(
+            "Windows update asset {asset_key} must use the immutable herdr-win NSIS release URL"
+        ));
+    }
+    Ok(())
+}
+
 fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
     let current = Version::current();
     let latest = Version::parse(&manifest.version)
@@ -361,11 +414,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
     }
 
     let (os, arch) = platform_target();
-    let asset_key = format!("{os}-{arch}");
+    let asset_key = update_asset_key(os, arch);
     let asset = manifest
         .assets
         .get(&asset_key)
         .ok_or_else(|| format!("no binary for {asset_key} in update manifest"))?;
+    #[cfg(windows)]
+    validate_windows_installer_asset(&asset_key, asset)?;
     let download_url = asset.url.clone();
 
     Ok(Some(ReleaseInfo {
@@ -378,6 +433,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         target_protocol: manifest.protocol,
         download_url,
         sha256: asset.sha256.clone(),
+        asset_format: asset.format.clone(),
         notes_body,
     }))
 }
@@ -409,8 +465,12 @@ fn is_fork_build_id(value: &str) -> bool {
     parts.next().is_none()
         && upstream.len() == 12
         && control.len() == 12
-        && upstream.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && control.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && upstream
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && control
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn preview_transition_may_be_stale(current: &str, latest: &str, current_is_archived: bool) -> bool {
@@ -430,8 +490,10 @@ fn release_info_from_preview_manifest(
         ));
     }
     let build_id = manifest.build_id.trim();
-    if build_id.is_empty() {
-        return Err("preview manifest build_id is empty".into());
+    if !is_fork_build_id(build_id) {
+        return Err(
+            "preview manifest build_id must be two lowercase 12-hex commit prefixes".into(),
+        );
     }
     if crate::build_info::is_preview()
         && crate::build_info::build_id().is_some_and(|current| current == build_id)
@@ -458,7 +520,7 @@ fn release_info_from_preview_manifest(
         return Err("preview manifest notes are empty".into());
     }
     let (os, arch) = platform_target();
-    let asset_key = format!("{os}-{arch}");
+    let asset_key = update_asset_key(os, arch);
     if let Some(archived) = manifest.builds.get(build_id) {
         if archived.base_version != manifest.base_version
             || archived.commit != manifest.commit
@@ -481,6 +543,8 @@ fn release_info_from_preview_manifest(
                 .and_then(|build| build.assets.get(&asset_key))
         })
         .ok_or_else(|| format!("no binary for {asset_key} in preview manifest"))?;
+    #[cfg(windows)]
+    validate_windows_installer_asset(&asset_key, asset)?;
     let download_url = asset.url.clone();
 
     Ok(Some(ReleaseInfo {
@@ -493,6 +557,7 @@ fn release_info_from_preview_manifest(
         target_protocol: Some(manifest.protocol),
         download_url,
         sha256: asset.sha256.clone(),
+        asset_format: asset.format.clone(),
         notes_body,
     }))
 }
@@ -663,61 +728,143 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
 }
 
 #[cfg(windows)]
-fn windows_installer_command(channel: UpdateChannel, expected_build_id: Option<&str>) -> Command {
-    let installer_command = format!("irm '{}' | iex", crate::distribution::WINDOWS_INSTALLER_URL);
-    let mut command = Command::new("powershell");
+struct DownloadedWindowsInstaller {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for DownloadedWindowsInstaller {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_update_temp_root() -> Result<PathBuf, String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..100_u8 {
+        let root = env::temp_dir().join(format!(
+            "herdr-update-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "failed to create Windows update directory {}: {err}",
+                    root.display()
+                ));
+            }
+        }
+    }
+    Err("failed to allocate a unique Windows update directory".to_string())
+}
+
+#[cfg(windows)]
+fn download_windows_installer(release: &ReleaseInfo) -> Result<DownloadedWindowsInstaller, String> {
+    if release.asset_format.as_deref() != Some("nsis") {
+        return Err("selected Windows update asset is not an NSIS installer".to_string());
+    }
+    let expected_sha256 = release
+        .sha256
+        .as_deref()
+        .ok_or("selected Windows update asset has no SHA-256 digest")?;
+    let root = create_windows_update_temp_root()?;
+    let path = root.join("herdr-windows-x86_64-installer.exe");
+    let download = DownloadedWindowsInstaller { root, path };
+
+    let status = crate::noninteractive_process::curl_command()
+        .args(["-sfL", "--max-time", "120", "-o"])
+        .arg(&download.path)
+        .arg(&release.download_url)
+        .status()
+        .map_err(|err| format!("failed to download Windows installer: {err}"))?;
+    if !status.success() {
+        return Err(format!(
+            "failed to download Windows installer with status {status}"
+        ));
+    }
+    crate::checksum::verify_sha256(&download.path, expected_sha256).map_err(|err| {
+        format!("downloaded Windows installer checksum verification failed: {err}")
+    })?;
+    tracing::info!(sha256 = %expected_sha256, "downloaded Windows installer checksum verified");
+    Ok(download)
+}
+
+#[cfg(windows)]
+fn windows_installer_command(installer: &Path, parent_pid: u32, start_gate: &Path) -> Command {
+    let mut command = Command::new(installer);
     command
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
-        .arg(installer_command)
-        .env("HERDR_CHANNEL", channel.as_str())
-        // Drop any inherited PSModulePath. When herdr is launched from
-        // PowerShell 7, its Core module paths come first and Windows
-        // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
-        // Get-FileHash. Removing it lets 5.1 compute its own default path.
-        // See PowerShell/PowerShell#8635.
-        .env_remove("PSModulePath");
-    if channel == UpdateChannel::Preview {
-        let manifest_url = expected_build_id.map_or_else(
-            || preview_update_manifest_url().to_string(),
-            |build_id| format!("{}?build_id={build_id}", preview_update_manifest_url()),
-        );
-        command.env("HERDR_MANIFEST_URL", manifest_url);
-    }
-    if let Some(build_id) = expected_build_id {
-        command.env("HERDR_EXPECTED_BUILD_ID", build_id);
-    }
+        .arg("/S")
+        .arg(format!("/PARENT_PID={parent_pid}"))
+        .env(WINDOWS_INSTALLER_START_GATE_ENV, start_gate);
     command
 }
 
 #[cfg(windows)]
-fn install_windows_update_with_installer(
-    channel: UpdateChannel,
-    expected_build_id: Option<&str>,
-) -> Result<(), String> {
-    let status = windows_installer_command(channel, expected_build_id)
-        .status()
-        .map_err(|err| format!("failed to run Windows installer: {err}"))?;
+fn terminate_windows_installer(
+    job: &crate::platform::ChildProcessJob,
+    child: &mut std::process::Child,
+    failure: String,
+) -> String {
+    match job.terminate_and_wait(child, WINDOWS_INSTALLER_CLEANUP_TIMEOUT) {
+        Ok(()) => failure,
+        Err(cleanup_err) => format!("{failure}; cleanup failed: {cleanup_err}"),
+    }
+}
 
+#[cfg(windows)]
+fn install_windows_update_with_installer(release: &ReleaseInfo) -> Result<(), String> {
+    let installer = download_windows_installer(release)?;
+    let start_gate = installer.root.join("installer.start");
+    let job = crate::platform::ChildProcessJob::new_kill_on_close()
+        .map_err(|err| format!("failed to create Windows installer process job: {err}"))?;
+    let mut child = windows_installer_command(&installer.path, std::process::id(), &start_gate)
+        .spawn()
+        .map_err(|err| format!("failed to start Windows installer: {err}"))?;
+    if let Err(err) = job.assign(&child) {
+        return Err(terminate_windows_installer(
+            &job,
+            &mut child,
+            format!("failed to assign Windows installer process job: {err}"),
+        ));
+    }
+    if let Err(err) = fs::write(&start_gate, b"assigned\n") {
+        return Err(terminate_windows_installer(
+            &job,
+            &mut child,
+            format!("failed to release Windows installer start gate: {err}"),
+        ));
+    }
+    let status = match crate::platform::wait_child_bounded(&mut child, WINDOWS_INSTALLER_TIMEOUT) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            return Err(terminate_windows_installer(
+                &job,
+                &mut child,
+                format!(
+                    "Windows installer exceeded its {} second timeout",
+                    WINDOWS_INSTALLER_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        Err(wait_err) => {
+            return Err(terminate_windows_installer(
+                &job,
+                &mut child,
+                format!("failed to wait for Windows installer: {wait_err}"),
+            ));
+        }
+    };
     if !status.success() {
         return Err(format!("Windows installer failed with status {status}"));
     }
-
     Ok(())
-}
-
-#[cfg(windows)]
-fn windows_installed_herdr_exe_path() -> Result<PathBuf, String> {
-    if let Some(install_dir) = env::var_os("HERDR_INSTALL_DIR").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(install_dir).join("herdr.exe"));
-    }
-
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or("LOCALAPPDATA is not set; cannot locate Herdr install")?;
-    Ok(PathBuf::from(local_app_data)
-        .join("Programs")
-        .join("Herdr")
-        .join("bin")
-        .join("herdr.exe"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2067,22 +2214,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     #[cfg(windows)]
     {
         let _ = options;
+        let managed_update = crate::managed_install::current_payload_is_managed()
+            .map_err(|err| format!("failed to inspect the current Windows install: {err}"))?;
 
-        eprintln!(
-            "installing {} with the Windows installer...",
-            release.label()
-        );
-        if let Some(sha256) = &release.sha256 {
-            tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
+        eprintln!("downloading and verifying {}...", release.label());
+        install_windows_update_with_installer(&release)?;
+        if managed_update {
+            eprintln!("staged {}", release.label());
+            eprintln!(
+                "It activates for new launches after this command and all older Herdr sessions exit."
+            );
+        } else {
+            eprintln!("installed {}", release.label());
+            eprintln!("New Herdr launches use the managed Windows installation.");
         }
-        install_windows_update_with_installer(channel, release.build_id.as_deref())?;
-        let updated_exe = windows_installed_herdr_exe_path()?;
-        eprintln!("installed {}", release.label());
-        print_outdated_integration_notice_with_updated_binary(&updated_exe);
-        eprintln!(
-            "Restart any running Herdr sessions to use {}.",
-            release.label()
-        );
     }
 
     #[cfg(not(windows))]
@@ -2122,6 +2267,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     Ok(release.version)
 }
 
+#[cfg(not(windows))]
 fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
     let status = Command::new(updated_exe)
         .args(["integration", "status", "--outdated-only"])
@@ -2317,28 +2463,104 @@ mod cross_platform_tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_installer_command_uses_distribution_sources() {
-        let build_id = "dc2506ea8cb5.db56546f1a7e";
-        let command = windows_installer_command(UpdateChannel::Preview, Some(build_id));
+    fn windows_installer_command_uses_verified_local_asset_parent_and_start_gate() {
+        let installer = Path::new(r"C:\Temp\herdr-windows-x86_64-installer.exe");
+        let start_gate = Path::new(r"C:\Temp\installer.start");
+        let command = windows_installer_command(installer, 4242, start_gate);
+        assert_eq!(command.get_program(), installer.as_os_str());
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(arguments.contains(crate::distribution::WINDOWS_INSTALLER_URL));
-
-        let manifest = command.get_envs().find_map(|(name, value)| {
-            if name == std::ffi::OsStr::new("HERDR_MANIFEST_URL") {
-                value.map(|value| value.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        });
-        let expected_manifest = format!(
-            "{}?build_id={build_id}",
-            crate::distribution::PREVIEW_MANIFEST_URL
+            .collect::<Vec<_>>();
+        assert_eq!(arguments, ["/S", "/PARENT_PID=4242"]);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == WINDOWS_INSTALLER_START_GATE_ENV)
+                .and_then(|(_, value)| value),
+            Some(start_gate.as_os_str())
         );
-        assert_eq!(manifest.as_deref(), Some(expected_manifest.as_str()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_manifest_requires_fork_nsis_asset_and_sha256() {
+        let valid = AssetRef {
+            url: format!(
+                "{}preview-test/herdr-windows-x86_64-installer.exe",
+                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
+            ),
+            sha256: Some("a".repeat(64)),
+            format: Some("nsis".to_string()),
+        };
+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &valid).is_ok());
+
+        let mut invalid = valid.clone();
+        invalid.format = Some("zip".to_string());
+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
+        invalid = valid.clone();
+        invalid.sha256 = None;
+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
+        invalid = valid;
+        invalid.url = "https://example.com/herdr-windows-x86_64-installer.exe".to_string();
+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_preview_selects_installer_without_removing_legacy_zip() {
+        let build_id = "bbbbbbbbbbbb.222222222222";
+        let installer = AssetRef {
+            url: format!(
+                "{}preview-test/herdr-windows-x86_64-installer.exe",
+                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
+            ),
+            sha256: Some("b".repeat(64)),
+            format: Some("nsis".to_string()),
+        };
+        let legacy_zip = AssetRef {
+            url: format!(
+                "{}preview-test/herdr-windows-x86_64.zip",
+                crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
+            ),
+            sha256: Some("a".repeat(64)),
+            format: Some("zip".to_string()),
+        };
+        let manifest = PreviewManifest {
+            channel: "preview".to_string(),
+            base_version: "9.9.9".to_string(),
+            build_id: build_id.to_string(),
+            commit: "b".repeat(40),
+            built_at: "2026-07-28T00:00:00Z".to_string(),
+            protocol: 77,
+            notes: "### Changed\n- Managed installer".to_string(),
+            assets: BTreeMap::from([
+                ("windows-x86_64".to_string(), legacy_zip),
+                ("windows-x86_64-installer".to_string(), installer),
+            ]),
+            builds: BTreeMap::from([(
+                "111111111111.aaaaaaaaaaaa".to_string(),
+                PreviewBuildMetadata {
+                    base_version: "9.9.8".to_string(),
+                    commit: "a".repeat(40),
+                    built_at: "2026-07-27T00:00:00Z".to_string(),
+                    protocol: 76,
+                    assets: BTreeMap::new(),
+                },
+            )]),
+        };
+
+        let release = release_info_from_preview_manifest(&manifest)
+            .expect("valid preview manifest")
+            .expect("different preview build");
+        assert!(release
+            .download_url
+            .ends_with("herdr-windows-x86_64-installer.exe"));
+        assert_eq!(release.asset_format.as_deref(), Some("nsis"));
+        assert_eq!(
+            release.sha256.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
     }
 }
 
@@ -2421,6 +2643,7 @@ mod tests {
             target_protocol,
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
+            asset_format: None,
             notes_body: "### Changed\n- One".to_string(),
         }
     }
@@ -2798,6 +3021,7 @@ mod tests {
             target_protocol: Some(2),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
+            asset_format: None,
             notes_body: "### Changed\n- One".to_string(),
         };
         let incompatible_release = ReleaseInfo {
@@ -3040,6 +3264,7 @@ mod tests {
             target_protocol: Some(3),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
+            asset_format: None,
             notes_body: "### Changed\n- One".to_string(),
         };
         let plan = RunningServerUpdatePlan {
@@ -3175,6 +3400,7 @@ mod tests {
             target_protocol: Some(77),
             download_url: "https://example.com/herdr".to_string(),
             sha256: None,
+            asset_format: None,
             notes_body: "### Changed\n- One".to_string(),
         };
 
@@ -3483,7 +3709,7 @@ mod tests {
             r####"{{
                 "channel": "preview",
                 "base_version": "9.9.9",
-                "build_id": "2026-06-02-abcdef123456",
+                "build_id": "abcdef123456.7890abcdef12",
                 "commit": "abcdef1234567890",
                 "built_at": "2026-06-02T03:00:00Z",
                 "protocol": 77,
@@ -3495,7 +3721,7 @@ mod tests {
                     }}
                 }},
                 "builds": {{
-                    "2026-06-02-abcdef123456": {{
+                    "abcdef123456.7890abcdef12": {{
                         "base_version": "9.9.9",
                         "commit": "abcdef1234567890",
                         "built_at": "2026-06-02T03:00:00Z",
@@ -3517,7 +3743,7 @@ mod tests {
             .expect("preview update");
 
         assert_eq!(release.channel, UpdateChannel::Preview);
-        assert_eq!(release.identity, "9.9.9-preview.2026-06-02-abcdef123456");
+        assert_eq!(release.identity, "9.9.9-preview.abcdef123456.7890abcdef12");
         assert_eq!(release.target_protocol, Some(77));
         assert_eq!(release.sha256.as_deref(), Some("deadbeef"));
     }

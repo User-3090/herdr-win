@@ -3,7 +3,8 @@ use std::{
     ffi::c_void,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
-    ptr::{copy_nonoverlapping, null_mut},
+    process::{Child, ExitStatus},
+    ptr::{copy_nonoverlapping, null, null_mut},
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex, OnceLock,
@@ -16,7 +17,7 @@ use windows_sys::{
     Win32::{
         Foundation::{
             CloseHandle, GlobalFree, LocalFree, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
-            STATUS_SUCCESS, UNICODE_STRING,
+            STATUS_SUCCESS, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         System::{
             Console::GetConsoleWindow,
@@ -31,12 +32,16 @@ use windows_sys::{
                     TH32CS_SNAPPROCESS,
                 },
             },
-            JobObjects::IsProcessInJob,
+            JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+                JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
             Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
-                CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
+                WaitForSingleObject, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
                 PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
             },
         },
@@ -53,6 +58,14 @@ use windows_sys::{
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 mod clipboard_image;
+// This shared boundary also contains the dedicated launcher's pointer and
+// coordination operations, which are intentionally unreachable in `herdr.exe`.
+#[allow(dead_code)]
+mod managed_install;
+pub(crate) use managed_install::{
+    adopt_managed_runtime_lease_platform, managed_install_command_executable_platform,
+    ManagedRuntimeLease,
+};
 
 const STILL_ACTIVE: u32 = 259;
 const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
@@ -688,6 +701,108 @@ pub fn process_exists(pid: u32) -> bool {
     ok && exit_code == STILL_ACTIVE
 }
 
+pub(crate) fn wait_child_bounded(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    use std::os::windows::io::AsRawHandle;
+
+    let timeout_millis = u32::try_from(timeout.as_millis()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows child wait timeout exceeds the Win32 limit",
+        )
+    })?;
+    // SAFETY: std::process::Child owns a valid process handle until it is
+    // waited or dropped. WaitForSingleObject does not take ownership.
+    let result = unsafe { WaitForSingleObject(child.as_raw_handle() as HANDLE, timeout_millis) };
+    match result {
+        WAIT_OBJECT_0 => child
+            .try_wait()?
+            .ok_or_else(|| {
+                std::io::Error::other("signaled Windows child did not report an exit status")
+            })
+            .map(Some),
+        WAIT_TIMEOUT => Ok(None),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+pub(crate) struct ChildProcessJob {
+    handle: HANDLE,
+}
+
+impl ChildProcessJob {
+    pub(crate) fn new_kill_on_close() -> std::io::Result<Self> {
+        // SAFETY: null security attributes and name request a private job with
+        // default security. The returned handle is owned by this guard.
+        let handle = unsafe { CreateJobObjectW(null(), null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: limits has the exact structure and size required by the
+        // selected information class, and the job handle is valid.
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let err = std::io::Error::last_os_error();
+            // SAFETY: the handle was created above and has not been transferred.
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(err);
+        }
+        Ok(Self { handle })
+    }
+
+    pub(crate) fn assign(&self, child: &Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+
+        // SAFETY: both handles are valid and remain owned by their guards.
+        if unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle() as HANDLE) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn terminate_and_wait(
+        &self,
+        child: &mut Child,
+        timeout: Duration,
+    ) -> std::io::Result<()> {
+        // SAFETY: this guard owns the job handle. TerminateJobObject applies to
+        // the assigned installer and every child in its nested job hierarchy.
+        if unsafe { TerminateJobObject(self.handle, 1) } == 0 && child.try_wait()?.is_none() {
+            return Err(std::io::Error::last_os_error());
+        }
+        match wait_child_bounded(child, timeout)? {
+            Some(_) => Ok(()),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Windows child job did not terminate before its cleanup deadline",
+            )),
+        }
+    }
+}
+
+impl Drop for ChildProcessJob {
+    fn drop(&mut self) {
+        // SAFETY: this guard exclusively owns the job handle. The configured
+        // kill-on-close limit prevents descendants from escaping cleanup.
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -1030,6 +1145,37 @@ mod tests {
     use windows_sys::Win32::System::Console::{
         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
     };
+
+    #[test]
+    fn child_process_job_assigns_and_terminates_within_deadline() {
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn job test child");
+        let job = super::ChildProcessJob::new_kill_on_close().expect("create child job");
+        if let Err(err) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = super::wait_child_bounded(&mut child, Duration::from_secs(5));
+            panic!("assign job test child: {err}");
+        }
+        assert!(child.try_wait().expect("inspect job test child").is_none());
+        let started = Instant::now();
+        job.terminate_and_wait(&mut child, Duration::from_secs(5))
+            .expect("terminate job test child");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(child
+            .try_wait()
+            .expect("reinspect job test child")
+            .is_some());
+    }
 
     #[test]
     fn windows_notification_text_is_null_terminated_and_unicode_safe() {

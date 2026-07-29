@@ -29,14 +29,8 @@ class WindowsConptyPackageTests(unittest.TestCase):
         loader = (
             package.PROJECT_ROOT / "vendor/portable-pty/src/win/psuedocon.rs"
         ).read_text(encoding="utf-8")
-        installer = (package.PROJECT_ROOT / "website/install.ps1").read_text(
-            encoding="utf-8"
-        )
         for item in metadata["bundles"]["x86_64"]["files"]:
             self.assertIn(item["sha256"], loader)
-            self.assertNotIn(item["sha256"], installer)
-        self.assertIn('Get-Content -LiteralPath $markerPath -Raw', installer)
-        self.assertIn('$filesProperty.Value.PSObject.Properties[$relative]', installer)
         for notice in metadata["notices"]:
             source = package.PROJECT_ROOT / notice["source"]
             self.assertEqual(package.sha256_file(source), notice["sha256"])

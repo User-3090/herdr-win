@@ -33,7 +33,7 @@ class PreviewNotesTests(unittest.TestCase):
                 output=output,
                 repo="ogulcancelik/herdr",
                 tag="preview-2026-06-02-abcdef123456",
-                build_id="2026-06-02-abcdef123456",
+                build_id="abcdef123456.7890abcdef12",
                 commit="abcdef1234567890",
                 built_at="2026-06-02T03:00:00Z",
                 base_version="0.6.6",
@@ -42,12 +42,21 @@ class PreviewNotesTests(unittest.TestCase):
                 shas={
                     "linux-x86_64": "deadbeef",
                     "windows-x86_64": "a" * 64,
+                    "windows-x86_64-installer": "b" * 64,
                 },
                 retain=30,
             )
             data = json.loads(content)
             self.assertEqual(data["channel"], "preview")
-            self.assertEqual(data["build_id"], "2026-06-02-abcdef123456")
+            self.assertEqual(data["build_id"], "abcdef123456.7890abcdef12")
+            self.assertEqual(
+                set(data["assets"]),
+                {
+                    "linux-x86_64",
+                    "windows-x86_64",
+                    "windows-x86_64-installer",
+                },
+            )
             self.assertEqual(
                 data["assets"]["linux-x86_64"]["sha256"],
                 "deadbeef",
@@ -61,7 +70,18 @@ class PreviewNotesTests(unittest.TestCase):
                 "a" * 64,
             )
             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
-            self.assertIn("2026-06-02-abcdef123456", data["builds"])
+            self.assertEqual(
+                data["assets"]["windows-x86_64-installer"]["url"],
+                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64-installer.exe",
+            )
+            self.assertEqual(
+                data["assets"]["windows-x86_64-installer"]["format"], "nsis"
+            )
+            self.assertNotEqual(
+                data["assets"]["windows-x86_64"]["sha256"],
+                data["assets"]["windows-x86_64-installer"]["sha256"],
+            )
+            self.assertIn("abcdef123456.7890abcdef12", data["builds"])
 
     def test_windows_preview_asset_requires_sha256(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,13 +90,118 @@ class PreviewNotesTests(unittest.TestCase):
                     output=Path(tmp) / "preview.json",
                     repo="ogulcancelik/herdr",
                     tag="preview-test",
-                    build_id="test",
+                    build_id="abcdef123456.7890abcdef12",
                     commit="abcdef",
                     built_at="2026-06-02T03:00:00Z",
                     base_version="0.6.6",
                     protocol=12,
                     notes="test",
                     shas={},
+                    retain=1,
+                )
+
+            with self.assertRaisesRegex(
+                ValueError, "windows-x86_64-installer requires"
+            ):
+                preview.build_manifest(
+                    output=Path(tmp) / "preview.json",
+                    repo="ogulcancelik/herdr",
+                    tag="preview-test",
+                    build_id="abcdef123456.7890abcdef12",
+                    commit="abcdef",
+                    built_at="2026-06-02T03:00:00Z",
+                    base_version="0.6.6",
+                    protocol=12,
+                    notes="test",
+                    shas={
+                        "windows-x86_64": "a" * 64,
+                        "windows-x86_64-installer": "B" * 64,
+                    },
+                    retain=1,
+                )
+
+            with self.assertRaisesRegex(
+                ValueError, "windows-x86_64-installer requires"
+            ):
+                preview.build_manifest(
+                    output=Path(tmp) / "preview.json",
+                    repo="ogulcancelik/herdr",
+                    tag="preview-test",
+                    build_id="abcdef123456.7890abcdef12",
+                    commit="abcdef",
+                    built_at="2026-06-02T03:00:00Z",
+                    base_version="0.6.6",
+                    protocol=12,
+                    notes="test",
+                    shas={"windows-x86_64": "a" * 64},
+                    retain=1,
+                )
+
+    def test_manifest_preserves_legacy_zip_only_archived_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "preview.json"
+            legacy_id = "111111111111.aaaaaaaaaaaa"
+            output.write_text(
+                json.dumps(
+                    {
+                        "builds": {
+                            legacy_id: {
+                                "built_at": "2026-06-01T03:00:00Z",
+                                "assets": {
+                                    "windows-x86_64": {
+                                        "url": "https://example.test/legacy.zip",
+                                        "sha256": "c" * 64,
+                                        "format": "zip",
+                                    }
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            content = preview.build_manifest(
+                output=output,
+                repo="ogulcancelik/herdr",
+                tag="preview-test",
+                build_id="abcdef123456.7890abcdef12",
+                commit="abcdef",
+                built_at="2026-06-02T03:00:00Z",
+                base_version="0.6.6",
+                protocol=12,
+                notes="test",
+                shas={
+                    "windows-x86_64": "a" * 64,
+                    "windows-x86_64-installer": "b" * 64,
+                },
+                retain=2,
+            )
+            data = json.loads(content)
+            self.assertEqual(
+                set(data["builds"][legacy_id]["assets"]), {"windows-x86_64"}
+            )
+            self.assertEqual(
+                set(data["builds"]["abcdef123456.7890abcdef12"]["assets"]),
+                {"windows-x86_64", "windows-x86_64-installer"},
+            )
+
+    def test_manifest_build_id_uses_source_and_control_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "two lowercase 12-hex"):
+                preview.build_manifest(
+                    output=Path(tmp) / "preview.json",
+                    repo="ogulcancelik/herdr",
+                    tag="preview-test",
+                    build_id="2026-06-02-abcdef123456",
+                    commit="abcdef",
+                    built_at="2026-06-02T03:00:00Z",
+                    base_version="0.6.6",
+                    protocol=12,
+                    notes="test",
+                    shas={
+                        "windows-x86_64": "a" * 64,
+                        "windows-x86_64-installer": "b" * 64,
+                    },
                     retain=1,
                 )
 

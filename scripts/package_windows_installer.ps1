@@ -1,0 +1,411 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$StageDir,
+
+    [Parameter(Mandatory = $true)]
+    [string]$LauncherExe,
+
+    [Parameter(Mandatory = $true)]
+    [string]$BuildId,
+
+    [Parameter(Mandatory = $true)]
+    [string]$DisplayVersion,
+
+    [Parameter(Mandatory = $true)]
+    [string]$NumericVersion,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputPath,
+
+    [string]$NsisArchive,
+    [string]$NsisCacheDir,
+
+    [ValidateSet(
+        "after-uninstall-pending",
+        "after-launcher-lock",
+        "after-installer-helper",
+        "after-state-directory",
+        "before-uninstaller"
+    )]
+    [string]$TestUninstallFault
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+$NsisVersion = "3.12"
+$NsisArchiveName = "nsis-$NsisVersion.zip"
+$NsisArchiveUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NsisVersion/$NsisArchiveName"
+$NsisArchiveSha256 = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
+$BuildIdPattern = '^[0-9a-f]{12}\.[0-9a-f]{12}$'
+$DisplayVersionPattern = '^((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))-preview\.([0-9a-f]{12}\.[0-9a-f]{12})$'
+$NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$'
+$LauncherBuildIdArgument = "--herdr-private-launcher-build-id-v1"
+
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+    $quoted = New-Object Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes += 1
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append((('\' * ($backslashes * 2 + 1)) -join ''))
+            [void]$quoted.Append('"')
+        } else {
+            if ($backslashes -gt 0) {
+                [void]$quoted.Append((('\' * $backslashes) -join ''))
+            }
+            [void]$quoted.Append($character)
+        }
+        $backslashes = 0
+    }
+    if ($backslashes -gt 0) {
+        [void]$quoted.Append((('\' * ($backslashes * 2)) -join ''))
+    }
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function Invoke-NativeCaptured {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Command
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    if ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {
+        foreach ($argument in $Arguments) {
+            [void]$startInfo.ArgumentList.Add($argument)
+        }
+    } else {
+        $startInfo.Arguments = (@($Arguments | ForEach-Object {
+            ConvertTo-WindowsCommandLineArgument -Value $_
+        }) -join ' ')
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start $Command"
+        }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill()
+            [void]$process.WaitForExit(5000)
+            throw "$Command exceeded its $TimeoutSeconds second packaging timeout."
+        }
+        return [PSCustomObject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdout.GetAwaiter().GetResult()
+            Stderr = $stderr.GetAwaiter().GetResult()
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-NativeChecked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $result = Invoke-NativeCaptured -Command $Command -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+    if (-not [string]::IsNullOrEmpty($result.Stdout)) {
+        [Console]::Out.Write($result.Stdout)
+    }
+    if (-not [string]::IsNullOrEmpty($result.Stderr)) {
+        [Console]::Error.Write($result.Stderr)
+    }
+    if ($result.ExitCode -ne 0) {
+        throw "$Command failed with exit code $($result.ExitCode)"
+    }
+}
+
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Get-PeMachine {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $reader = New-Object System.IO.BinaryReader($stream)
+    try {
+        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+            throw "$Path is not a PE executable."
+        }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadUInt32()
+        if ($peOffset + 6 -gt $stream.Length) {
+            throw "$Path has an invalid PE header offset."
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "$Path has an invalid PE signature."
+        }
+        return $reader.ReadUInt16()
+    } finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-X64Pe {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required executable does not exist: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing a reparse-point executable input: $Path"
+    }
+    $machine = Get-PeMachine -Path $Path
+    if ($machine -ne 0x8664) {
+        throw "Expected an x86_64 PE executable at $Path, got machine 0x$($machine.ToString('x4'))."
+    }
+}
+
+function Assert-X86Pe {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required executable does not exist: $Path"
+    }
+    $machine = Get-PeMachine -Path $Path
+    if ($machine -ne 0x014C) {
+        throw "Expected an x86 PE executable at $Path, got machine 0x$($machine.ToString('x4'))."
+    }
+}
+
+function Assert-VersionIdentity {
+    $displayMatch = [regex]::Match($DisplayVersion, $DisplayVersionPattern)
+    if (-not $displayMatch.Success -or $displayMatch.Groups[4].Value -cne $BuildId) {
+        throw "DisplayVersion must be <major>.<minor>.<patch>-preview.$BuildId."
+    }
+    $match = [regex]::Match($NumericVersion, $NumericVersionPattern)
+    if (-not $match.Success) {
+        throw "NumericVersion must contain four dot-separated 0-65535 components."
+    }
+    for ($index = 1; $index -le 4; $index++) {
+        if ([int]$match.Groups[$index].Value -gt 65535) {
+            throw "NumericVersion contains a component greater than 65535."
+        }
+    }
+    for ($index = 1; $index -le 3; $index++) {
+        if ([int]$displayMatch.Groups[$index].Value -ne [int]$match.Groups[$index].Value) {
+            throw "NumericVersion must match DisplayVersion's major, minor, and patch components."
+        }
+    }
+}
+
+function Invoke-HerdrIdentityQuery {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$ExpectedOutput,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $result = Invoke-NativeCaptured `
+        -Command $Executable `
+        -Arguments $Arguments `
+        -TimeoutSeconds $TimeoutSeconds
+    if ($result.ExitCode -ne 0) {
+        throw "$Description failed with exit code $($result.ExitCode): $($result.Stdout)$($result.Stderr)"
+    }
+    if ($result.Stderr.Length -ne 0) {
+        throw "$Description wrote unexpected stderr: $($result.Stderr)"
+    }
+    $output = if ($result.Stdout.EndsWith("`r`n", [StringComparison]::Ordinal)) {
+        $result.Stdout.Substring(0, $result.Stdout.Length - 2)
+    } elseif ($result.Stdout.EndsWith("`n", [StringComparison]::Ordinal)) {
+        $result.Stdout.Substring(0, $result.Stdout.Length - 1)
+    } else {
+        $result.Stdout
+    }
+    if ($output -cne $ExpectedOutput) {
+        throw "$Description returned '$output'; expected exact output '$ExpectedOutput'."
+    }
+    return $output
+}
+
+function Get-VerifiedNsisArchive {
+    if ([string]::IsNullOrWhiteSpace($script:NsisArchive)) {
+        if ([string]::IsNullOrWhiteSpace($script:NsisCacheDir)) {
+            $cacheBase = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
+                Join-Path ([System.IO.Path]::GetTempPath()) "herdr-tools"
+            } else {
+                $env:RUNNER_TOOL_CACHE
+            }
+            $script:NsisCacheDir = Join-Path $cacheBase "nsis-$script:NsisVersion"
+        }
+        if (-not (Test-Path -LiteralPath $script:NsisCacheDir)) {
+            New-Item -ItemType Directory -Path $script:NsisCacheDir -Force | Out-Null
+        }
+        $script:NsisArchive = Join-Path $script:NsisCacheDir $script:NsisArchiveName
+        if (-not (Test-Path -LiteralPath $script:NsisArchive -PathType Leaf)) {
+            $download = "$script:NsisArchive.download.$([Guid]::NewGuid().ToString('N'))"
+            try {
+                $curl = Get-Command curl.exe -ErrorAction Stop
+                Invoke-NativeChecked $curl.Source @(
+                    "--fail",
+                    "--location",
+                    "--max-time", "120",
+                    "--silent",
+                    "--show-error",
+                    "--output", $download,
+                    $script:NsisArchiveUrl
+                ) -TimeoutSeconds 130
+                $downloadHash = Get-Sha256 -Path $download
+                if ($downloadHash -cne $script:NsisArchiveSha256) {
+                    throw "Downloaded NSIS $script:NsisVersion archive hash mismatch: expected $script:NsisArchiveSha256, got $downloadHash"
+                }
+                Move-Item -LiteralPath $download -Destination $script:NsisArchive
+            } finally {
+                if (Test-Path -LiteralPath $download) {
+                    Remove-Item -LiteralPath $download -Force
+                }
+            }
+        }
+    }
+
+    $archivePath = (Resolve-Path -LiteralPath $script:NsisArchive).Path
+    $archiveItem = Get-Item -LiteralPath $archivePath -Force
+    if ($archiveItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing a reparse-point NSIS archive: $archivePath"
+    }
+    $actualHash = Get-Sha256 -Path $archivePath
+    if ($actualHash -cne $script:NsisArchiveSha256) {
+        throw "NSIS $script:NsisVersion archive hash mismatch: expected $script:NsisArchiveSha256, got $actualHash"
+    }
+    return $archivePath
+}
+
+if ($BuildId -cnotmatch $BuildIdPattern) {
+    throw "Invalid build ID '$BuildId'. Expected 12 lowercase hex characters, a dot, and 12 lowercase hex characters."
+}
+Assert-VersionIdentity
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
+$installerScript = Join-Path $projectRoot "packaging\windows\herdr-installer.nsi"
+$helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
+$StageDir = (Resolve-Path -LiteralPath $StageDir).Path
+$LauncherExe = (Resolve-Path -LiteralPath $LauncherExe).Path
+$OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+
+if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
+    (Get-Item -LiteralPath $StageDir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw "Stage must be a regular directory: $StageDir"
+}
+if (Test-Path -LiteralPath $OutputPath) {
+    throw "Refusing to overwrite an existing installer output: $OutputPath"
+}
+foreach ($required in @($packager, $installerScript, $helperScript)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Required installer source does not exist: $required"
+    }
+}
+Assert-X64Pe -Path $LauncherExe
+$payloadExe = Join-Path $StageDir "herdr.exe"
+Assert-X64Pe -Path $payloadExe
+if ($LauncherExe.Equals($payloadExe, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "LauncherExe must be the separately built launcher, not the staged Herdr payload."
+}
+[void](Invoke-HerdrIdentityQuery `
+    -Executable $payloadExe `
+    -Arguments @("--version") `
+    -ExpectedOutput "herdr $DisplayVersion" `
+    -Description "Staged Herdr --version")
+[void](Invoke-HerdrIdentityQuery `
+    -Executable $LauncherExe `
+    -Arguments @($LauncherBuildIdArgument) `
+    -ExpectedOutput $BuildId `
+    -Description "Herdr launcher private build-ID query")
+
+# The ConPTY packager remains the sole owner of package provenance, hashes,
+# exact marker content, and the allowed stage layout.
+Invoke-NativeChecked python @(
+    $packager,
+    "validate",
+    "--stage-dir", $StageDir
+) -TimeoutSeconds 120
+
+$archivePath = Get-VerifiedNsisArchive
+$outputParent = Split-Path -Parent $OutputPath
+if (-not (Test-Path -LiteralPath $outputParent)) {
+    New-Item -ItemType Directory -Path $outputParent -Force | Out-Null
+}
+
+$workingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-nsis-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $workingRoot | Out-Null
+try {
+    $toolRoot = Join-Path $workingRoot "tool"
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
+    $makensis = Join-Path $toolRoot "nsis-$NsisVersion\makensis.exe"
+    if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) {
+        throw "Verified NSIS archive did not contain nsis-$NsisVersion\makensis.exe"
+    }
+    $versionResult = Invoke-NativeCaptured -Command $makensis -Arguments @("/VERSION") -TimeoutSeconds 30
+    $reportedVersion = $versionResult.Stdout.Trim()
+    if ($versionResult.ExitCode -ne 0 -or $reportedVersion -cne "v$NsisVersion") {
+        throw "Verified makensis reported '$reportedVersion' instead of v$NsisVersion."
+    }
+
+    $temporaryOutput = Join-Path $workingRoot "herdr-installer.exe"
+    $makensisArguments = @(
+        "/V3",
+        "/WX",
+        "/INPUTCHARSET", "UTF8",
+        "/DHERDR_STAGE_DIR=$StageDir",
+        "/DHERDR_LAUNCHER_EXE=$LauncherExe",
+        "/DHERDR_HELPER_PS1=$helperScript",
+        "/DHERDR_BUILD_ID=$BuildId",
+        "/DHERDR_DISPLAY_VERSION=$DisplayVersion",
+        "/DHERDR_NUMERIC_VERSION=$NumericVersion",
+        "/DHERDR_OUTPUT_PATH=$temporaryOutput",
+        $installerScript
+    )
+    if (-not [string]::IsNullOrWhiteSpace($TestUninstallFault)) {
+        $makensisArguments = @(
+            "/DHERDR_TEST_UNINSTALL_FAULT=$TestUninstallFault"
+        ) + $makensisArguments
+    }
+    Invoke-NativeChecked $makensis $makensisArguments -TimeoutSeconds 180
+    Assert-X86Pe -Path $temporaryOutput
+    Move-Item -LiteralPath $temporaryOutput -Destination $OutputPath
+} finally {
+    Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "Created Herdr installer: $OutputPath"

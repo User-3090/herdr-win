@@ -73,6 +73,7 @@ mod ipc;
 mod kitty_graphics;
 mod layout;
 mod logging;
+mod managed_install;
 mod metadata_tokens;
 mod noninteractive_process;
 mod pane;
@@ -449,6 +450,7 @@ fn exit_if_nested_disabled(config: &config::Config) {
 }
 
 fn main() -> io::Result<()> {
+    let _managed_runtime_lease = crate::platform::adopt_managed_runtime_lease()?;
     let raw_args: Vec<String> = std::env::args().collect();
     let args = match session::configure_from_args(&raw_args) {
         Ok(args) => args,

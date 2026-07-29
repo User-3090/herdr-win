@@ -231,6 +231,10 @@ def parse_args() -> argparse.Namespace:
     archive.add_argument("--architecture", choices=("x86_64",), default="x86_64")
     archive.add_argument("--stage-dir", type=Path, required=True)
     archive.add_argument("--output", type=Path, required=True)
+
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--architecture", choices=("x86_64",), default="x86_64")
+    validate.add_argument("--stage-dir", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -244,8 +248,10 @@ def main() -> None:
             args.herdr_exe,
             args.output_dir,
         )
-    else:
+    elif args.command == "archive":
         archive_bundle(args.metadata, args.architecture, args.stage_dir, args.output)
+    else:
+        validate_stage(args.metadata, args.architecture, args.stage_dir)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.96.1
   WINDOWS_TARGET: x86_64-pc-windows-msvc
   ARTIFACT_NAME: herdr-windows-x86_64
+  INSTALLER_ASSET_NAME: herdr-windows-x86_64-installer.exe
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -145,11 +146,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "replayed delta failed git diff --check"
           }
-          $controlInstaller = (Get-FileHash -LiteralPath website\install.ps1 -Algorithm SHA256).Hash
-          $sourceInstaller = (Get-FileHash -LiteralPath ..\source\website\install.ps1 -Algorithm SHA256).Hash
-          if ($controlInstaller -ne $sourceInstaller) {
-            throw "control website/install.ps1 differs from the replayed release installer"
-          }
           $distribution = Get-Content -LiteralPath ..\source\src\distribution.rs -Raw
           function Get-DistributionUrl([string] $name) {
             $pattern = '(?s)\bconst\s+' + [regex]::Escape($name) + ':\s*&str\s*=\s*"([^"]+)";'
@@ -164,27 +160,17 @@ jobs:
           if ($manifestUrl -cne $expectedManifestUrl) {
             throw "replayed distribution manifest URL is not fork-owned"
           }
-          $installerUrl = Get-DistributionUrl "WINDOWS_INSTALLER_URL"
-          $installerPattern = '^https://raw\.githubusercontent\.com/' +
-            [regex]::Escape($env:GITHUB_REPOSITORY) + '/([0-9a-f]{40})/website/install\.ps1$'
-          if ($installerUrl -cnotmatch $installerPattern) {
-            throw "replayed distribution installer URL is not pinned to a fork commit"
-          }
-          $installerRevision = $Matches[1]
-          & git merge-base --is-ancestor $installerRevision HEAD
-          if ($LASTEXITCODE -ne 0) {
-            throw "pinned installer revision is not part of the selected control history"
-          }
-          $pinnedInstallerBlob = (git rev-parse "${installerRevision}:website/install.ps1").Trim()
-          $sourceInstallerBlob = (git -C ..\source hash-object website/install.ps1).Trim()
-          if ($LASTEXITCODE -ne 0 -or $pinnedInstallerBlob -ne $sourceInstallerBlob) {
-            throw "pinned installer does not match the tested replay installer"
+          $releasePrefix = Get-DistributionUrl "WINDOWS_RELEASE_DOWNLOAD_PREFIX"
+          $expectedReleasePrefix = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/"
+          if ($releasePrefix -cne $expectedReleasePrefix) {
+            throw "replayed Windows release prefix is not the immutable fork release owner"
           }
           $cargoToml = Get-Content -LiteralPath ..\source\Cargo.toml -Raw
           if ($cargoToml -notmatch '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\r?$') {
             throw "could not read replayed Cargo package version"
           }
           $baseVersion = $Matches[1]
+          "HERDR_BASE_VERSION=$baseVersion" >> $env:GITHUB_ENV
           $wire = Get-Content -LiteralPath ..\source\src\protocol\wire.rs -Raw
           if ($wire -notmatch 'pub const PROTOCOL_VERSION: u32 = ([0-9]+);') {
             throw "could not read replayed wire protocol version"
@@ -221,12 +207,15 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          python -m unittest scripts.test_package_windows_conpty
+          python -m unittest scripts.test_package_windows_conpty scripts.test_windows_installer
           python -m unittest `
             scripts.test_preview.PreviewNotesTests.test_build_manifest_archives_current_assets `
-            scripts.test_preview.PreviewNotesTests.test_windows_preview_asset_requires_sha256
+            scripts.test_preview.PreviewNotesTests.test_windows_preview_asset_requires_sha256 `
+            scripts.test_preview.PreviewNotesTests.test_manifest_preserves_legacy_zip_only_archived_build `
+            scripts.test_preview.PreviewNotesTests.test_manifest_build_id_uses_source_and_control_hashes
           cargo fmt --check
-          cargo clippy --bin herdr --locked --target $env:WINDOWS_TARGET -- -D warnings
+          cargo clippy --bins --locked --target $env:WINDOWS_TARGET -- -D warnings
+          cargo test --locked --target $env:WINDOWS_TARGET --bin herdr-launcher
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr distribution::tests
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr distribution_channel_owns_local_build_identity
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr fork_distribution_locks_the_existing_preview_channel
@@ -247,7 +236,7 @@ jobs:
 
       - name: Build release executable
         working-directory: source
-        run: cargo build --release --locked --target ${{ env.WINDOWS_TARGET }}
+        run: cargo build --release --locked --target ${{ env.WINDOWS_TARGET }} --bins
 
       - name: Verify system ConPTY fallback
         shell: pwsh
@@ -265,20 +254,124 @@ jobs:
           $artifactRoot = Join-Path $PWD "artifact"
           $stage = Join-Path $env:RUNNER_TEMP $env:ARTIFACT_NAME
           $archive = Join-Path $artifactRoot "$($env:ARTIFACT_NAME).zip"
+          $installer = Join-Path $artifactRoot $env:INSTALLER_ASSET_NAME
+          $faultRoot = Join-Path $env:RUNNER_TEMP "herdr-installer-faults"
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
           $exe = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr.exe"
+          $launcher = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr-launcher.exe"
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
-          $version = & $exe --version
-          $expected = "^herdr [0-9]+\.[0-9]+\.[0-9]+-preview\.$([regex]::Escape($env:HERDR_BUILD_ID))$"
-          if ($LASTEXITCODE -ne 0 -or [string] $version -cnotmatch $expected) {
-            throw "nightly executable identity mismatch: $version"
+          function Stop-BoundedProcessTree {
+            param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
+            $descendants = [Collections.Generic.List[Diagnostics.Process]]::new()
+            $snapshotError = $null
+            try {
+              $entries = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 5)
+              $seen = [Collections.Generic.HashSet[uint32]]::new()
+              $pending = [Collections.Generic.Queue[uint32]]::new()
+              [void] $seen.Add([uint32] $Process.Id)
+              $pending.Enqueue([uint32] $Process.Id)
+              while ($pending.Count -gt 0) {
+                $parent = $pending.Dequeue()
+                foreach ($entry in $entries) {
+                  $childProcessId = [uint32] $entry.ProcessId
+                  if ([uint32] $entry.ParentProcessId -eq $parent -and $seen.Add($childProcessId)) {
+                    $pending.Enqueue($childProcessId)
+                    try {
+                      $descendant = [Diagnostics.Process]::GetProcessById([int] $childProcessId)
+                      [void] $descendant.Handle
+                      $descendants.Add($descendant)
+                    } catch {
+                      # The descendant already reached terminal state.
+                    }
+                  }
+                }
+              }
+            } catch {
+              $snapshotError = $_
+            }
+            $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            $taskkillFailed = $false
+            $cleanup = Start-Process -FilePath $taskkill -ArgumentList @("/PID", $Process.Id, "/T", "/F") -PassThru -NoNewWindow
+            try {
+              if (-not $cleanup.WaitForExit(10000)) {
+                $cleanup.Kill()
+                [void] $cleanup.WaitForExit(5000)
+                $taskkillFailed = $true
+              } elseif ($cleanup.ExitCode -ne 0) {
+                $taskkillFailed = $true
+              }
+            } finally {
+              $cleanup.Dispose()
+            }
+            $owned = @($Process) + @($descendants)
+            try {
+              foreach ($ownedProcess in $owned) {
+                if (-not $ownedProcess.HasExited) {
+                  try {
+                    $ownedProcess.Kill($true)
+                  } catch {
+                    if (-not $ownedProcess.HasExited) {
+                      throw
+                    }
+                  }
+                }
+              }
+              $timer = [Diagnostics.Stopwatch]::StartNew()
+              foreach ($ownedProcess in $owned) {
+                $remaining = 10000 - [int] $timer.ElapsedMilliseconds
+                if ($remaining -le 0 -or -not $ownedProcess.WaitForExit($remaining)) {
+                  throw "owned process tree did not terminate within its 10000 ms confirmation deadline"
+                }
+              }
+            } finally {
+              foreach ($descendant in $descendants) {
+                $descendant.Dispose()
+              }
+            }
+            if ($null -ne $snapshotError) {
+              throw "could not snapshot the owned process tree before cleanup: $snapshotError"
+            }
+            if ($taskkillFailed) {
+              Write-Warning "taskkill did not complete cleanly; the captured process tree required bounded fallback cleanup"
+            }
           }
+
+          function Invoke-BoundedProcess {
+            param(
+              [Parameter(Mandatory = $true)][string] $FilePath,
+              [Parameter(Mandatory = $true)][string[]] $Arguments,
+              [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds
+            )
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $FilePath
+            $startInfo.UseShellExecute = $false
+            foreach ($argument in $Arguments) {
+              [void] $startInfo.ArgumentList.Add($argument)
+            }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw "could not start $FilePath"
+              }
+              if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+                Stop-BoundedProcessTree -Process $process
+                throw "$FilePath exceeded its $TimeoutMilliseconds ms process deadline"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "$FilePath failed with exit code $($process.ExitCode)"
+              }
+            } finally {
+              $process.Dispose()
+            }
+          }
+
           $binary = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($exe))
           $distribution = Get-Content -LiteralPath source\src\distribution.rs -Raw
           $requiredUrls = [regex]::Matches(
             $distribution,
-            '(?s)\bconst\s+(?:PREVIEW_MANIFEST_URL|WINDOWS_INSTALLER_URL):\s*&str\s*=\s*"([^"]+)";'
+            '(?s)\bconst\s+(?:PREVIEW_MANIFEST_URL|WINDOWS_RELEASE_DOWNLOAD_PREFIX):\s*&str\s*=\s*"([^"]+)";'
           ) | ForEach-Object { $_.Groups[1].Value }
           if ($requiredUrls.Count -ne 2) {
             throw "could not read required fork URLs from distribution configuration"
@@ -307,16 +400,41 @@ jobs:
             -ExePath (Join-Path $stage "herdr.exe") `
             -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
             -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\source\scripts\windows_install_conpty_package_test.ps1 `
-            -ArchivePath $archive
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
-          }
+          Invoke-BoundedProcess -FilePath "powershell.exe" -TimeoutMilliseconds 180000 -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            (Join-Path $PWD "source\scripts\windows_install_conpty_package_test.ps1"),
+            "-ArchivePath", $archive
+          )
+
+          $displayVersion = "$env:HERDR_BASE_VERSION-preview.$env:HERDR_BUILD_ID"
+          $numericVersion = "$env:HERDR_BASE_VERSION.0"
+          Invoke-BoundedProcess -FilePath "powershell.exe" -TimeoutMilliseconds 300000 -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            (Join-Path $PWD "source\scripts\package_windows_installer.ps1"),
+            "-StageDir", $stage,
+            "-LauncherExe", $launcher,
+            "-BuildId", $env:HERDR_BUILD_ID,
+            "-DisplayVersion", $displayVersion,
+            "-NumericVersion", $numericVersion,
+            "-OutputPath", $installer
+          )
+          Invoke-BoundedProcess -FilePath "powershell.exe" -TimeoutMilliseconds 900000 -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            (Join-Path $PWD "source\scripts\windows_installer_fault_test.ps1"),
+            "-StageDir", $stage,
+            "-LauncherExe", $launcher,
+            "-BuildId", $env:HERDR_BUILD_ID,
+            "-DisplayVersion", $displayVersion,
+            "-NumericVersion", $numericVersion,
+            "-OutputDir", $faultRoot
+          )
 
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksum = "$hash  $($env:ARTIFACT_NAME).zip`n"
           [IO.File]::WriteAllText("$archive.sha256", $checksum, [Text.UTF8Encoding]::new($false))
+          $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installerChecksum = "$installerHash  $env:INSTALLER_ASSET_NAME`n"
+          [IO.File]::WriteAllText("$installer.sha256", $installerChecksum, [Text.UTF8Encoding]::new($false))
           $sourceHead = (git -C source rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $sourceHead -ne $env:HERDR_REPLAY_SHA) {
             throw "replayed source identity changed during build"
@@ -330,12 +448,10 @@ jobs:
             throw "tested preview generator differs from replay HEAD"
           }
           Copy-Item -LiteralPath control\patches\delta\series -Destination (Join-Path $artifactRoot "PATCH_SERIES.txt")
-          $generator = Join-Path $artifactRoot "PREVIEW_GENERATOR.py"
-          Copy-Item -LiteralPath source\scripts\preview.py -Destination $generator
           $sourceGeneratorHash = (Get-FileHash -LiteralPath source\scripts\preview.py -Algorithm SHA256).Hash
-          $artifactGeneratorHash = (Get-FileHash -LiteralPath $generator -Algorithm SHA256).Hash
-          if ($sourceGeneratorHash -ne $artifactGeneratorHash) {
-            throw "preview generator changed while entering the tested artifact"
+          $controlGeneratorHash = (Get-FileHash -LiteralPath control\scripts\preview.py -Algorithm SHA256).Hash
+          if ($sourceGeneratorHash -ne $controlGeneratorHash) {
+            throw "replayed preview generator differs from the selected control revision"
           }
 
       - name: Upload tested package
@@ -345,8 +461,9 @@ jobs:
           path: |
             artifact/${{ env.ARTIFACT_NAME }}.zip
             artifact/${{ env.ARTIFACT_NAME }}.zip.sha256
+            artifact/${{ env.INSTALLER_ASSET_NAME }}
+            artifact/${{ env.INSTALLER_ASSET_NAME }}.sha256
             artifact/PATCH_SERIES.txt
-            artifact/PREVIEW_GENERATOR.py
           if-no-files-found: error
           retention-days: 2
           compression-level: 0
@@ -390,9 +507,13 @@ jobs:
           cd release-assets
           zip="${ARTIFACT_NAME}.zip"
           checksum="${zip}.sha256"
+          installer="${INSTALLER_ASSET_NAME}"
+          installer_checksum="${installer}.sha256"
           sha256sum --check "$checksum"
+          sha256sum --check "$installer_checksum"
           zip_digest="sha256:$(sha256sum "$zip" | awk '{print $1}')"
           checksum_digest="sha256:$(sha256sum "$checksum" | awk '{print $1}')"
+          installer_digest="sha256:$(sha256sum "$installer" | awk '{print $1}')"
 
           tag="windows-nightly-${UPSTREAM_SHA:0:12}-${CONTROL_SHA:0:12}"
 
@@ -460,12 +581,13 @@ jobs:
             if [[ "$(jq -r .draft <<<"$release_json")" != "false" || \
                   "$(jq -r .prerelease <<<"$release_json")" != "true" || \
                   "$(jq -r '.immutable // false' <<<"$release_json")" != "true" || \
-                  "$(jq '.assets | length' <<<"$release_json")" != "2" ]]; then
+                  "$(jq '.assets | length' <<<"$release_json")" != "3" ]]; then
               echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
             fi
             verify_asset_shape "$release_json" "$zip"
             verify_asset_shape "$release_json" "$checksum"
+            verify_asset_shape "$release_json" "$installer"
           }
 
           date_utc="$(date -u +%Y-%m-%d)"
@@ -515,6 +637,7 @@ jobs:
             gh release create "$tag" \
               "${ARTIFACT_NAME}.zip" \
               "${ARTIFACT_NAME}.zip.sha256" \
+              "${INSTALLER_ASSET_NAME}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "herdr-win nightly ${date_utc}" \
@@ -532,6 +655,7 @@ jobs:
             verify_release "$release_json"
             verify_asset_matches "$release_json" "$zip" "$zip_digest"
             verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
+            verify_asset_matches "$release_json" "$installer" "$installer_digest"
           fi
 
           built_at="$(jq -r .published_at <<<"$release_json")"
@@ -546,6 +670,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$zip" \
             --pattern "$checksum" \
+            --pattern "$installer" \
             --dir "$canonical_dir"
           (
             cd "$canonical_dir"
@@ -553,16 +678,20 @@ jobs:
           )
           published_zip_digest="sha256:$(sha256sum "$canonical_dir/$zip" | awk '{print $1}')"
           published_checksum_digest="sha256:$(sha256sum "$canonical_dir/$checksum" | awk '{print $1}')"
+          published_installer_digest="sha256:$(sha256sum "$canonical_dir/$installer" | awk '{print $1}')"
           api_zip_digest="$(jq -r --arg name "$zip" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
           api_checksum_digest="$(jq -r --arg name "$checksum" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+          api_installer_digest="$(jq -r --arg name "$installer" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
           if [[ "$published_zip_digest" != "$api_zip_digest" || \
-                "$published_checksum_digest" != "$api_checksum_digest" ]]; then
+                "$published_checksum_digest" != "$api_checksum_digest" || \
+                "$published_installer_digest" != "$api_installer_digest" ]]; then
             echo "Downloaded immutable release assets do not match GitHub's recorded digests." >&2
             exit 1
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
           echo "zip_sha=${published_zip_digest#sha256:}" >> "$GITHUB_OUTPUT"
+          echo "installer_sha=${published_installer_digest#sha256:}" >> "$GITHUB_OUTPUT"
 
       - name: Generate preview update manifest
         id: manifest
@@ -571,19 +700,26 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
           BUILT_AT: ${{ steps.release.outputs.built_at }}
           ZIP_SHA: ${{ steps.release.outputs.zip_sha }}
+          INSTALLER_SHA: ${{ steps.release.outputs.installer_sha }}
         run: |
           set -euo pipefail
           zip="${ARTIFACT_NAME}.zip"
+          installer="${INSTALLER_ASSET_NAME}"
           zip_sha="$ZIP_SHA"
+          installer_sha="$INSTALLER_SHA"
           cd release-assets
-          jq -n --arg sha "$zip_sha" '{"windows-x86_64": $sha}' > preview-sha256.json
+          jq -n \
+            --arg zip_sha "$zip_sha" \
+            --arg installer_sha "$installer_sha" \
+            '{"windows-x86_64": $zip_sha, "windows-x86_64-installer": $installer_sha}' \
+            > preview-sha256.json
 
-          generator="$GITHUB_WORKSPACE/release-assets/PREVIEW_GENERATOR.py"
           notes="$GITHUB_WORKSPACE/release-assets/RELEASE_NOTES.md"
           shas="$GITHUB_WORKSPACE/release-assets/preview-sha256.json"
           cd "$GITHUB_WORKSPACE/control"
           git fetch --no-tags origin master
           git checkout --force -B manifest-publish origin/master
+          generator="$GITHUB_WORKSPACE/control/scripts/preview.py"
           if ! git merge-base --is-ancestor "$CONTROL_SHA" HEAD; then
             echo "Selected control revision ${CONTROL_SHA} is no longer on master." >&2
             exit 1
@@ -614,24 +750,39 @@ jobs:
             --retain 30
 
           expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}"
+          expected_installer_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${installer}"
           jq -e \
             --arg build_id "$BUILD_ID" \
             --arg commit "$UPSTREAM_SHA" \
             --arg base_version "$BASE_VERSION" \
             --argjson protocol "$PROTOCOL" \
             --arg sha "$zip_sha" \
+            --arg installer_sha "$installer_sha" \
             --arg expected_url "$expected_url" \
+            --arg expected_installer_url "$expected_installer_url" \
             --arg prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/" \
-            '.channel == "preview"
+            'def valid_asset_group:
+               type == "object"
+               and has("windows-x86_64")
+               and ((keys - ["windows-x86_64", "windows-x86_64-installer"]) | length == 0)
+               and .["windows-x86_64"].format == "zip"
+               and (.["windows-x86_64"].sha256 | test("^[0-9a-f]{64}$"))
+               and ((has("windows-x86_64-installer") | not)
+                    or (.["windows-x86_64-installer"].format == "nsis"
+                        and (.["windows-x86_64-installer"].sha256 | test("^[0-9a-f]{64}$"))));
+             .channel == "preview"
              and .build_id == $build_id
              and .commit == $commit
              and .base_version == $base_version
              and .protocol == $protocol
+             and (.assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
+             and (.builds[$build_id].assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
+             and .builds[$build_id].assets == .assets
              and .assets["windows-x86_64"].url == $expected_url
              and .assets["windows-x86_64"].sha256 == $sha
-             and ([.assets, (.builds[]?.assets)] | all(keys == ["windows-x86_64"]))
-             and ([.assets["windows-x86_64"], (.builds[]?.assets["windows-x86_64"])]
-                  | all(.format == "zip" and (.sha256 | test("^[0-9a-f]{64}$"))))
+             and .assets["windows-x86_64-installer"].url == $expected_installer_url
+             and .assets["windows-x86_64-installer"].sha256 == $installer_sha
+             and ([.assets, (.builds[]?.assets)] | all(valid_asset_group))
              and ([.assets[]?, (.builds[]?.assets[]?)] | all(.url | startswith($prefix)))' \
             website/preview.json >/dev/null
 
@@ -706,11 +857,170 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Stop-BoundedProcessTree {
+            param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
+            $descendants = [Collections.Generic.List[Diagnostics.Process]]::new()
+            $snapshotError = $null
+            try {
+              $entries = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 5)
+              $seen = [Collections.Generic.HashSet[uint32]]::new()
+              $pending = [Collections.Generic.Queue[uint32]]::new()
+              [void] $seen.Add([uint32] $Process.Id)
+              $pending.Enqueue([uint32] $Process.Id)
+              while ($pending.Count -gt 0) {
+                $parent = $pending.Dequeue()
+                foreach ($entry in $entries) {
+                  $childProcessId = [uint32] $entry.ProcessId
+                  if ([uint32] $entry.ParentProcessId -eq $parent -and $seen.Add($childProcessId)) {
+                    $pending.Enqueue($childProcessId)
+                    try {
+                      $descendant = [Diagnostics.Process]::GetProcessById([int] $childProcessId)
+                      [void] $descendant.Handle
+                      $descendants.Add($descendant)
+                    } catch {
+                      # The descendant already reached terminal state.
+                    }
+                  }
+                }
+              }
+            } catch {
+              $snapshotError = $_
+            }
+            $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            $taskkillFailed = $false
+            $cleanup = Start-Process -FilePath $taskkill -ArgumentList @("/PID", $Process.Id, "/T", "/F") -PassThru -NoNewWindow
+            try {
+              if (-not $cleanup.WaitForExit(10000)) {
+                $cleanup.Kill()
+                [void] $cleanup.WaitForExit(5000)
+                $taskkillFailed = $true
+              } elseif ($cleanup.ExitCode -ne 0) {
+                $taskkillFailed = $true
+              }
+            } finally {
+              $cleanup.Dispose()
+            }
+            $owned = @($Process) + @($descendants)
+            try {
+              foreach ($ownedProcess in $owned) {
+                if (-not $ownedProcess.HasExited) {
+                  try {
+                    $ownedProcess.Kill($true)
+                  } catch {
+                    if (-not $ownedProcess.HasExited) {
+                      throw
+                    }
+                  }
+                }
+              }
+              $timer = [Diagnostics.Stopwatch]::StartNew()
+              foreach ($ownedProcess in $owned) {
+                $remaining = 10000 - [int] $timer.ElapsedMilliseconds
+                if ($remaining -le 0 -or -not $ownedProcess.WaitForExit($remaining)) {
+                  throw "owned process tree did not terminate within its 10000 ms confirmation deadline"
+                }
+              }
+            } finally {
+              foreach ($descendant in $descendants) {
+                $descendant.Dispose()
+              }
+            }
+            if ($null -ne $snapshotError) {
+              throw "could not snapshot the owned process tree before cleanup: $snapshotError"
+            }
+            if ($taskkillFailed) {
+              Write-Warning "taskkill did not complete cleanly; the captured process tree required bounded fallback cleanup"
+            }
+          }
+
+          function Invoke-BoundedProcess {
+            param(
+              [Parameter(Mandatory = $true)][string] $FilePath,
+              [string[]] $Arguments = @(),
+              [int] $TimeoutMilliseconds = 180000
+            )
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $FilePath
+            $startInfo.UseShellExecute = $false
+            foreach ($argument in $Arguments) {
+              [void] $startInfo.ArgumentList.Add($argument)
+            }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw "could not start $FilePath"
+              }
+              if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+                Stop-BoundedProcessTree -Process $process
+                throw "$FilePath exceeded its $TimeoutMilliseconds ms process deadline"
+              }
+              if ($process.ExitCode -ne 0) {
+                throw "$FilePath failed with exit code $($process.ExitCode)"
+              }
+            } finally {
+              $process.Dispose()
+            }
+          }
+
+          function Invoke-BoundedCaptured {
+            param(
+              [Parameter(Mandatory = $true)][string] $FilePath,
+              [string[]] $Arguments = @(),
+              [int] $TimeoutMilliseconds = 60000
+            )
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $FilePath
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in $Arguments) {
+              [void] $startInfo.ArgumentList.Add($argument)
+            }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw "could not start $FilePath"
+              }
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+                Stop-BoundedProcessTree -Process $process
+                throw "$FilePath exceeded its $TimeoutMilliseconds ms process deadline"
+              }
+              $output = ($stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()).Trim()
+              if ($process.ExitCode -ne 0) {
+                throw "$FilePath failed with exit code $($process.ExitCode)`: $output"
+              }
+              return $output
+            } finally {
+              $process.Dispose()
+            }
+          }
+
+          function Wait-Condition {
+            param(
+              [Parameter(Mandatory = $true)][scriptblock] $Condition,
+              [Parameter(Mandatory = $true)][string] $Description,
+              [int] $TimeoutMilliseconds = 30000
+            )
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+              if (& $Condition) {
+                return
+              }
+              Start-Sleep -Milliseconds 100
+            }
+            throw "$Description did not reach terminal state within $TimeoutMilliseconds ms"
+          }
+
           $manifestUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/master/website/preview.json"
           $manifest = $null
           for ($attempt = 1; $attempt -le 12; $attempt++) {
             try {
-              $manifest = Invoke-RestMethod -Uri $manifestUrl -Headers @{ "Cache-Control" = "no-cache" }
+              $manifest = Invoke-RestMethod -Uri $manifestUrl -Headers @{ "Cache-Control" = "no-cache" } -TimeoutSec 30
             } catch {
               $manifest = $null
             }
@@ -724,28 +1034,79 @@ jobs:
           }
 
           $asset = $manifest.assets.'windows-x86_64'
+          $installerAsset = $manifest.assets.'windows-x86_64-installer'
           $releasePrefix = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/"
           if ($null -eq $asset -or [string] $asset.format -cne "zip" -or
               [string] $asset.url -notlike "$releasePrefix*" -or
               [string] $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw "published preview manifest has no valid fork Windows asset"
+            throw "published preview manifest has no valid fork Windows ZIP asset"
+          }
+          if ($null -eq $installerAsset -or [string] $installerAsset.format -cne "nsis" -or
+              [string] $installerAsset.url -notlike "$releasePrefix*/$env:INSTALLER_ASSET_NAME" -or
+              [string] $installerAsset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "published preview manifest has no valid fork Windows installer asset"
           }
           $archive = Join-Path $env:RUNNER_TEMP "$($env:ARTIFACT_NAME).zip"
-          Invoke-WebRequest -Uri ([string] $asset.url) -OutFile $archive
+          $installer = Join-Path $env:RUNNER_TEMP $env:INSTALLER_ASSET_NAME
+          Invoke-WebRequest -Uri ([string] $asset.url) -OutFile $archive -TimeoutSec 120
+          Invoke-WebRequest -Uri ([string] $installerAsset.url) -OutFile $installer -TimeoutSec 120
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -cne [string] $asset.sha256) {
-            throw "published Windows asset digest does not match the preview manifest"
+            throw "published Windows ZIP digest does not match the preview manifest"
+          }
+          $installerActual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installerActual -cne [string] $installerAsset.sha256) {
+            throw "published Windows installer digest does not match the preview manifest"
           }
           $stage = Join-Path $env:RUNNER_TEMP "herdr-win-update-check"
           Expand-Archive -LiteralPath $archive -DestinationPath $stage
           $env:HERDR_HOME = Join-Path $env:RUNNER_TEMP "herdr-win-update-home"
           $env:HERDR_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "herdr-win-update-install"
           Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-          $output = (& (Join-Path $stage "herdr.exe") update 2>&1 | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0) {
-            throw "herdr update failed with exit code $LASTEXITCODE`: $output"
-          }
+          $output = Invoke-BoundedCaptured -FilePath (Join-Path $stage "herdr.exe") -Arguments @("update")
           $expected = "already up to date ($env:BASE_VERSION-preview.$env:BUILD_ID)"
           if ($output -notlike "*$expected*") {
             throw "updater did not confirm the published fork build: $output"
+          }
+
+          $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Herdr"
+          $arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
+          if ((Test-Path -LiteralPath $installRoot) -or (Test-Path -LiteralPath $arpKey)) {
+            throw "public-feed installer gate requires a clean runner"
+          }
+          try {
+            Invoke-BoundedProcess -FilePath $installer -Arguments @("/S")
+            Wait-Condition -Description "managed install" -Condition {
+              (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and
+                (Test-Path -LiteralPath $arpKey)
+            }
+            $active = [IO.File]::ReadAllText((Join-Path $installRoot "state\active"), [Text.UTF8Encoding]::new($false, $true))
+            if ($active -cne "herdr-pointer-v1`nbuild_id=$env:BUILD_ID`n") {
+              throw "published installer selected an unexpected managed build"
+            }
+            $managed = Join-Path $installRoot "bin\herdr.exe"
+            $version = Invoke-BoundedCaptured -FilePath $managed -Arguments @("--version")
+            if ($version -cne "herdr $env:BASE_VERSION-preview.$env:BUILD_ID") {
+              throw "published installer returned unexpected managed version: $version"
+            }
+            $managedUpdate = Invoke-BoundedCaptured -FilePath $managed -Arguments @("update")
+            if ($managedUpdate -notlike "*$expected*") {
+              throw "managed updater did not confirm the published fork build: $managedUpdate"
+            }
+            Invoke-BoundedProcess -FilePath (Join-Path $installRoot "uninstall.exe") -Arguments @("/S")
+            Wait-Condition -Description "managed uninstall" -Condition {
+              -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+            }
+          } finally {
+            $uninstaller = Join-Path $installRoot "uninstall.exe"
+            if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+              try {
+                Invoke-BoundedProcess -FilePath $uninstaller -Arguments @("/S")
+              } catch {
+                Write-Warning $_
+              }
+            }
+          }
+          if ((Test-Path -LiteralPath $installRoot) -or (Test-Path -LiteralPath $arpKey)) {
+            throw "published installer gate left managed state behind"
           }

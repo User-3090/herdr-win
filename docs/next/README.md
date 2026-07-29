@@ -22,11 +22,26 @@ Only the fork's repository and release-channel identity change. Runtime-facing n
 | Cargo package | `herdr` |
 | Configuration, state, sessions, sockets, and protocol | `herdr` |
 
-You can switch between an upstream Herdr build and a herdr-win build without migrating configuration or learning a second command. Stop running sessions before replacing the executable.
+You can switch between an upstream Herdr build and a herdr-win build without migrating configuration or learning a second command. Stop running sessions before manually replacing a portable executable.
 
 ## Install a Windows nightly
 
-Nightlies currently target Windows x86_64. From the newest [herdr-win prerelease](https://github.com/User-3090/herdr-win/releases), download both:
+Nightlies currently target Windows x86_64. When the newest [herdr-win prerelease](https://github.com/User-3090/herdr-win/releases) includes `herdr-windows-x86_64-installer.exe`, use it for a normal per-user install. Its SHA-256 is published in the fork's [preview manifest](https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json); until that asset appears, use the portable ZIP below.
+
+```powershell
+$manifest = Invoke-RestMethod https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json -TimeoutSec 30
+$asset = $manifest.assets.'windows-x86_64-installer'
+if ($null -eq $asset) { throw "No managed installer is published yet; use the portable ZIP below" }
+$installer = Join-Path $PWD 'herdr-windows-x86_64-installer.exe'
+Invoke-WebRequest $asset.url -OutFile $installer -TimeoutSec 120
+$actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -cne [string] $asset.sha256) { throw "herdr-win installer checksum mismatch" }
+& $installer
+```
+
+The installer uses `%LOCALAPPDATA%\Programs\Herdr`, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. The executable and command remain `herdr.exe` and `herdr`.
+
+For a portable or manual install, download both:
 
 - `herdr-windows-x86_64.zip`
 - `herdr-windows-x86_64.zip.sha256`
@@ -44,13 +59,17 @@ if ($actual -ne $expected) { throw "herdr-win checksum mismatch" }
 Extract the ZIP into a new, empty directory and keep the complete directory together. It contains `herdr.exe`, the pinned Microsoft ConPTY runtime, its integrity marker, and third-party notices. Then run `herdr.exe` directly or add that directory to your user `PATH`.
 
 > [!WARNING]
-> The fork executable is not code-signed, so Windows may show a SmartScreen warning. Verify the sidecar before running it. The bundled Microsoft ConPTY binaries are signature-checked during packaging.
+> The Herdr executable and installer are not code-signed, so Windows may show a SmartScreen warning. Verify the manifest digest or ZIP sidecar before running either artifact. The bundled Microsoft ConPTY binaries are signature-checked during packaging.
 
 ### Automatic preview updates
 
-The first herdr-win install is manual. After that, the build reuses Herdr's existing preview update path against the fork-owned nightly manifest. It checks at startup and every 30 minutes while running, shows Herdr's normal update-ready indicator when a newer build exists, and installs the verified fork ZIP through `herdr update`. The manifest is generated from the tested package only after its immutable prerelease is published; a final independent gate verifies that clients can see the new feed entry. Local and nightly builds read the same checked-in fork distribution configuration; no update URL or channel environment variables are required, and there is no fallback to upstream update sources.
+The build reuses Herdr's existing preview update checks against the fork-owned nightly manifest. It checks at startup and every 30 minutes while running and shows Herdr's normal update-ready indicator when a newer build exists. Run `herdr update` from an ordinary PowerShell after detaching from Herdr; it downloads the immutable NSIS asset, verifies its SHA-256, and runs the installer silently without terminating active sessions.
 
-The installer at `herdr.dev` belongs to upstream and does not install this fork. Use the fork release for the initial install, then run `herdr update` outside Herdr after detaching when an update is ready.
+If older managed sessions are still active, the update is reported as staged. Those sessions continue on their original runtime, and new launches switch atomically after the last old session exits. Running `herdr update` from a portable herdr-win ZIP similarly moves future launches to the managed installation. The manifest is generated from tested artifacts only after their immutable prerelease is published; a final independent gate downloads and verifies both Windows assets. There is no fallback to upstream update sources.
+
+### Uninstall
+
+Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, and Installed Apps registration while preserving Herdr configuration and session data under `%USERPROFILE%\.herdr`.
 
 ## Maintained Windows delta
 
@@ -61,7 +80,7 @@ The release product delta is exactly the ordered mailbox queue in [`patches/delt
 | [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
 | [`0002`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0002-windows-desktop-integration.patch) | **Desktop integration:** Unicode-safe native notifications and reliable Windows MediaPlayer audio paths. |
 | [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a small fork-specific Sandbox adapter. |
-| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-package-hardening.patch) | **Packaging and updates:** deterministic ConPTY packaging, hardened PowerShell installation, and fork-owned distribution/update sources. |
+| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, immutable runtimes and launcher leases, per-user NSIS install/update/uninstall, legacy migration, and fork-owned update sources. |
 
 Because this channel publishes only a Windows executable, it cannot automatically install the matching nightly binary on a Linux or macOS remote. Use a pre-provisioned matching target or provide a matching build through `HERDR_REMOTE_BINARY` when attaching from a nightly.
 
@@ -85,7 +104,7 @@ The scheduled workflow:
 1. checks out the current upstream Herdr `master`;
 2. applies `patches/delta/series` without resolving conflicts automatically;
 3. runs pre-publication Windows formatting, lint, focused tests, ConPTY, installer, and runtime probes;
-4. publishes an immutable prerelease identified by both the upstream and herdr-win control revisions;
+4. publishes an immutable portable ZIP and managed installer identified by both the upstream and herdr-win control revisions;
 5. generates and pushes the preview manifest only after that release is verified; and
 6. independently verifies that the public update feed exposes the tested build.
 

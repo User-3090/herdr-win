@@ -21,6 +21,9 @@ CONTROL_PATHS = {
 }
 FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/"
 FORK_RAW_PREFIX = "https://raw.githubusercontent.com/User-3090/herdr-win/"
+WINDOWS_ZIP_TARGET = "windows-x86_64"
+WINDOWS_INSTALLER_TARGET = "windows-x86_64-installer"
+WINDOWS_INSTALLER_NAME = "herdr-windows-x86_64-installer.exe"
 FORBIDDEN_DISTRIBUTION_ENV = (
     "HERDR_BUILD_CHANNEL",
     "HERDR_PREVIEW_MANIFEST_URL",
@@ -94,14 +97,32 @@ class DeltaPatchTests(unittest.TestCase):
         )
         for assets in asset_groups:
             self.assertIsInstance(assets, dict)
-            self.assertEqual(set(assets), {"windows-x86_64"})
-            windows = assets["windows-x86_64"]
+            self.assertIn(WINDOWS_ZIP_TARGET, assets)
+            self.assertLessEqual(
+                set(assets), {WINDOWS_ZIP_TARGET, WINDOWS_INSTALLER_TARGET}
+            )
+            windows = assets[WINDOWS_ZIP_TARGET]
             self.assertIsInstance(windows, dict)
             self.assertTrue(
                 str(windows.get("url", "")).startswith(FORK_RELEASE_PREFIX)
             )
             self.assertRegex(str(windows.get("sha256", "")), r"^[0-9a-f]{64}$")
             self.assertEqual(windows.get("format"), "zip")
+            if WINDOWS_INSTALLER_TARGET in assets:
+                installer = assets[WINDOWS_INSTALLER_TARGET]
+                self.assertIsInstance(installer, dict)
+                self.assertTrue(
+                    str(installer.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+                )
+                self.assertTrue(
+                    str(installer.get("url", "")).endswith(
+                        f"/{WINDOWS_INSTALLER_NAME}"
+                    )
+                )
+                self.assertRegex(
+                    str(installer.get("sha256", "")), r"^[0-9a-f]{64}$"
+                )
+                self.assertEqual(installer.get("format"), "nsis")
 
     def test_distribution_configuration_is_fork_owned_and_env_free(self) -> None:
         distribution = (PROJECT_ROOT / "src" / "distribution.rs").read_text(
@@ -110,12 +131,9 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertIn(
             f'{FORK_RAW_PREFIX}master/website/preview.json', distribution
         )
-        installer = re.search(
-            re.escape(FORK_RAW_PREFIX)
-            + r"([0-9a-f]{40})/website/install\.ps1",
-            distribution,
-        )
-        self.assertIsNotNone(installer)
+        self.assertIn("WINDOWS_RELEASE_DOWNLOAD_PREFIX", distribution)
+        self.assertIn(FORK_RELEASE_PREFIX, distribution)
+        self.assertNotIn("WINDOWS_INSTALLER_URL", distribution)
         self.assertNotIn("https://herdr.dev", distribution)
 
         product_sources = "\n".join(
@@ -134,7 +152,7 @@ class DeltaPatchTests(unittest.TestCase):
             self.assertNotIn(variable, product_sources)
             self.assertNotIn(variable, workflow)
 
-        patch = (DELTA_ROOT / "0004-windows-package-hardening.patch").read_text(
+        patch = (DELTA_ROOT / "0004-windows-managed-distribution.patch").read_text(
             encoding="utf-8"
         )
         added = "\n".join(
@@ -147,6 +165,28 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("https://herdr.dev/latest.json", added)
         self.assertNotIn("https://herdr.dev/preview.json", added)
         self.assertNotIn("https://herdr.dev/install.ps1", added)
+
+    def test_public_readme_mirror_and_nightly_installer_contract(self) -> None:
+        self.assertEqual(
+            (PROJECT_ROOT / "README.md").read_bytes(),
+            (PROJECT_ROOT / "docs" / "next" / "README.md").read_bytes(),
+        )
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(WINDOWS_INSTALLER_NAME, workflow)
+        self.assertIn(WINDOWS_INSTALLER_TARGET, workflow)
+        self.assertIn('format -cne "nsis"', workflow)
+        self.assertIn("installer_sha", workflow)
+        self.assertNotIn("PREVIEW_GENERATOR.py", workflow)
+        self.assertIn(
+            'generator="$GITHUB_WORKSPACE/control/scripts/preview.py"', workflow
+        )
+        self.assertIn(
+            "replayed preview generator differs from the selected control revision",
+            workflow,
+        )
+        self.assertEqual(workflow.count("[void] $descendant.Handle"), 2)
 
 
 if __name__ == "__main__":
