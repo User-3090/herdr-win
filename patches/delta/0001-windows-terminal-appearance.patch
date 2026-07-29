@@ -1,7 +1,7 @@
-From c491c07c674ef0f3a015170790d86980a626c1ef Mon Sep 17 00:00:00 2001
+From 8c5f5f40a90e2706c6e481b8bcf7c0c9c50f479e Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 07:35:54 +0200
-Subject: [PATCH 1/4] feat(windows): preserve terminal appearance
+Subject: [PATCH 1/5] feat(windows): preserve terminal appearance
 
 Transport bounded host color and appearance events, keep software and native cursors visible with host and child-selected colors, and follow host appearance for otherwise unconfigured themes.
 ---
@@ -33,10 +33,10 @@ Transport bounded host color and appearance events, keep software and native cur
  25 files changed, 1203 insertions(+), 115 deletions(-)
 
 diff --git a/docs/next/CHANGELOG.md b/docs/next/CHANGELOG.md
-index 1e44e91d16a042541ce6ffd085fb9e5cc3d014fd..436522a5608e759e02a14a49b3a1b982707a26de 100644
+index 7acaf007fcde5895b654d6af2e8e50f45a79bf8e..2f49cfef18664d73f11e552e29f0257fa69dd2a7 100644
 --- a/docs/next/CHANGELOG.md
 +++ b/docs/next/CHANGELOG.md
-@@ -31,6 +31,7 @@
+@@ -34,6 +34,7 @@
  
  ### Changed
  - Agent commands now accept only a unique live agent name or the pane ID currently hosting that agent. Names are cleared when the occupant exits, is released, or is replaced. The old top-level `wait` commands were replaced by `agent wait` and `pane wait-output`, and `agent send` was replaced by `agent send-keys`.
@@ -99,10 +99,10 @@ index 4ad61f01b59bdf8a420137f3204d5362477f3574..d4264c0bc5ce7808c2f780df26106378
          {
            "key": "theme.dark_name",
 diff --git a/src/app/mod.rs b/src/app/mod.rs
-index dc6de136007969670369af7d51a45005b9a0f120..31f60ec01f84bf56057a1776d27d1a352572f40a 100644
+index 1733e234658039578a9334338f67dff67a68b6d2..a4ebffa50c67747ba3686208d66a1ade70f0d85b 100644
 --- a/src/app/mod.rs
 +++ b/src/app/mod.rs
-@@ -305,17 +305,25 @@ fn theme_runtime_config(
+@@ -300,17 +300,25 @@ fn theme_runtime_config(
      config: &crate::config::Config,
      use_legacy_ui_accent: bool,
  ) -> state::ThemeRuntimeConfig {
@@ -130,7 +130,7 @@ index dc6de136007969670369af7d51a45005b9a0f120..31f60ec01f84bf56057a1776d27d1a35
          custom: config.theme.custom.clone(),
          legacy_accent: (use_legacy_ui_accent
              && config.ui.accent != "cyan"
-@@ -2540,7 +2548,37 @@ mod tests {
+@@ -2532,7 +2540,37 @@ mod tests {
      }
  
      #[test]
@@ -169,7 +169,7 @@ index dc6de136007969670369af7d51a45005b9a0f120..31f60ec01f84bf56057a1776d27d1a35
          let mut config = Config::default();
          config.theme.name = Some("tokyo-night".to_string());
          let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-@@ -2553,10 +2591,10 @@ mod tests {
+@@ -2545,10 +2583,10 @@ mod tests {
      }
  
      #[test]
@@ -182,7 +182,7 @@ index dc6de136007969670369af7d51a45005b9a0f120..31f60ec01f84bf56057a1776d27d1a35
          let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
          let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
  
-@@ -2570,10 +2608,10 @@ mod tests {
+@@ -2562,10 +2600,10 @@ mod tests {
      }
  
      #[test]
@@ -195,7 +195,7 @@ index dc6de136007969670369af7d51a45005b9a0f120..31f60ec01f84bf56057a1776d27d1a35
          config.theme.custom = Some(crate::config::CustomThemeColors {
              accent: Some("#010203".to_string()),
              ..Default::default()
-@@ -2591,10 +2629,10 @@ mod tests {
+@@ -2583,10 +2621,10 @@ mod tests {
      }
  
      #[test]
@@ -487,7 +487,7 @@ index 8966112e0db17822c1da5d67f686c96985483183..34ad3797d0e4140d2c49f2b890a41552
      fn vti_win32_input_mode_bracketed_paste_key_records_emit_single_paste() {
          let records = win32_input_mode_encoded_key_bytes(
 diff --git a/src/client/mod.rs b/src/client/mod.rs
-index 787c0c0b2787765a3508f4c5b768feb8b94dac97..15bf3ad082f35b26b3d2113c90a84c93a8494d39 100644
+index 6be41c0658c018600cdf8450d3c2cb1b8aaec183..c2c2f8a7f695ab0830214e3e8dabaf242f103ab6 100644
 --- a/src/client/mod.rs
 +++ b/src/client/mod.rs
 @@ -47,6 +47,7 @@ use crate::protocol::{
@@ -765,7 +765,7 @@ index 787c0c0b2787765a3508f4c5b768feb8b94dac97..15bf3ad082f35b26b3d2113c90a84c93
                  let msg = ClientMessage::InputEvents { events };
                  if let Err(e) = write_to_server(&mut write_stream, &msg) {
                      return Err(ClientError::ConnectionLost(e));
-@@ -1514,32 +1636,7 @@ async fn run_client_loop(
+@@ -1516,32 +1638,7 @@ async fn run_client_loop(
              }
              ClientLoopEvent::ServerMessage(msg) => match msg {
                  ServerMessage::Frame(frame_data) => {
@@ -799,7 +799,7 @@ index 787c0c0b2787765a3508f4c5b768feb8b94dac97..15bf3ad082f35b26b3d2113c90a84c93
                  }
                  ServerMessage::Terminal(frame) => {
                      if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
-@@ -2142,7 +2239,7 @@ fn query_host_terminal_theme() {
+@@ -2155,7 +2252,7 @@ fn query_host_terminal_theme() {
  }
  
  fn should_query_host_terminal_theme() -> bool {
@@ -808,7 +808,7 @@ index 787c0c0b2787765a3508f4c5b768feb8b94dac97..15bf3ad082f35b26b3d2113c90a84c93
  }
  
  fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-@@ -2454,8 +2551,8 @@ mod tests {
+@@ -2476,8 +2573,8 @@ mod tests {
      }
  
      #[test]
@@ -819,7 +819,7 @@ index 787c0c0b2787765a3508f4c5b768feb8b94dac97..15bf3ad082f35b26b3d2113c90a84c93
      }
  
      #[test]
-@@ -2470,20 +2567,36 @@ mod tests {
+@@ -2492,20 +2589,36 @@ mod tests {
      #[test]
      fn terminal_restore_postlude_restores_visible_default_cursor() {
          let mut output = Vec::new();
@@ -892,10 +892,10 @@ index fc601d3f576f7ea10ea9ceba45a15c437788fa6d..1e51c2f9a24099a78b237939800191a4
          assert!(config.theme.light_name.is_none());
          assert!(config.theme.custom.is_none());
 diff --git a/src/main.rs b/src/main.rs
-index 3f1f793088ef2f511b20b189376c04b2e1e899df..82e8ff5be0ddecc5d4cee70ce7a072e9c11f7a47 100644
+index b4517e21b99b571b82c028f65e6a921ca2c23739..097a8493b7b44f37ef9e0cc56084233d8f8b485d 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -119,7 +119,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
+@@ -120,7 +120,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
  # name = "catppuccin"
  
  # Follow host terminal light/dark appearance and switch Herdr UI themes.
@@ -905,10 +905,10 @@ index 3f1f793088ef2f511b20b189376c04b2e1e899df..82e8ff5be0ddecc5d4cee70ce7a072e9
  # dark_name = "catppuccin"
  # light_name = "catppuccin-latte"
 diff --git a/src/pane.rs b/src/pane.rs
-index 45f4f7200c537b839dcdd8de902b47146186a3c6..986187d9769574eea76df49720173e9f7e6c3183 100644
+index 3bf94ec03310c9fe6414e96985335706f0543d57..3a4c0cd6c9aa32c714235c58fb7b58987eb0228a 100644
 --- a/src/pane.rs
 +++ b/src/pane.rs
-@@ -2517,6 +2517,7 @@ impl PaneRuntime {
+@@ -2541,6 +2541,7 @@ impl PaneRuntime {
              y: area.y + cursor.y,
              visible: cursor.visible,
              shape: cursor.shape,
@@ -1176,7 +1176,7 @@ index 16ee8feebce50e801938334ac2d09e894ced610f..2dee452cbf2661e378a64a7513ab890b
 +    }
  }
 diff --git a/src/pane/terminal.rs b/src/pane/terminal.rs
-index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df1410b000 100644
+index 76ab20d3985670dccc0cca7ed222b66f9050bc9c..6be084b37998ccbae2ddeccaa94e72a1dd275517 100644
 --- a/src/pane/terminal.rs
 +++ b/src/pane/terminal.rs
 @@ -82,6 +82,8 @@ pub struct TerminalCursorState {
@@ -1225,7 +1225,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
              core.transient_default_color_owner_pgid = None;
          }
      }
-@@ -1811,6 +1818,7 @@ impl GhosttyPaneTerminal {
+@@ -1828,6 +1835,7 @@ impl GhosttyPaneTerminal {
          let host_theme = core.host_terminal_theme;
          let initial_default_foreground = core.initial_default_foreground;
          let initial_default_background = core.initial_default_background;
@@ -1233,7 +1233,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
          let GhosttyPaneCore {
              terminal,
              render_state,
-@@ -1900,7 +1908,8 @@ impl GhosttyPaneTerminal {
+@@ -1917,7 +1925,8 @@ impl GhosttyPaneTerminal {
  
          ghostty_clear_render_dirty(render_state, area.height);
  
@@ -1243,7 +1243,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
          if show_cursor {
              if let Some(cursor) =
                  effective_cursor_state(&mut core, current_cursor).filter(|cursor| cursor.visible)
-@@ -1974,7 +1983,15 @@ fn render_delay_after_pty_write(
+@@ -1991,7 +2000,15 @@ fn render_delay_after_pty_write(
      }
  }
  
@@ -1259,7 +1259,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
      let GhosttyPaneCore {
          terminal,
          render_state,
-@@ -1982,12 +1999,13 @@ fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorStat
+@@ -1999,12 +2016,13 @@ fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorStat
          ..
      } = core;
      render_state.update(terminal).ok()?;
@@ -1274,7 +1274,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
  ) -> Option<TerminalCursorState> {
      let cursor = render_state.cursor_viewport().ok()??;
      let shape = if decscusr_tracker.cursor_shape_overridden() {
-@@ -2005,6 +2023,7 @@ fn cursor_state_from_render_state(
+@@ -2022,6 +2040,7 @@ fn cursor_state_from_render_state(
          y: cursor.y,
          visible: render_state.cursor_visible().ok()?,
          shape,
@@ -1282,7 +1282,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
      })
  }
  
-@@ -2750,7 +2769,14 @@ fn respond_to_default_color_event(
+@@ -2767,7 +2786,14 @@ fn respond_to_default_color_event(
              default_color_event_response(core, event)
          }
          DefaultColorEvent::Set(query) => {
@@ -1298,7 +1298,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
              None
          }
          DefaultColorEvent::Reset(query) => {
-@@ -2863,7 +2889,7 @@ fn mark_child_default_color_changed(
+@@ -2880,7 +2906,7 @@ fn mark_child_default_color_changed(
      match query {
          DefaultColorQuery::Foreground => core.child_default_foreground_changed = changed,
          DefaultColorQuery::Background => core.child_default_background_changed = changed,
@@ -1307,7 +1307,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
      }
  }
  
-@@ -2952,7 +2978,14 @@ fn contains_kitty_graphics_sequence(bytes: &[u8]) -> bool {
+@@ -2969,7 +2995,14 @@ fn contains_kitty_graphics_sequence(bytes: &[u8]) -> bool {
  }
  
  fn should_probe_host_terminal_theme_restore(core: &GhosttyPaneCore) -> bool {
@@ -1323,7 +1323,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
          return false;
      }
  
-@@ -3609,6 +3642,7 @@ mod tests {
+@@ -3626,6 +3659,7 @@ mod tests {
          {
              let mut core = pane.core.lock().unwrap();
              core.transient_default_color_owner_pgid = Some(42);
@@ -1331,7 +1331,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
              core.host_terminal_theme = crate::terminal_theme::TerminalTheme {
                  foreground: Some(crate::terminal_theme::RgbColor {
                      r: 0xaa,
-@@ -3636,6 +3670,7 @@ mod tests {
+@@ -3653,6 +3687,7 @@ mod tests {
          {
              let mut core = pane.core.lock().unwrap();
              core.transient_default_color_owner_pgid = Some(42);
@@ -1339,7 +1339,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
              core.host_terminal_theme = crate::terminal_theme::TerminalTheme {
                  foreground: Some(crate::terminal_theme::RgbColor {
                      r: 0xaa,
-@@ -3655,6 +3690,21 @@ mod tests {
+@@ -3672,6 +3707,21 @@ mod tests {
          assert!(should_probe_host_terminal_theme_restore(&core));
      }
  
@@ -1361,7 +1361,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
      #[test]
      fn ghostty_render_can_suppress_cursor_position() {
          let (tx, _rx) = mpsc::channel(4);
-@@ -5011,6 +5061,29 @@ mod tests {
+@@ -5033,6 +5083,29 @@ mod tests {
          assert!(rx.try_recv().is_err());
      }
  
@@ -1391,7 +1391,7 @@ index d5070b9bb6a34b7f910fd09242e6ed576d1cc3a2..5bf09e9a068d233c2c98b1ce7e98a9df
      #[test]
      fn child_default_color_reset_restores_cached_host_color() {
          let (tx, mut rx) = mpsc::channel(4);
-@@ -5510,6 +5583,28 @@ mod tests {
+@@ -5532,6 +5605,28 @@ mod tests {
          assert!(core.child_default_background_changed);
      }
  
@@ -2278,10 +2278,10 @@ index 6b59b3927e79562cd93eb0ef20841899c0b43aee..ce33050059941dc83cf158d14e9f2859
          // Window closed: a later lone Escape flushes immediately.
          assert!(framer.push(b"\x1b").is_empty());
 diff --git a/src/server/headless.rs b/src/server/headless.rs
-index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a2770ab2dab5 100644
+index 899dbf9b54f2aff6239e9abe92d113529ff8eb9e..33c9fa1c3c2a80baec7ecff98b096d2395c110dc 100644
 --- a/src/server/headless.rs
 +++ b/src/server/headless.rs
-@@ -6446,10 +6446,9 @@ next_tab = ""
+@@ -6399,10 +6399,9 @@ next_tab = ""
          let mut state = AppState::test_new();
          let mut ws = crate::workspace::Workspace::test_new("test");
          let pane_id = ws.tabs[0].root_pane;
@@ -2295,7 +2295,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
  
          state.workspaces = vec![ws];
          state.active = Some(0);
-@@ -6473,6 +6472,11 @@ next_tab = ""
+@@ -6426,6 +6425,11 @@ next_tab = ""
                  y: pane.inner_rect.y,
                  visible: true,
                  shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
@@ -2307,7 +2307,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
              })
          );
      }
-@@ -6509,6 +6513,7 @@ next_tab = ""
+@@ -6462,6 +6466,7 @@ next_tab = ""
                  y: pane.inner_rect.y,
                  visible: false,
                  shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
@@ -2315,7 +2315,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
              })
          );
      }
-@@ -6610,6 +6615,7 @@ next_tab = ""
+@@ -6563,6 +6568,7 @@ next_tab = ""
                  y: pane.inner_rect.y,
                  visible: true,
                  shape: state.cjk_ime_cursor_shape,
@@ -2323,7 +2323,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
              })
          );
      }
-@@ -6687,6 +6693,7 @@ next_tab = ""
+@@ -6640,6 +6646,7 @@ next_tab = ""
                  y: pane.inner_rect.y,
                  visible: true,
                  shape: state.cjk_ime_cursor_shape,
@@ -2331,7 +2331,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
              }),
              "fallback should anchor at pane top-left with the configured shape",
          );
-@@ -8540,6 +8547,7 @@ next_tab = ""
+@@ -8604,6 +8611,7 @@ next_tab = ""
                  y: expected.y,
                  visible: expected.visible,
                  shape: expected.shape,
@@ -2340,7 +2340,7 @@ index c1644dcd6e785680e4864db3ff75ce04e9377f18..ade8dfa5879bdee55f4027742851a277
          );
      }
 diff --git a/src/server/render_stream.rs b/src/server/render_stream.rs
-index 41a5781dc25c27d80c2d76c01a07c144b54fd50e..663dbd76438c3a785a843f5fe25690e51088791e 100644
+index f1f6c428d6627ec050334d5ad82aacaacdbdb038..ba7fa9b4a1e02a454af4e3dc5d57b3f4e12855c0 100644
 --- a/src/server/render_stream.rs
 +++ b/src/server/render_stream.rs
 @@ -41,7 +41,7 @@ impl ClientRenderState {
@@ -2360,7 +2360,7 @@ index 41a5781dc25c27d80c2d76c01a07c144b54fd50e..663dbd76438c3a785a843f5fe25690e5
          })
      }
  }
-@@ -400,6 +401,7 @@ fn popup_terminal_cursor(
+@@ -361,6 +362,7 @@ fn popup_terminal_cursor(
          y: cursor.y,
          visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
          shape: cursor.shape,
@@ -2368,7 +2368,7 @@ index 41a5781dc25c27d80c2d76c01a07c144b54fd50e..663dbd76438c3a785a843f5fe25690e5
      })
  }
  
-@@ -427,6 +429,7 @@ pub(crate) fn render_terminal_virtual(
+@@ -388,6 +390,7 @@ pub(crate) fn render_terminal_virtual(
              y: cursor.y,
              visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
              shape: cursor.shape,
@@ -2539,7 +2539,7 @@ index 21978d5159f9a80c77d0690cd4579da5c0fdb7ed..649aa4c712f66c4a4d9cfcac6d083f62
  
  fn decode_frame_payload(payload: &[u8]) -> std::io::Result<FrameWire> {
 diff --git a/tests/cross_area.rs b/tests/cross_area.rs
-index 0ee9aa2bccb5c97edf4cada12db4bc7927568e7a..d8d3e22ea0ef18185c4f49728e34b6168dd7c7af 100644
+index 6f1ab82b22fac6d81c2735ab81d8c22e6d439ab0..319a8198e68b9f56bb10afbd626da60d18da2983 100644
 --- a/tests/cross_area.rs
 +++ b/tests/cross_area.rs
 @@ -522,12 +522,22 @@ struct CellWire {
@@ -2594,4 +2594,3 @@ index 6e367eaf61d3394fa9d99b1fe8187fb245d69c5c..278e56ea49f376ae66b5b1206fe886db
  fn decode_frame_payload(payload: &[u8]) -> io::Result<FrameWire> {
 -- 
 2.55.0.windows.3
-

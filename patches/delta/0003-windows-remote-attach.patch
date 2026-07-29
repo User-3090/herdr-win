@@ -1,7 +1,7 @@
-From 46da3dbaae16c08ead66be6c451da3f19361645d Mon Sep 17 00:00:00 2001
+From 67034bdef420879459cc13114e4697de624765bd Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
-Subject: [PATCH 3/4] feat(windows): unify remote attach and image transport
+Subject: [PATCH 3/5] feat(windows): unify remote attach and image transport
 
 Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection Unix-specific while providing the Windows fallback required by the shared attach path.
 ---
@@ -21,7 +21,7 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/platform/macos.rs                         |    6 +
  src/platform/mod.rs                           |   16 +-
  src/platform/unix_common.rs                   |  123 +
- src/platform/windows.rs                       |  172 +-
+ src/platform/windows.rs                       |  170 +-
  src/platform/windows/clipboard_image.rs       |  535 +++
  src/remote.rs                                 |  149 +-
  src/remote/attach.rs                          | 3622 +++++++++++++++++
@@ -30,7 +30,7 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
  src/update.rs                                 |    5 +
- 25 files changed, 5121 insertions(+), 3356 deletions(-)
+ 25 files changed, 5120 insertions(+), 3355 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -49,7 +49,7 @@ index abb6a40029a49e10831cbf4e96cba5f34b4e763e..2f8c68265e3063516e33f4f5077530b7
  ]
  
 diff --git a/Cargo.toml b/Cargo.toml
-index 891bcbab56e488d68801bed3bee5b1eb91ef5c14..cffcc809c719fc97ab46404247ad5823022b5e55 100644
+index fdae5372ac8adb51e36494c48df1b4aa9ce1e467..8edeced78297fabb393ba3de9e7df6b07236d0f3 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -47,6 +47,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
@@ -190,7 +190,7 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed89
  默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
  
 diff --git a/src/client/mod.rs b/src/client/mod.rs
-index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac619098993f 100644
+index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f3010835b9369a0 100644
 --- a/src/client/mod.rs
 +++ b/src/client/mod.rs
 @@ -37,7 +37,6 @@ use tracing::{debug, info, warn};
@@ -415,7 +415,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
                  let raw_events = events
                      .iter()
                      .map(crate::protocol::ClientInputEvent::to_raw_input_event)
-@@ -1677,7 +1653,6 @@ async fn run_client_loop(
+@@ -1679,7 +1655,6 @@ async fn run_client_loop(
                          &mut state.sound_config,
                          &mut state.redraw_on_focus_gained,
                          &mut state.draw_host_cursor,
@@ -423,7 +423,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
                          &mut state.remote_image_paste_key,
                      );
                  }
-@@ -1796,11 +1771,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
+@@ -1798,11 +1773,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
      protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
  }
  
@@ -463,7 +463,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
  fn client_remote_image_paste_key(
      config: &crate::config::Config,
  ) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-@@ -1821,7 +1823,7 @@ fn reload_local_client_config(
+@@ -1823,7 +1825,7 @@ fn reload_local_client_config(
      sound_config: &mut crate::config::SoundConfig,
      redraw_on_focus_gained: &mut bool,
      draw_host_cursor: &mut bool,
@@ -472,7 +472,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
          crossterm::event::KeyCode,
          crossterm::event::KeyModifiers,
      )>,
-@@ -1831,15 +1833,11 @@ fn reload_local_client_config(
+@@ -1833,15 +1835,11 @@ fn reload_local_client_config(
              for diagnostic in loaded.config.ui.sound.diagnostics() {
                  warn!(diagnostic = %diagnostic, "local sound config diagnostic");
              }
@@ -489,7 +489,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
              debug!("reloaded local client config");
          }
          Err(diagnostics) => {
-@@ -1937,12 +1935,67 @@ fn should_bridge_clipboard_image_paste(
+@@ -1939,12 +1937,67 @@ fn should_bridge_clipboard_image_paste(
      )
  }
  
@@ -557,7 +557,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      let metadata = std::fs::metadata(&path).ok()?;
      if !metadata.is_file() {
          return None;
-@@ -1970,18 +2023,26 @@ fn image_path_from_terminal_drop(
+@@ -1972,18 +2025,26 @@ fn image_path_from_terminal_drop(
      data: &[u8],
      is_remote_client: bool,
  ) -> Option<(std::path::PathBuf, &'static str)> {
@@ -590,7 +590,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      let path = std::path::PathBuf::from(text);
      if !path.is_absolute() {
          return None;
-@@ -1998,7 +2059,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+@@ -2000,7 +2061,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
      data.strip_prefix(START)?.strip_suffix(END)
  }
  
@@ -598,7 +598,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
  fn strip_matching_path_quotes(text: &str) -> &str {
      if text.len() < 2 {
          return text;
-@@ -2029,7 +2089,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
+@@ -2031,7 +2091,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
      unescaped
  }
  
@@ -606,7 +606,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
  fn recognized_image_extension(extension: &str) -> Option<&'static str> {
      if extension.eq_ignore_ascii_case("png") {
          Some("png")
-@@ -2294,6 +2353,14 @@ mod tests {
+@@ -2316,6 +2375,14 @@ mod tests {
          }
      }
  
@@ -621,7 +621,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      #[test]
      fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
          assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
-@@ -2383,12 +2450,46 @@ mod tests {
+@@ -2405,12 +2472,46 @@ mod tests {
          ));
      }
  
@@ -670,7 +670,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      impl TempImageFile {
          fn new(extension: &str, bytes: &[u8]) -> Self {
              Self::with_name_fragment("test", extension, bytes)
-@@ -2408,7 +2509,6 @@ mod tests {
+@@ -2430,7 +2531,6 @@ mod tests {
          }
      }
  
@@ -678,7 +678,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      impl Drop for TempImageFile {
          fn drop(&mut self) {
              let _ = std::fs::remove_file(&self.path);
-@@ -2467,6 +2567,19 @@ mod tests {
+@@ -2489,6 +2589,19 @@ mod tests {
          .is_none());
      }
  
@@ -698,7 +698,7 @@ index 15bf3ad082f35b26b3d2113c90a84c93a8494d39..aaa5976b9f0614a66528f46e0241ac61
      #[test]
      fn graphics_bytes_are_written_inside_synchronized_blit_with_saved_cursor() {
          let mut output = Vec::new();
-@@ -2911,14 +3024,12 @@ mod tests {
+@@ -2933,14 +3046,12 @@ mod tests {
          let mut sound_config = crate::config::SoundConfig::default();
          let mut redraw_on_focus_gained = true;
          let mut draw_host_cursor = false;
@@ -966,7 +966,7 @@ index c293a2785130207740ab610c60998c607eb994bc..fc2f93b0c2bb8e369aac9ea7cdd0a5cc
      fn temp_socket_marker_path(name: &str) -> PathBuf {
          std::env::temp_dir().join(format!("herdr-{name}-{}.sock", std::process::id()))
 diff --git a/src/main.rs b/src/main.rs
-index 82e8ff5be0ddecc5d4cee70ce7a072e9c11f7a47..d2019c6662a5d7ad6152af940a4f07fa715449ea 100644
+index 097a8493b7b44f37ef9e0cc56084233d8f8b485d..8f4494d1149c3cd5d19163336b2d21509d6acac0 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -58,7 +58,6 @@ mod agent_resume;
@@ -1077,7 +1077,7 @@ index e9c89ede2b9c040eba570573ea77b25d8689e0c0..ba5b45b378ed45dcf22256ea7e49787f
  const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
  
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
-index 9b763223ed816955950611d7a2229ac6981dc0e1..92d3b7145a83ecb60219b8ae2a519c3f6cb81b3c 100644
+index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..8a9a2ee0a0de4814baea3213192b69b8c2123f95 100644
 --- a/src/platform/mod.rs
 +++ b/src/platform/mod.rs
 @@ -53,12 +53,19 @@ pub(crate) struct PlatformCapabilities {
@@ -1101,7 +1101,7 @@ index 9b763223ed816955950611d7a2229ac6981dc0e1..92d3b7145a83ecb60219b8ae2a519c3f
  #[cfg(any(target_os = "linux", target_os = "macos"))]
  pub fn detach_server_daemon_command(command: &mut std::process::Command) {
      use std::os::unix::process::CommandExt;
-@@ -86,14 +93,11 @@ pub struct ClipboardCommand {
+@@ -125,14 +132,11 @@ pub struct ClipboardCommand {
  }
  
  #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1116,7 +1116,7 @@ index 9b763223ed816955950611d7a2229ac6981dc0e1..92d3b7145a83ecb60219b8ae2a519c3f
  #[derive(Debug, PartialEq, Eq)]
  pub(crate) enum LimitedRead {
      Empty,
-@@ -101,7 +105,6 @@ pub(crate) enum LimitedRead {
+@@ -140,7 +144,6 @@ pub(crate) enum LimitedRead {
      Oversized,
  }
  
@@ -1124,7 +1124,7 @@ index 9b763223ed816955950611d7a2229ac6981dc0e1..92d3b7145a83ecb60219b8ae2a519c3f
  pub(crate) fn read_limited_reader(
      mut reader: impl std::io::Read,
      max_bytes: usize,
-@@ -144,6 +147,9 @@ mod linux;
+@@ -183,6 +186,9 @@ mod linux;
  #[cfg(target_os = "linux")]
  pub use linux::*;
  
@@ -1264,19 +1264,10 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +    }
 +}
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47df78e6fdc 100644
+index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584c6279ed1 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -6,7 +6,7 @@ use std::{
-     ptr::{copy_nonoverlapping, null_mut},
-     sync::{
-         atomic::{AtomicU32, Ordering},
--        Arc, Mutex,
-+        Arc, Mutex, OnceLock,
-     },
-     time::{Duration, Instant},
- };
-@@ -20,7 +20,10 @@ use windows_sys::{
+@@ -17,7 +17,10 @@ use windows_sys::{
          },
          System::{
              Console::GetConsoleWindow,
@@ -1288,10 +1279,10 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
              Diagnostics::{
                  Debug::ReadProcessMemory,
                  ToolHelp::{
-@@ -29,8 +32,8 @@ use windows_sys::{
-                 },
+@@ -27,8 +30,8 @@ use windows_sys::{
              },
              JobObjects::IsProcessInJob,
+             LibraryLoader::GetModuleHandleW,
 -            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
 -            Ole::CF_UNICODETEXT,
 +            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
@@ -1299,7 +1290,7 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
              Threading::{
                  GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
                  CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-@@ -59,6 +62,8 @@ use windows_sys::{
+@@ -62,6 +65,8 @@ use windows_sys::{
  
  use super::{ClipboardImage, ForegroundJob, Signal};
  
@@ -1308,10 +1299,10 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
  
-@@ -76,6 +81,92 @@ struct ProcessSnapshotCache {
- static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
-     Mutex::new(ProcessSnapshotCache { cached: None });
- static NEXT_NOTIFICATION_ICON_ID: AtomicU32 = AtomicU32::new(0x4845_0000);
+@@ -97,6 +102,92 @@ const NOTIFICATION_TIMER_ID: usize = 1;
+ const NOTIFICATION_SETUP_TIMEOUT: Duration = Duration::from_secs(2);
+ const NOTIFICATION_QUEUE_TIMEOUT_MILLIS: u32 = 60_000;
+ const NOTIFICATION_VISIBLE_TIMEOUT_MILLIS: u32 = 30_000;
 +static PNG_CLIPBOARD_FORMAT: OnceLock<u32> = OnceLock::new();
 +
 +pub(crate) fn private_local_socket_security_descriptor(
@@ -1401,7 +1392,7 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
  
  pub(crate) fn should_draw_host_cursor_by_default() -> bool {
      true
-@@ -680,9 +771,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
+@@ -701,9 +792,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
      }
  }
  
@@ -1472,7 +1463,7 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
      None
  }
  
-@@ -760,6 +910,8 @@ struct ProcessHandle(HANDLE);
+@@ -959,6 +1109,8 @@ struct ProcessHandle(HANDLE);
  
  struct ClipboardGuard;
  
@@ -1481,7 +1472,7 @@ index 4dd80789e0242c3f8147542ddaec2acf1d07a5fb..519e2309287210dbb238eca932d0f47d
  impl Drop for ClipboardGuard {
      fn drop(&mut self) {
          unsafe {
-@@ -768,6 +920,14 @@ impl Drop for ClipboardGuard {
+@@ -967,6 +1119,14 @@ impl Drop for ClipboardGuard {
      }
  }
  
@@ -9228,4 +9219,3 @@ index 3455841d2a90da519499f0c41daf5557c899cb95..2120fb3c9cad9fd20cfae7dee3072981
          return true;
 -- 
 2.55.0.windows.3
-

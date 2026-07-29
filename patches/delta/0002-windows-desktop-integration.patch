@@ -1,74 +1,218 @@
-From 25a8b02fd2f017dde8d86693177098314845634f Mon Sep 17 00:00:00 2001
+From a27c88bcff82fee22bb05740489bffcf520e5974 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 07:36:53 +0200
-Subject: [PATCH 2/4] feat(windows): integrate desktop notifications and audio
+Subject: [PATCH 2/5] fix(windows): complete desktop notifications and audio
 
-Deliver Unicode-safe native notification balloons without duplicate shell audio, and bind MediaPlayer paths through the process environment so spaced and Unicode paths remain literal.
+Own Shell notification icons from a dedicated message-only window and pump their callbacks so pseudoconsole clients can display and clean up queued banners.
+
+Wait for MediaPlayer's known duration instead of dispatcher events, preserve the existing literal path binding and timeout, and include stderr in playback failures.
 ---
- src/platform/windows.rs | 90 ++++++++++++++++++++++++++++++++++++++---
- src/sound.rs            | 40 +++++++++++++-----
- 2 files changed, 113 insertions(+), 17 deletions(-)
+ Cargo.toml              |   2 +
+ src/platform/windows.rs | 285 +++++++++++++++++++++++++++++++++++++++-
+ src/sound.rs            | 109 ++++++++++-----
+ 3 files changed, 355 insertions(+), 41 deletions(-)
 
+diff --git a/Cargo.toml b/Cargo.toml
+index 891bcbab56e488d68801bed3bee5b1eb91ef5c14..fdae5372ac8adb51e36494c48df1b4aa9ce1e467 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -50,12 +50,14 @@ portable-pty = { path = "vendor/portable-pty" }
+ windows-sys = { version = "0.61.2", features = [
+     "Wdk_System_Threading",
+     "Win32_Foundation",
++    "Win32_Graphics_Gdi",
+     "Win32_System_DataExchange",
+     "Win32_System_Diagnostics_Debug",
+     "Win32_System_Diagnostics_ToolHelp",
+     "Win32_System_Console",
+     "Win32_System_JobObjects",
+     "Win32_System_Kernel",
++    "Win32_System_LibraryLoader",
+     "Win32_System_Memory",
+     "Win32_System_Ole",
+     "Win32_System_Pipes",
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index d77a30beb33904122c60dea1616f5179f9b6ab85..4dd80789e0242c3f8147542ddaec2acf1d07a5fb 100644
+index 2caf116d1f3f5668c13a0d68c333ce7712af6ca8..a810fa17886c827e9387a389ab9138c0464c183f 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -4,7 +4,10 @@ use std::{
+@@ -4,7 +4,7 @@ use std::{
      mem::{size_of, MaybeUninit},
      path::PathBuf,
      ptr::{copy_nonoverlapping, null_mut},
 -    sync::{Arc, Mutex},
-+    sync::{
-+        atomic::{AtomicU32, Ordering},
-+        Arc, Mutex,
-+    },
++    sync::{Arc, Mutex, OnceLock},
      time::{Duration, Instant},
  };
  
-@@ -42,10 +45,13 @@ use windows_sys::{
+@@ -26,6 +26,7 @@ use windows_sys::{
+                 },
+             },
+             JobObjects::IsProcessInJob,
++            LibraryLoader::GetModuleHandleW,
+             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+             Ole::CF_UNICODETEXT,
+             Threading::{
+@@ -42,10 +43,18 @@ use windows_sys::{
                      KEYEVENTF_KEYUP,
                  },
              },
 -            Shell::{CommandLineToArgvW, ShellExecuteW},
 +            Shell::{
-+                CommandLineToArgvW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_TIP,
-+                NIIF_INFO, NIIF_NOSOUND, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
++                CommandLineToArgvW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
++                NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_NOSOUND, NIM_ADD, NIM_DELETE, NIM_MODIFY,
++                NIM_SETVERSION, NIN_BALLOONHIDE, NIN_BALLOONSHOW, NIN_BALLOONTIMEOUT,
++                NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 +            },
              WindowsAndMessaging::{
 -                GetForegroundWindow, GetWindowThreadProcessId, SendMessageTimeoutW,
 -                SMTO_ABORTIFHUNG, WM_IME_CONTROL,
-+                GetForegroundWindow, GetWindowThreadProcessId, LoadIconW, SendMessageTimeoutW,
-+                IDI_APPLICATION, SMTO_ABORTIFHUNG, WM_IME_CONTROL,
++                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
++                GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, LoadIconW,
++                PostQuitMessage, RegisterClassW, SendMessageTimeoutW, SetTimer, TranslateMessage,
++                HWND_MESSAGE, IDI_APPLICATION, MSG, SMTO_ABORTIFHUNG, WM_APP, WM_IME_CONTROL,
++                WM_TIMER, WNDCLASSW,
              },
          },
      },
-@@ -69,6 +75,7 @@ struct ProcessSnapshotCache {
+@@ -80,6 +89,14 @@ struct ProcessSnapshotCache {
  
  static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
      Mutex::new(ProcessSnapshotCache { cached: None });
-+static NEXT_NOTIFICATION_ICON_ID: AtomicU32 = AtomicU32::new(0x4845_0000);
++static NOTIFICATION_WINDOW_CLASS: OnceLock<Result<u16, i32>> = OnceLock::new();
++
++const NOTIFICATION_CALLBACK_MESSAGE: u32 = WM_APP + 0x45;
++const NOTIFICATION_ICON_ID: u32 = 1;
++const NOTIFICATION_TIMER_ID: usize = 1;
++const NOTIFICATION_SETUP_TIMEOUT: Duration = Duration::from_secs(2);
++const NOTIFICATION_QUEUE_TIMEOUT_MILLIS: u32 = 60_000;
++const NOTIFICATION_VISIBLE_TIMEOUT_MILLIS: u32 = 30_000;
  
  pub(crate) fn should_draw_host_cursor_by_default() -> bool {
      true
-@@ -679,8 +686,70 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
+@@ -690,8 +707,248 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
      None
  }
  
 -pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
 -    Ok(false)
 +pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
-+    let hwnd = unsafe { GetConsoleWindow() };
-+    if hwnd.is_null() {
-+        return Ok(false);
++    let title = title.to_owned();
++    let body = body.map(str::to_owned);
++    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
++    std::thread::Builder::new()
++        .name("herdr-desktop-notification".into())
++        .spawn(move || run_desktop_notification(&title, body.as_deref(), ready_tx))?;
++
++    match ready_rx.recv_timeout(NOTIFICATION_SETUP_TIMEOUT) {
++        Ok(result) => result.map(|()| true),
++        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
++            std::io::ErrorKind::TimedOut,
++            "Windows desktop notification setup timed out",
++        )),
++        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
++            "Windows desktop notification worker exited during setup",
++        )),
++    }
++}
++
++fn run_desktop_notification(
++    title: &str,
++    body: Option<&str>,
++    ready: std::sync::mpsc::SyncSender<std::io::Result<()>>,
++) {
++    let hwnd = match create_notification_window() {
++        Ok(hwnd) => hwnd,
++        Err(err) => {
++            let _ = ready.send(Err(err));
++            return;
++        }
++    };
++
++    if let Err(err) = add_notification_icon(hwnd, title, body) {
++        unsafe {
++            DestroyWindow(hwnd);
++        }
++        let _ = ready.send(Err(err));
++        return;
 +    }
 +
-+    let icon_id = NEXT_NOTIFICATION_ICON_ID.fetch_add(1, Ordering::Relaxed);
-+    let mut notification = unsafe { std::mem::zeroed::<NOTIFYICONDATAW>() };
-+    notification.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-+    notification.hWnd = hwnd;
-+    notification.uID = icon_id;
++    if unsafe {
++        SetTimer(
++            hwnd,
++            NOTIFICATION_TIMER_ID,
++            NOTIFICATION_QUEUE_TIMEOUT_MILLIS,
++            None,
++        )
++    } == 0
++    {
++        let err = std::io::Error::last_os_error();
++        remove_notification_icon(hwnd);
++        let _ = ready.send(Err(err));
++        return;
++    }
++
++    if ready.send(Ok(())).is_err() {
++        remove_notification_icon(hwnd);
++        return;
++    }
++
++    if let Err(err) = notification_message_loop(hwnd) {
++        tracing::warn!(err = %err, "Windows desktop notification message loop failed");
++    }
++    remove_notification_icon(hwnd);
++}
++
++fn create_notification_window() -> std::io::Result<HWND> {
++    let module = unsafe { GetModuleHandleW(std::ptr::null()) };
++    if module.is_null() {
++        return Err(std::io::Error::last_os_error());
++    }
++
++    let class_atom = NOTIFICATION_WINDOW_CLASS.get_or_init(|| {
++        let class_name = wide_null("HerdrDesktopNotificationWindow");
++        let window_class = WNDCLASSW {
++            lpfnWndProc: Some(notification_window_proc),
++            hInstance: module,
++            lpszClassName: class_name.as_ptr(),
++            ..unsafe { std::mem::zeroed() }
++        };
++        let atom = unsafe { RegisterClassW(&window_class) };
++        if atom == 0 {
++            Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(1))
++        } else {
++            Ok(atom)
++        }
++    });
++    let class_atom = (*class_atom).map_err(std::io::Error::from_raw_os_error)?;
++    let atom_pointer = usize::from(class_atom) as *const u16;
++    let hwnd = unsafe {
++        CreateWindowExW(
++            0,
++            atom_pointer,
++            std::ptr::null(),
++            0,
++            0,
++            0,
++            0,
++            0,
++            HWND_MESSAGE,
++            null_mut(),
++            module,
++            std::ptr::null(),
++        )
++    };
++    if hwnd.is_null() {
++        Err(std::io::Error::last_os_error())
++    } else {
++        Ok(hwnd)
++    }
++}
++
++fn add_notification_icon(hwnd: HWND, title: &str, body: Option<&str>) -> std::io::Result<()> {
++    let mut notification = notification_identity(hwnd);
 +    notification.hIcon = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
-+    notification.uFlags = NIF_TIP;
++    notification.uCallbackMessage = NOTIFICATION_CALLBACK_MESSAGE;
++    notification.uFlags = NIF_MESSAGE | NIF_TIP;
 +    if !notification.hIcon.is_null() {
 +        notification.uFlags |= NIF_ICON;
 +    }
@@ -80,32 +224,105 @@ index d77a30beb33904122c60dea1616f5179f9b6ab85..4dd80789e0242c3f8147542ddaec2acf
 +        ));
 +    }
 +
++    notification.Anonymous.uVersion = NOTIFYICON_VERSION_4;
++    if unsafe { Shell_NotifyIconW(NIM_SETVERSION, &notification) } == 0 {
++        delete_notification_icon(hwnd);
++        return Err(std::io::Error::other(
++            "failed to set Herdr notification-area icon version",
++        ));
++    }
++
 +    notification.uFlags = NIF_INFO;
 +    notification.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
 +    copy_wide_truncated(&mut notification.szInfoTitle, title);
 +    copy_wide_truncated(&mut notification.szInfo, body.unwrap_or(title));
 +    if unsafe { Shell_NotifyIconW(NIM_MODIFY, &notification) } == 0 {
-+        unsafe {
-+            Shell_NotifyIconW(NIM_DELETE, &notification);
-+        }
++        delete_notification_icon(hwnd);
 +        return Err(std::io::Error::other(
 +            "failed to show Herdr desktop notification",
 +        ));
 +    }
 +
-+    let hwnd_address = hwnd as usize;
-+    std::thread::spawn(move || {
-+        std::thread::sleep(Duration::from_secs(10));
-+        let mut cleanup = unsafe { std::mem::zeroed::<NOTIFYICONDATAW>() };
-+        cleanup.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-+        cleanup.hWnd = hwnd_address as _;
-+        cleanup.uID = icon_id;
-+        unsafe {
-+            Shell_NotifyIconW(NIM_DELETE, &cleanup);
-+        }
-+    });
++    Ok(())
++}
 +
-+    Ok(true)
++fn notification_message_loop(hwnd: HWND) -> std::io::Result<()> {
++    let mut message = unsafe { std::mem::zeroed::<MSG>() };
++    loop {
++        let result = unsafe { GetMessageW(&mut message, hwnd, 0, 0) };
++        if result == -1 {
++            return Err(std::io::Error::last_os_error());
++        }
++        if result == 0 {
++            return Ok(());
++        }
++        unsafe {
++            TranslateMessage(&message);
++            DispatchMessageW(&message);
++        }
++    }
++}
++
++unsafe extern "system" fn notification_window_proc(
++    hwnd: HWND,
++    message: u32,
++    wparam: usize,
++    lparam: isize,
++) -> isize {
++    if message == NOTIFICATION_CALLBACK_MESSAGE {
++        match notification_event(lparam) {
++            NIN_BALLOONSHOW => unsafe {
++                SetTimer(
++                    hwnd,
++                    NOTIFICATION_TIMER_ID,
++                    NOTIFICATION_VISIBLE_TIMEOUT_MILLIS,
++                    None,
++                );
++            },
++            NIN_BALLOONHIDE | NIN_BALLOONTIMEOUT | NIN_BALLOONUSERCLICK => unsafe {
++                PostQuitMessage(0);
++            },
++            _ => {}
++        }
++        return 0;
++    }
++    if message == WM_TIMER && wparam == NOTIFICATION_TIMER_ID {
++        unsafe {
++            PostQuitMessage(0);
++        }
++        return 0;
++    }
++
++    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
++}
++
++fn notification_event(lparam: isize) -> u32 {
++    (lparam as u32) & 0xffff
++}
++
++fn notification_identity(hwnd: HWND) -> NOTIFYICONDATAW {
++    let mut notification = unsafe { std::mem::zeroed::<NOTIFYICONDATAW>() };
++    notification.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
++    notification.hWnd = hwnd;
++    notification.uID = NOTIFICATION_ICON_ID;
++    notification
++}
++
++fn delete_notification_icon(hwnd: HWND) {
++    let notification = notification_identity(hwnd);
++    unsafe {
++        Shell_NotifyIconW(NIM_DELETE, &notification);
++    }
++}
++
++fn remove_notification_icon(hwnd: HWND) {
++    unsafe {
++        KillTimer(hwnd, NOTIFICATION_TIMER_ID);
++    }
++    delete_notification_icon(hwnd);
++    unsafe {
++        DestroyWindow(hwnd);
++    }
 +}
 +
 +fn copy_wide_truncated<const N: usize>(destination: &mut [u16; N], value: &str) {
@@ -123,7 +340,7 @@ index d77a30beb33904122c60dea1616f5179f9b6ab85..4dd80789e0242c3f8147542ddaec2acf
  }
  
  fn wide_null(value: &str) -> Vec<u16> {
-@@ -1115,6 +1184,15 @@ mod tests {
+@@ -1126,6 +1383,22 @@ mod tests {
          AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
      };
  
@@ -136,11 +353,18 @@ index d77a30beb33904122c60dea1616f5179f9b6ab85..4dd80789e0242c3f8147542ddaec2acf
 +        assert_eq!(destination[5], 0);
 +    }
 +
++    #[test]
++    fn windows_notification_event_uses_version_four_low_word() {
++        let lparam =
++            ((super::NOTIFICATION_ICON_ID as isize) << 16) | super::NIN_BALLOONSHOW as isize;
++        assert_eq!(super::notification_event(lparam), super::NIN_BALLOONSHOW);
++    }
++
      #[test]
      fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
          use base64::Engine as _;
 diff --git a/src/sound.rs b/src/sound.rs
-index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5cb84f46f 100644
+index d55fd0841dc9a47833762262752c1e493772cda2..0835460ad7c025579d010afe002d78c09b08819f 100644
 --- a/src/sound.rs
 +++ b/src/sound.rs
 @@ -8,9 +8,7 @@ use std::io::Write;
@@ -163,7 +387,25 @@ index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5
  #[cfg(not(any(windows, target_os = "macos")))]
  const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
  #[cfg(not(any(windows, target_os = "macos")))]
-@@ -121,7 +121,8 @@ fn run_player(path: &Path) -> Result<Output, String> {
+@@ -72,7 +72,7 @@ fn sound_playback_disabled_by_env() -> bool {
+ fn play_file(path: &Path) -> Result<(), String> {
+     match run_player(path) {
+         Ok(output) if output.status.success() => Ok(()),
+-        Ok(output) => Err(format!("player exited with {}", output.status)),
++        Ok(output) => Err(player_output_error("player", &output)),
+         Err(err) => Err(err),
+     }
+ }
+@@ -90,7 +90,7 @@ fn play_bytes(data: &[u8]) -> Result<(), String> {
+ 
+     match result {
+         Ok(output) if output.status.success() => Ok(()),
+-        Ok(output) => Err(format!("player exited with {}", output.status)),
++        Ok(output) => Err(player_output_error("player", &output)),
+         Err(e) => Err(e),
+     }
+ }
+@@ -121,38 +121,37 @@ fn run_player(path: &Path) -> Result<Output, String> {
  #[cfg(any(windows, test))]
  fn windows_media_player_script() -> &'static str {
      r#"
@@ -173,7 +415,45 @@ index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5
  $ErrorActionPreference = 'Stop'
  Add-Type -AssemblyName PresentationCore
  $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
-@@ -150,9 +151,10 @@ if (-not $script:done) { throw 'sound playback timed out' }
+ $player = [System.Windows.Media.MediaPlayer]::new()
+-$script:done = $false
+-$script:failed = $null
+-$player.add_MediaEnded({ $script:done = $true })
+-$player.add_MediaFailed({
+-    param($sender, $eventArgs)
+-    $script:failed = $eventArgs.ErrorException
+-    $script:done = $true
+-})
+-$player.Open([Uri]::new($resolved))
+-$deadline = [DateTime]::UtcNow.AddSeconds(15)
+-while (-not $script:done -and -not $player.NaturalDuration.HasTimeSpan -and [DateTime]::UtcNow -lt $deadline) {
+-    Start-Sleep -Milliseconds 25
+-}
+-if ($script:failed) { throw $script:failed }
+-$player.Play()
+-while (-not $script:done -and [DateTime]::UtcNow -lt $deadline) {
+-    Start-Sleep -Milliseconds 50
++try {
++    $player.Open([Uri]::new($resolved))
++    $deadline = [DateTime]::UtcNow.AddSeconds(15)
++    while (-not $player.NaturalDuration.HasTimeSpan -and [DateTime]::UtcNow -lt $deadline) {
++        Start-Sleep -Milliseconds 25
++    }
++    if (-not $player.NaturalDuration.HasTimeSpan) { throw 'sound media did not open before timeout' }
++    $player.Play()
++    $remaining = $player.NaturalDuration.TimeSpan - $player.Position
++    if ($remaining -gt [TimeSpan]::Zero) {
++        $waitMilliseconds = [Math]::Ceiling($remaining.TotalMilliseconds) + 100
++        $budgetMilliseconds = [Math]::Max(0, [Math]::Floor(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
++        Start-Sleep -Milliseconds ([Math]::Min($waitMilliseconds, $budgetMilliseconds))
++        if ($waitMilliseconds -gt $budgetMilliseconds) { throw 'sound playback timed out' }
++    }
++} finally {
++    $player.Close()
+ }
+-$player.Close()
+-if ($script:failed) { throw $script:failed }
+-if (-not $script:done) { throw 'sound playback timed out' }
  "#
  }
  
@@ -187,7 +467,7 @@ index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5
          .args([
              "-NoLogo",
              "-NoProfile",
-@@ -162,7 +164,13 @@ fn run_windows_player(path: &Path) -> Result<Output, String> {
+@@ -162,7 +161,13 @@ fn run_windows_player(path: &Path) -> Result<Output, String> {
              "-Command",
              windows_media_player_script(),
          ])
@@ -202,7 +482,52 @@ index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5
          .output()
          .map_err(|e| format!("Windows MediaPlayer playback failed: {e}"))
  }
-@@ -403,11 +411,21 @@ mod tests {
+@@ -318,13 +323,17 @@ fn run_linux_player(path: &Path) -> Result<Output, String> {
+ 
+ #[cfg(not(any(windows, target_os = "macos")))]
+ fn player_error(player: AudioPlayer, output: &Output) -> String {
++    player_output_error(player.program, output)
++}
++
++fn player_output_error(player: &str, output: &Output) -> String {
+     let stderr = String::from_utf8_lossy(&output.stderr);
+     let stderr = stderr.trim();
+ 
+     if stderr.is_empty() {
+-        format!("{} exited with {}", player.program, output.status)
++        format!("{player} exited with {}", output.status)
+     } else {
+-        format!("{} exited with {}: {stderr}", player.program, output.status)
++        format!("{player} exited with {}: {stderr}", output.status)
+     }
+ }
+ 
+@@ -337,6 +346,24 @@ mod tests {
+         assert_ne!(temp_sound_path(), temp_sound_path());
+     }
+ 
++    #[test]
++    fn player_output_error_includes_stderr() {
++        let mut command = if cfg!(windows) {
++            let mut command = Command::new("cmd.exe");
++            command.args(["/C", "echo playback detail 1>&2 & exit /b 7"]);
++            command
++        } else {
++            let mut command = Command::new("sh");
++            command.args(["-c", "printf 'playback detail' >&2; exit 7"]);
++            command
++        };
++        let output = command.output().unwrap();
++
++        let error = player_output_error("player", &output);
++        assert!(error.contains("player exited with"));
++        assert!(error.contains("playback detail"));
++    }
++
+     #[cfg(not(any(windows, target_os = "macos")))]
+     #[test]
+     fn linux_audio_players_are_mp3_capable() {
+@@ -403,11 +430,23 @@ mod tests {
      }
  
      #[test]
@@ -223,10 +548,11 @@ index d55fd0841dc9a47833762262752c1e493772cda2..73fbae8362a92865b773d007e6a51ec5
 +        assert!(!script.contains("param([string]$Path)"));
          assert!(script.contains("Resolve-Path -LiteralPath $Path"));
          assert!(script.contains("System.Windows.Media.MediaPlayer"));
++        assert!(script.contains("NaturalDuration.TimeSpan - $player.Position"));
++        assert!(!script.contains("add_MediaEnded"));
 +        assert_eq!(env_path, Some(path.as_os_str()));
 +        assert!(!command.get_args().any(|arg| arg == path.as_os_str()));
      }
  }
 -- 
 2.55.0.windows.3
-
