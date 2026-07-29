@@ -1,36 +1,38 @@
-From 67034bdef420879459cc13114e4697de624765bd Mon Sep 17 00:00:00 2001
+From 1086cf0170ceb06b65a5196b2db57cf4ca587e13 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
-Date: Sun, 26 Jul 2026 06:47:17 +0200
-Subject: [PATCH 3/5] feat(windows): unify remote attach and image transport
+Date: Wed, 29 Jul 2026 15:47:11 +0200
+Subject: [PATCH 3/4] feat(windows): complete remote attach
 
-Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection Unix-specific while providing the Windows fallback required by the shared attach path.
 ---
  Cargo.lock                                    |    1 +
- Cargo.toml                                    |    1 +
+ Cargo.toml                                    |    3 +
  .../src/content/docs/configuration.mdx        |    4 +-
  .../src/content/docs/ja/configuration.mdx     |    4 +-
  .../content/docs/ja/persistence-remote.mdx    |   10 +-
+ .../src/content/docs/ja/windows-beta.mdx      |   16 +-
  .../src/content/docs/persistence-remote.mdx   |    8 +-
+ .../website/src/content/docs/windows-beta.mdx |   16 +-
  .../src/content/docs/zh-cn/configuration.mdx  |    4 +-
  .../content/docs/zh-cn/persistence-remote.mdx |   10 +-
+ .../src/content/docs/zh-cn/windows-beta.mdx   |   16 +-
  src/client/mod.rs                             |  291 +-
  src/ipc.rs                                    |  176 +-
  src/main.rs                                   |    1 -
- src/platform/fallback.rs                      |   54 +
+ src/platform/fallback.rs                      |   70 +
  src/platform/linux.rs                         |    6 +
  src/platform/macos.rs                         |    6 +
- src/platform/mod.rs                           |   16 +-
- src/platform/unix_common.rs                   |  123 +
- src/platform/windows.rs                       |  170 +-
+ src/platform/mod.rs                           |   27 +-
+ src/platform/unix_common.rs                   |  164 +
+ src/platform/windows.rs                       |  336 +-
  src/platform/windows/clipboard_image.rs       |  535 +++
  src/remote.rs                                 |  149 +-
- src/remote/attach.rs                          | 3622 +++++++++++++++++
+ src/remote/attach.rs                          | 3648 +++++++++++++++++
  src/remote/unix.rs                            | 3091 +-------------
- src/remote/windows.rs                         |  125 +
+ src/remote/windows.rs                         |  140 +
  src/server/client_transport.rs                |   51 +-
- src/server/clipboard_image.rs                 |   12 +-
+ src/server/clipboard_image.rs                 |   14 +-
  src/update.rs                                 |    5 +
- 25 files changed, 5120 insertions(+), 3355 deletions(-)
+ 28 files changed, 5418 insertions(+), 3384 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -49,10 +51,10 @@ index abb6a40029a49e10831cbf4e96cba5f34b4e763e..2f8c68265e3063516e33f4f5077530b7
  ]
  
 diff --git a/Cargo.toml b/Cargo.toml
-index fdae5372ac8adb51e36494c48df1b4aa9ce1e467..8edeced78297fabb393ba3de9e7df6b07236d0f3 100644
+index fdae5372ac8adb51e36494c48df1b4aa9ce1e467..05e03235d6e1a09bbac5567c36bf95ef5133dcc8 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -47,6 +47,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
+@@ -47,10 +47,13 @@ schemars = { version = "1.2.1", features = ["derive"] }
  portable-pty = { path = "vendor/portable-pty" }
  
  [target.'cfg(windows)'.dependencies]
@@ -60,6 +62,12 @@ index fdae5372ac8adb51e36494c48df1b4aa9ce1e467..8edeced78297fabb393ba3de9e7df6b0
  windows-sys = { version = "0.61.2", features = [
      "Wdk_System_Threading",
      "Win32_Foundation",
+     "Win32_Graphics_Gdi",
++    "Win32_Security",
++    "Win32_Security_Authorization",
+     "Win32_System_DataExchange",
+     "Win32_System_Diagnostics_Debug",
+     "Win32_System_Diagnostics_ToolHelp",
 diff --git a/docs/next/website/src/content/docs/configuration.mdx b/docs/next/website/src/content/docs/configuration.mdx
 index e7706befe7edd8b95cda7b934e28b915e8829548..810930a0ddc05129722e5744ea93a66ad64dcccd 100644
 --- a/docs/next/website/src/content/docs/configuration.mdx
@@ -103,7 +111,7 @@ index dda1629c537c6807c3a903cc22a5601c4dc9c2b0..137ed74cbcc199d65fb1cb64deca2fde
  ## キーバインド
  
 diff --git a/docs/next/website/src/content/docs/ja/persistence-remote.mdx b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
-index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf114946655a7d 100644
+index f8d3ff02f5be343971171672c9f1793384f3357d..94785c2606d3e55b0405caa0f4d7b63542d61c93 100644
 --- a/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -114,10 +122,10 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf1149
 +リモートアタッチは x86_64 と aarch64 の Linux および macOS ホストをサポートします。Herdr はリモートのプラットフォームを確認し、リモートの `PATH` 上にある一致する `herdr` を優先してから、一般的な直接インストール、Homebrew、mise、Nix プロファイルのパスを確認します。一致するバイナリがない場合、対話的な実行では `~/.local/bin/herdr` へのインストールを提案します。非対話的な実行はホストを変更せずに失敗します。`~/.local/bin` がリモートの `PATH` にない場合、Herdr はインストール後に警告します。
  
 -ネイティブ Windows の `herdr --remote` は Windows ベータの範囲外です。Windows からはサーバーに SSH してそこで `herdr` を実行してください。
-+ネイティブ Windows クライアントは、これらの Linux および macOS ホストへアタッチできます。このフォークでは、`C:\HerdrSandbox\runtime\herdr\herdr.exe` にある Herdr サンドボックス配置向けの、事前プロビジョニング済み Windows ホストアダプターも維持されています。自動インストールとライブハンドオフは引き続き Unix ホスト専用です。
++ネイティブ Windows クライアントは、これらの Linux および macOS ホストへアタッチできます。Windows 専用のプレビューフィードは Unix バイナリを公開しないため、ホストに一致する Herdr を事前にインストールするか、`HERDR_REMOTE_BINARY` で一致するローカルバイナリを指定してください。このフォークでは、`C:\HerdrSandbox\runtime\herdr\herdr.exe` にある Herdr サンドボックス配置向けの、事前プロビジョニング済み Windows ホストアダプターも維持されています。ライブハンドオフは引き続き Unix ホスト専用です。
  
 -デフォルトでは、`herdr --remote` はあなたの SSH config を最初に include し、その後にフォールバックのキープアライブ設定を加えた一時的な SSH config を通してブリッジを実行します。既存のユーザーのキープアライブ設定が優先されます。Herdr が生成するブリッジ設定を使わず素の `ssh` を使うには `[remote].manage_ssh_config = false` を設定してください。
-+Windows からのリモートアタッチでは、既定の `ctrl+v` リモート画像バインドが登録済み PNG または DIB クリップボード画像を既存のクライアントプロトコルで送信し、リモートホストへステージして、そのリモートパスを貼り付けます。PNG、JPEG、GIF、WebP、BMP の絶対パスをひとつドラッグまたは貼り付けた場合も、同じサイズ制限付き転送を使います。対応するクリップボード画像がない場合、テキスト入力はそのまま送られます。ショートカットを変更または無効化するには `keys.remote_image_paste` を設定してください。
++Windows からのリモートアタッチでは、既定の `ctrl+v` リモート画像バインドが登録済み PNG または非圧縮の 16/24/32 ビット CF_DIB/CF_DIBV5 クリップボード画像を既存のクライアントプロトコルで送信し、リモートホストへステージして、そのリモートパスを貼り付けます。PNG、JPEG、GIF、WebP、BMP の絶対パスをひとつドラッグまたは貼り付けた場合も、同じサイズ制限付き転送を使います。対応するクリップボード画像がない場合、テキスト入力はそのまま送られます。ショートカットを変更または無効化するには `keys.remote_image_paste` を設定してください。
 +
 +デフォルトでは、`herdr --remote` はあなたの SSH config を最初に include し、その後にフォールバックのキープアライブ設定を加えた一時的な SSH config を通してリモートセットアップとブリッジを実行します。既存のユーザーのキープアライブ設定が優先されます。Unix クライアントは接続再利用用のプライベートなアタッチ単位コントロールソケットも追加します。Herdr が生成する設定やコントロールソケットを使わず通常の `ssh` を使うには `[remote].manage_ssh_config = false` を設定してください。
 +
@@ -125,8 +133,70 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf1149
  
  デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
  
+diff --git a/docs/next/website/src/content/docs/ja/windows-beta.mdx b/docs/next/website/src/content/docs/ja/windows-beta.mdx
+index ee0f85679b531a3cf8c470b603375dfb6bf86665..0658496df45f72fcaa2bc53fc7846326e826492f 100644
+--- a/docs/next/website/src/content/docs/ja/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/ja/windows-beta.mdx
+@@ -36,6 +36,7 @@ Windows ベータビルドはプレビューチャンネルでのみ提供され
+ | プラグイン | プレビュー |
+ | ペイン画面履歴 | ベータ |
+ | ネストされた起動のオーバーライド | ベータ |
++| Linux/macOS と事前プロビジョニング済み Windows ホストへの `herdr --remote` | ベータ |
+ 
+ Windows のエージェントプロセス検出は、ペインのシェルの子孫プロセスをスキャンし、直接のエージェントと一般的なコマンドラッパーを認識します。Codex、Claude などのエージェントには有用ですが、Unix のフォアグラウンドプロセスグループ検出と同じものではありません。
+ 
+@@ -47,14 +48,14 @@ Windows のエージェントプロセス検出は、ペインのシェルの子
+ | --- | --- |
+ | シェルで `cd` した後のライブ cwd | 部分的 |
+ | シェルインテグレーション/OSC7 によるライブ cwd | ベータ |
+-| エージェントへのクリップボード画像貼り付け | 未検証 |
++| エージェントへのリモートクリップボード画像貼り付け | ベータ |
+ | CJK IME の変換候補位置 | 部分的 |
+ | Kitty graphics のレンダリング | 未検証 |
+ | ホストカーソル描画 | 部分的 |
+ 
+ Herdr はペインを正しいディレクトリで起動でき、Herdr を起動したディレクトリから最初のワークスペースを作成できます。起動後の PowerShell のディレクトリ変更は別問題です: Herdr が調べられるプロセスのフィールドは、その後の論理的な `cd` の変化を確実には追跡しません。ライブ cwd の報告には Herdr インテグレーションかプロンプトのシェルインテグレーションを使ってください。
+ 
+-Windows Terminal は特定のエージェント向けに画像貼り付け経路をサポートしているかもしれませんが、Herdr 自身のクリップボード画像リーダーはまだ Windows に配線されていません。Windows のクリップボードブリッジが実装・テストされるまで、`alt+v` の画像貼り付けは未検証として扱ってください。リモートクリップボードの画像ブリッジは別機能で、引き続き Unix/macOS の `herdr --remote` に紐づいています。
++`herdr --remote` では、Herdr は Windows 上で登録済み PNG と、非圧縮の 16/24/32 ビット CF_DIB/CF_DIBV5 クリップボード画像を読み取り、サイズ制限された PNG をリモートサーバーへ送信します。既定のショートカットは `ctrl+v` です。変更または無効化するには `keys.remote_image_paste` を設定してください。貼り付けまたはドロップされた絶対画像パスも同じ方法で転送されます。このブリッジはリモート専用で、対応するクリップボード画像がない場合は通常の入力にフォールバックします。
+ 
+ Kitty graphics は実験的なままで、まだ Windows でのサポートを謳っていません。Windows Terminal での画像レンダリングを特にテストしているのでない限り、`experimental.kitty_graphics = false` のままにしてください。
+ 
+@@ -87,27 +88,26 @@ Herdr のペインテキストコピーは Windows ベータで動作します
+ 
+ テキストの貼り付けには Windows Terminal で `ctrl+shift+v` を使ってください。複数行テキストの貼り付けはブラケット付きなので、シェルやエージェントのプロンプトは各行を個別に送信せず、ひとつの貼り付けとして受け取ります。`shift` を押しながら右クリックすると、クリックを Herdr に送らずに外側ターミナルの貼り付けアクションを使えます。
+ 
++リモートアタッチ中は、クリップボード画像に `ctrl+v` を使います。Herdr は対応する登録済み PNG または非圧縮 DIB データをサイズ制限された PNG に変換し、ステージされたリモートパスをフォーカス中のペインへ貼り付けます。
++
+ ## Windows ベータで未サポート
+ 
+ | 機能 | 状況 |
+ | --- | --- |
+ | ダイレクトターミナルアタッチ | 未サポート |
+-| Windows バイナリからの `herdr --remote` | 未サポート |
+ | ライブサーバーハンドオフ | 未サポート |
+ | Unix ファイルディスクリプタのハンドオフ | 未サポート |
+ | Unix フォアグラウンドプロセスグループ | 未サポート |
+-| リモートクリップボード画像ブリッジ | 未サポート |
+ | プレフィックスによる入力ソース切り替え | 未サポート |
+ | 署名済みバイナリ / SmartScreen 回避 | 未サポート |
+ 
+-Windows からのリモート作業は、サーバーに SSH してそこで `herdr` を実行してください:
++ネイティブ Windows バイナリは、Linux と macOS の Herdr ホスト、およびこのフォークの事前プロビジョニング済み Windows サンドボックスホストに対するシンクライアントとして動作できます:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-このモードでは Herdr はリモートホスト上で動きます。ネイティブ Windows の `herdr --remote` はベータの範囲外です。
++Windows ではコントロールソケットによる接続再利用は使用しません。フォールバックの SSH キープアライブは追加されますが、パスワード認証では複数のセットアップコマンドに対して入力を求められる場合があります。鍵認証または Windows の `ssh-agent` を推奨します。Windows 専用のプレビューフィードは Unix バイナリを公開しないため、Linux/macOS ホストに一致する Herdr を事前にインストールするか、`HERDR_REMOTE_BINARY` で一致するローカルバイナリを指定してください。Windows ホストにはサンドボックス版 Herdr 実行ファイルがあらかじめ必要で、ライブハンドオフはサポートしません。
+ 
+ Windows のアップデートは Windows インストーラー経由で行われ、バージョン付きインストールジャンクションを更新します。アップデート後は実行中の Herdr セッションを再起動してください。ライブハンドオフは Unix 専用です。
+ 
 diff --git a/docs/next/website/src/content/docs/persistence-remote.mdx b/docs/next/website/src/content/docs/persistence-remote.mdx
-index a365ac8838673144952ce0b6dcf92d3125e27360..a2bd515d5e570357ca200191c31e8a3241903494 100644
+index a365ac8838673144952ce0b6dcf92d3125e27360..f9241c6c846bf764e6a0824be624f91f792e2cab 100644
 --- a/docs/next/website/src/content/docs/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/persistence-remote.mdx
 @@ -65,9 +65,13 @@ herdr --remote workbox
@@ -134,16 +204,78 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..a2bd515d5e570357ca200191c31e8a32
  Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
  
 -Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
-+Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the Herdr sandbox layout at `C:\HerdrSandbox\runtime\herdr\herdr.exe`; automatic install and live handoff remain Unix-host-only.
++Native Windows clients can attach to those Linux and macOS hosts. This Windows-only preview feed does not publish Unix binaries, so first install a matching Herdr on the host or point `HERDR_REMOTE_BINARY` to a matching local binary. This fork also preserves its pre-provisioned Windows-host adapter for the Herdr sandbox layout at `C:\HerdrSandbox\runtime\herdr\herdr.exe`; live handoff remains Unix-host-only.
  
 -By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
-+On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or DIB clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
++On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or uncompressed 16-, 24-, or 32-bit CF_DIB/CF_DIBV5 clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
 +
 +By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings. Existing user keepalive settings win. Unix clients also add a private per-attach control socket for connection reuse. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 +
 +On Windows, the generated config includes `%USERPROFILE%\.ssh\config` and the system OpenSSH config when present. Herdr does not use SSH control-socket reuse on Windows, so password authentication can prompt for multiple setup commands. Use key authentication or load the key into Windows `ssh-agent` for a one-step attach.
  
  Remote attach uses your normal OpenSSH authentication. If the target uses a passphrase-protected key in a non-interactive shell, script, CI job, or mobile terminal that cannot show the passphrase prompt, load the key into ssh-agent first:
+ 
+diff --git a/docs/next/website/src/content/docs/windows-beta.mdx b/docs/next/website/src/content/docs/windows-beta.mdx
+index 6533ca6fb31b84245d723dcd4962d9be89f6a1b6..c55e86cdc0b2483ab6f2947b4a729e224ff1e6d5 100644
+--- a/docs/next/website/src/content/docs/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/windows-beta.mdx
+@@ -36,6 +36,7 @@ For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a cus
+ | Plugins | preview |
+ | Pane screen history | beta |
+ | Nested launch override | beta |
++| `herdr --remote` to Linux/macOS and pre-provisioned Windows hosts | beta |
+ 
+ Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers. It is useful for Codex, Claude, and similar agents, but it is not the same as Unix foreground process-group detection.
+ 
+@@ -47,14 +48,14 @@ Plugins support `windows` as a manifest platform in preview. GitHub install, loc
+ | --- | --- |
+ | Live cwd after shell `cd` | partial |
+ | Live cwd via shell integration/OSC7 | beta |
+-| Clipboard image paste to agents | unverified |
++| Remote clipboard image paste to agents | beta |
+ | CJK IME composition anchoring | partial |
+ | Kitty graphics rendering | unverified |
+ | Host cursor rendering | partial |
+ 
+ Herdr can launch panes in the right directory and can create the initial workspace from the directory where you started Herdr. PowerShell directory changes after startup are different: the process field Herdr can inspect does not reliably track later logical `cd` changes. Use Herdr integrations or prompt shell integration for live cwd reporting.
+ 
+-Windows Terminal may support image paste paths for specific agents, but Herdr's own clipboard-image reader is not wired on Windows yet. Treat `alt+v` image paste as unverified until the Windows clipboard bridge is implemented and tested. Remote clipboard image bridging is separate and remains tied to Unix/macOS `herdr --remote`.
++For `herdr --remote`, Herdr reads registered PNG plus uncompressed 16-, 24-, and 32-bit CF_DIB/CF_DIBV5 clipboard images on Windows and sends a bounded PNG to the remote server. The default shortcut is `ctrl+v`; set `keys.remote_image_paste` to change or disable it. A pasted or dropped absolute image path is transported in the same way. This bridge is remote-only and falls back to normal input when no supported clipboard image is available.
+ 
+ Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
+ 
+@@ -87,27 +88,26 @@ Herdr's pane text copy works on Windows beta. Drag-select text inside a pane to
+ 
+ For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is bracketed so shells and agent prompts receive it as one paste instead of submitting each line separately. Hold `shift` and right-click to use the outer terminal paste action instead of sending the click through Herdr.
+ 
++During a remote attach, use `ctrl+v` for clipboard images. Herdr converts the supported registered PNG or uncompressed DIB data to a bounded PNG and pastes a staged remote path into the focused pane.
++
+ ## Not supported on Windows beta
+ 
+ | Capability | Status |
+ | --- | --- |
+ | Direct terminal attach | unsupported |
+-| `herdr --remote` from the Windows binary | unsupported |
+ | Live server handoff | unsupported |
+ | Unix file-descriptor handoff | unsupported |
+ | Unix foreground process groups | unsupported |
+-| Remote clipboard image bridge | unsupported |
+ | Prefix input-source switching | unsupported |
+ | Signed binary / SmartScreen avoidance | unsupported |
+ 
+-For remote work from Windows, SSH into the server and run `herdr` there:
++The native Windows binary can act as a thin client for Linux and macOS Herdr hosts and for this fork's pre-provisioned Windows sandbox host:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-That mode runs Herdr on the remote host. Native Windows `herdr --remote` is not part of the beta.
++Herdr does not use its control-socket connection reuse path on Windows. It still adds fallback SSH keepalives, but password authentication may prompt for more than one setup command. Key or Windows `ssh-agent` authentication is recommended. The Windows-only preview feed does not publish Unix binaries, so install a matching Herdr on Linux/macOS first or point `HERDR_REMOTE_BINARY` to a matching local binary. Windows hosts must already contain the sandbox Herdr executable and do not support live handoff.
+ 
+ Windows updates run through the Windows installer and update the versioned install junction. Restart running Herdr sessions after updating. Live handoff is Unix-only.
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/configuration.mdx b/docs/next/website/src/content/docs/zh-cn/configuration.mdx
 index 237c53b484abb82ecc21052ffc9e68291fbbf86b..15cfd738d0d39a302937d9875762c67cd385f635 100644
@@ -167,7 +299,7 @@ index 237c53b484abb82ecc21052ffc9e68291fbbf86b..15cfd738d0d39a302937d9875762c67c
  ## 按键绑定
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
-index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed8968ab636d 100644
+index a81a8469e54aba464c1daa01638ac651f31c7e73..beedd5d2d517a460f7ded2f3fc5e65d128e7a2b4 100644
 --- a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -178,10 +310,10 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed89
 +远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查常见的直接安装、Homebrew、mise 和 Nix profile 路径。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
  
 -Windows 原生的 `herdr --remote` 不在 Windows 测试版范围内。在 Windows 上请 SSH 到服务器并在那里运行 `herdr`。
-+原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr\herdr.exe` 沙盒布局的预配置 Windows 主机适配器;自动安装和实时交接仍仅支持 Unix 主机。
++原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。仅限 Windows 的预览源不发布 Unix 二进制文件,因此请先在主机上安装匹配的 Herdr,或通过 `HERDR_REMOTE_BINARY` 指定匹配的本地二进制文件。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr\herdr.exe` 沙盒布局的预配置 Windows 主机适配器;实时交接仍仅支持 Unix 主机。
  
 -默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的桥接配置,而使用普通 `ssh`。
-+从 Windows 远程连接时,默认的 `ctrl+v` 远程图像按键会通过现有客户端协议发送已注册的 PNG 或 DIB 剪贴板图像,将其暂存在远程主机并粘贴远程路径。拖放或粘贴一个 PNG、JPEG、GIF、WebP 或 BMP 的绝对路径也会使用同样的受限传输。剪贴板中没有受支持的图像时,文本输入会原样发送。可通过 `keys.remote_image_paste` 更改或禁用此快捷键。
++从 Windows 远程连接时,默认的 `ctrl+v` 远程图像按键会通过现有客户端协议发送已注册的 PNG 或未压缩的 16/24/32 位 CF_DIB/CF_DIBV5 剪贴板图像,将其暂存在远程主机并粘贴远程路径。拖放或粘贴一个 PNG、JPEG、GIF、WebP 或 BMP 的绝对路径也会使用同样的受限传输。剪贴板中没有受支持的图像时,文本输入会原样发送。可通过 `keys.remote_image_paste` 更改或禁用此快捷键。
 +
 +默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行远程设置和桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。Unix 客户端还会添加一个私有的单次连接 control socket 来复用连接。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的配置或 control socket,而使用普通 `ssh`。
 +
@@ -189,8 +321,70 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed89
  
  默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
  
+diff --git a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
+index 781a6f969416873de8ca131f6fdb35600fe7615a..0c9e4e0e48f6bb3456da8fedc8842e1b928bdb7d 100644
+--- a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
+@@ -36,6 +36,7 @@ Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默
+ | 插件 | 预览 |
+ | 窗格屏幕历史 | 测试版 |
+ | 嵌套启动覆盖 | 测试版 |
++| 连接 Linux/macOS 和预配置 Windows 主机的 `herdr --remote` | 测试版 |
+ 
+ Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器。它对 Codex、Claude 等智能体很有用,但和 Unix 前台进程组检测不是一回事。
+ 
+@@ -47,14 +48,14 @@ Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接
+ | --- | --- |
+ | shell `cd` 之后的实时 cwd | 部分支持 |
+ | 通过 shell 集成/OSC7 的实时 cwd | 测试版 |
+-| 向智能体粘贴剪贴板图像 | 未验证 |
++| 向智能体远程粘贴剪贴板图像 | 测试版 |
+ | CJK 输入法候选窗口定位 | 部分支持 |
+ | Kitty graphics 渲染 | 未验证 |
+ | 主机光标渲染 | 部分支持 |
+ 
+ Herdr 可以在正确的目录中启动窗格,并能从你启动 Herdr 的目录创建初始工作区。启动之后 PowerShell 的目录变化则不同: Herdr 能检查的进程字段无法可靠跟踪后续的逻辑 `cd` 变化。实时 cwd 上报请使用 Herdr 集成或提示符 shell 集成。
+ 
+-Windows Terminal 可能为特定智能体支持图像粘贴路径,但 Herdr 自己的剪贴板图像读取器尚未在 Windows 上接通。在 Windows 剪贴板桥实现并测试之前,请把 `alt+v` 图像粘贴视为未验证。远程剪贴板图像桥是独立功能,仍然绑定于 Unix/macOS 的 `herdr --remote`。
++使用 `herdr --remote` 时,Herdr 会在 Windows 上读取已注册的 PNG 以及未压缩的 16/24/32 位 CF_DIB/CF_DIBV5 剪贴板图像,并向远程服务器发送受大小限制的 PNG。默认快捷键是 `ctrl+v`;可通过 `keys.remote_image_paste` 更改或禁用。粘贴或拖放的绝对图像路径也会以同样方式传输。此桥接仅用于远程连接;没有受支持的剪贴板图像时会回退到普通输入。
+ 
+ Kitty graphics 仍是实验性功能,尚未宣称支持 Windows。除非你专门在 Windows Terminal 中测试图像渲染,否则保持 `experimental.kitty_graphics = false`。
+ 
+@@ -87,27 +88,26 @@ Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选
+ 
+ 文本粘贴请在 Windows Terminal 中使用 `ctrl+shift+v`。多行文本粘贴是带括号的 (bracketed),因此 shell 和智能体提示符会把它作为一次粘贴接收,而不是逐行提交。按住 `shift` 再右键,可以使用外层终端的粘贴操作,而不把点击发给 Herdr。
+ 
++远程连接期间,使用 `ctrl+v` 粘贴剪贴板图像。Herdr 会把受支持的已注册 PNG 或未压缩 DIB 数据转换为受大小限制的 PNG,并将暂存的远程路径粘贴到当前聚焦的窗格中。
++
+ ## Windows 测试版不支持
+ 
+ | 能力 | 状态 |
+ | --- | --- |
+ | 直接终端附加 | 不支持 |
+-| Windows 二进制的 `herdr --remote` | 不支持 |
+ | 实时服务器交接 | 不支持 |
+ | Unix 文件描述符交接 | 不支持 |
+ | Unix 前台进程组 | 不支持 |
+-| 远程剪贴板图像桥 | 不支持 |
+ | 前缀输入法切换 | 不支持 |
+ | 签名二进制 / 规避 SmartScreen | 不支持 |
+ 
+-在 Windows 上进行远程工作,请 SSH 到服务器并在那里运行 `herdr`:
++原生 Windows 二进制可以作为 Linux 和 macOS Herdr 主机以及本分支预配置 Windows 沙盒主机的瘦客户端:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-这种模式下 Herdr 运行在远程主机上。Windows 原生的 `herdr --remote` 不在测试版范围内。
++Herdr 在 Windows 上不使用控制套接字连接复用。它仍会添加备用 SSH keepalive,但密码认证可能会为多个设置命令重复提示。建议使用密钥或 Windows `ssh-agent` 认证。仅限 Windows 的预览源不发布 Unix 二进制文件,因此请先在 Linux/macOS 主机上安装匹配的 Herdr,或通过 `HERDR_REMOTE_BINARY` 指定匹配的本地二进制文件。Windows 主机必须已经包含沙盒 Herdr 可执行文件,并且不支持实时交接。
+ 
+ Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
+ 
 diff --git a/src/client/mod.rs b/src/client/mod.rs
-index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f3010835b9369a0 100644
+index 19061844f5b006e24c75b3430b414d4b0703bc32..da6144202d2b317c2e131a811f626ac5c66e20a0 100644
 --- a/src/client/mod.rs
 +++ b/src/client/mod.rs
 @@ -37,7 +37,6 @@ use tracing::{debug, info, warn};
@@ -201,7 +395,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  use crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD;
  use crate::protocol::{
      self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
-@@ -60,7 +59,6 @@ struct ClientLoopConfig {
+@@ -67,7 +66,6 @@ struct ClientLoopConfig {
      host_cursor: crate::config::HostCursorModeConfig,
      kitty_graphics_enabled: bool,
      mouse_capture_active: bool,
@@ -209,7 +403,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
  }
  
-@@ -84,7 +82,6 @@ struct ClientState {
+@@ -91,7 +89,6 @@ struct ClientState {
      #[cfg(unix)]
      mouse_scroll_lines: usize,
      /// Local-client shortcut that sends a clipboard image to a remote Herdr session.
@@ -217,7 +411,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
      /// Whether outer focus gain should force a full host-terminal redraw.
      redraw_on_focus_gained: bool,
-@@ -751,7 +748,6 @@ fn requested_render_encoding() -> RenderEncoding {
+@@ -769,7 +766,6 @@ fn requested_render_encoding() -> RenderEncoding {
      }
  }
  
@@ -225,7 +419,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  fn is_remote_client_process() -> bool {
      std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
  }
-@@ -764,11 +760,9 @@ fn is_remote_client_process() -> bool {
+@@ -782,11 +778,9 @@ fn is_remote_client_process() -> bool {
  /// window; on a high-latency link that easily exceeds 5s, so it gets a far
  /// larger budget. See issue #753.
  const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -237,7 +431,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      if is_remote_client_process() {
          return REMOTE_HANDSHAKE_READ_TIMEOUT;
      }
-@@ -789,22 +783,6 @@ fn requested_keybindings() -> ClientKeybindings {
+@@ -807,22 +801,6 @@ fn requested_keybindings() -> ClientKeybindings {
      }
  }
  
@@ -260,7 +454,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  #[cfg(not(windows))]
  fn set_handshake_recv_timeout(
      stream: &LocalStream,
-@@ -816,6 +794,31 @@ fn set_handshake_recv_timeout(
+@@ -834,6 +812,31 @@ fn set_handshake_recv_timeout(
          .map_err(ClientError::ConnectionFailed)
  }
  
@@ -292,7 +486,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  /// Performs the client→server handshake.
  ///
  /// Sends Hello with the terminal size and protocol version, reads the Welcome
-@@ -852,17 +855,7 @@ fn do_handshake(
+@@ -870,17 +873,7 @@ fn do_handshake(
          .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
  
      // Read Welcome.
@@ -311,7 +505,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  
      match welcome {
          ServerMessage::Welcome {
-@@ -1210,7 +1203,6 @@ fn run_client_with_mode(
+@@ -1228,7 +1221,6 @@ fn run_client_with_mode(
      let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
      let host_cursor = loaded_config.config.ui.host_cursor;
      let direct_attach_requested = attach_request.is_some();
@@ -319,7 +513,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
      let kitty_graphics_enabled =
          loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
-@@ -1221,7 +1213,6 @@ fn run_client_with_mode(
+@@ -1239,7 +1231,6 @@ fn run_client_with_mode(
          host_cursor,
          kitty_graphics_enabled,
          mouse_capture_active: mouse_capture,
@@ -327,7 +521,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
          remote_image_paste_key,
      };
  
-@@ -1377,7 +1368,6 @@ async fn run_client_loop(
+@@ -1398,7 +1389,6 @@ async fn run_client_loop(
      #[cfg(windows)]
      let _ = config.mouse_scroll_lines;
      let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
@@ -335,7 +529,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      let is_remote_client = is_remote_client_process();
  
      let mut state = ClientState {
-@@ -1390,7 +1380,6 @@ async fn run_client_loop(
+@@ -1411,7 +1401,6 @@ async fn run_client_loop(
          attach_escape,
          #[cfg(unix)]
          mouse_scroll_lines: config.mouse_scroll_lines,
@@ -343,7 +537,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
          remote_image_paste_key: config.remote_image_paste_key,
          redraw_on_focus_gained: config.redraw_on_focus_gained,
          repaint_pending: false,
-@@ -1532,26 +1521,7 @@ async fn run_client_loop(
+@@ -1554,26 +1543,7 @@ async fn run_client_loop(
                      state.remote_image_paste_key,
                  ) {
                      if let Some(image) = crate::platform::read_clipboard_image() {
@@ -371,7 +565,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
                          continue;
                      }
                      info!(
-@@ -1559,18 +1529,7 @@ async fn run_client_loop(
+@@ -1581,18 +1551,7 @@ async fn run_client_loop(
                      );
                  }
                  if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
@@ -391,7 +585,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
                      continue;
                  }
                  let msg = ClientMessage::Input { data };
-@@ -1604,6 +1563,23 @@ async fn run_client_loop(
+@@ -1626,6 +1585,23 @@ async fn run_client_loop(
                  if events.is_empty() {
                      continue;
                  }
@@ -415,7 +609,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
                  let raw_events = events
                      .iter()
                      .map(crate::protocol::ClientInputEvent::to_raw_input_event)
-@@ -1679,7 +1655,6 @@ async fn run_client_loop(
+@@ -1701,7 +1677,6 @@ async fn run_client_loop(
                          &mut state.sound_config,
                          &mut state.redraw_on_focus_gained,
                          &mut state.draw_host_cursor,
@@ -423,7 +617,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
                          &mut state.remote_image_paste_key,
                      );
                  }
-@@ -1798,11 +1773,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
+@@ -1820,11 +1795,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
      protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
  }
  
@@ -463,7 +657,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  fn client_remote_image_paste_key(
      config: &crate::config::Config,
  ) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-@@ -1823,7 +1825,7 @@ fn reload_local_client_config(
+@@ -1845,7 +1847,7 @@ fn reload_local_client_config(
      sound_config: &mut crate::config::SoundConfig,
      redraw_on_focus_gained: &mut bool,
      draw_host_cursor: &mut bool,
@@ -472,7 +666,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
          crossterm::event::KeyCode,
          crossterm::event::KeyModifiers,
      )>,
-@@ -1833,15 +1835,11 @@ fn reload_local_client_config(
+@@ -1855,15 +1857,11 @@ fn reload_local_client_config(
              for diagnostic in loaded.config.ui.sound.diagnostics() {
                  warn!(diagnostic = %diagnostic, "local sound config diagnostic");
              }
@@ -489,7 +683,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
              debug!("reloaded local client config");
          }
          Err(diagnostics) => {
-@@ -1939,12 +1937,67 @@ fn should_bridge_clipboard_image_paste(
+@@ -1961,12 +1959,67 @@ fn should_bridge_clipboard_image_paste(
      )
  }
  
@@ -557,7 +751,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      let metadata = std::fs::metadata(&path).ok()?;
      if !metadata.is_file() {
          return None;
-@@ -1972,18 +2025,26 @@ fn image_path_from_terminal_drop(
+@@ -1994,18 +2047,26 @@ fn image_path_from_terminal_drop(
      data: &[u8],
      is_remote_client: bool,
  ) -> Option<(std::path::PathBuf, &'static str)> {
@@ -590,7 +784,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      let path = std::path::PathBuf::from(text);
      if !path.is_absolute() {
          return None;
-@@ -2000,7 +2061,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+@@ -2022,7 +2083,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
      data.strip_prefix(START)?.strip_suffix(END)
  }
  
@@ -598,7 +792,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  fn strip_matching_path_quotes(text: &str) -> &str {
      if text.len() < 2 {
          return text;
-@@ -2031,7 +2091,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
+@@ -2053,7 +2113,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
      unescaped
  }
  
@@ -606,7 +800,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
  fn recognized_image_extension(extension: &str) -> Option<&'static str> {
      if extension.eq_ignore_ascii_case("png") {
          Some("png")
-@@ -2316,6 +2375,14 @@ mod tests {
+@@ -2338,6 +2397,14 @@ mod tests {
          }
      }
  
@@ -621,7 +815,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      #[test]
      fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
          assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
-@@ -2405,12 +2472,46 @@ mod tests {
+@@ -2427,12 +2494,46 @@ mod tests {
          ));
      }
  
@@ -670,7 +864,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      impl TempImageFile {
          fn new(extension: &str, bytes: &[u8]) -> Self {
              Self::with_name_fragment("test", extension, bytes)
-@@ -2430,7 +2531,6 @@ mod tests {
+@@ -2452,7 +2553,6 @@ mod tests {
          }
      }
  
@@ -678,7 +872,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      impl Drop for TempImageFile {
          fn drop(&mut self) {
              let _ = std::fs::remove_file(&self.path);
-@@ -2489,6 +2589,19 @@ mod tests {
+@@ -2511,6 +2611,19 @@ mod tests {
          .is_none());
      }
  
@@ -698,7 +892,7 @@ index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f301083
      #[test]
      fn graphics_bytes_are_written_inside_synchronized_blit_with_saved_cursor() {
          let mut output = Vec::new();
-@@ -2933,14 +3046,12 @@ mod tests {
+@@ -2973,14 +3086,12 @@ mod tests {
          let mut sound_config = crate::config::SoundConfig::default();
          let mut redraw_on_focus_gained = true;
          let mut draw_host_cursor = false;
@@ -978,13 +1172,17 @@ index 097a8493b7b44f37ef9e0cc56084233d8f8b485d..8f4494d1149c3cd5d19163336b2d2150
  mod cli;
  mod client;
 diff --git a/src/platform/fallback.rs b/src/platform/fallback.rs
-index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf3862216ee9d36 100644
+index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..459a4806dff2090f8367aefe0f30b834995bed5b 100644
 --- a/src/platform/fallback.rs
 +++ b/src/platform/fallback.rs
-@@ -3,6 +3,60 @@ use std::process::Command;
+@@ -1,8 +1,71 @@
+ use std::path::PathBuf;
++#[cfg(not(unix))]
+ use std::process::Command;
  
  use super::{ClipboardImage, ForegroundJob, Signal};
  
++#[cfg(not(unix))]
 +pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
 +    super::RemoteSshConfigPaths {
 +        user_config: std::env::var_os("HOME")
@@ -995,6 +1193,7 @@ index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf38622
 +    }
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
 +    for attempt in 0..100 {
 +        let dir = std::env::temp_dir().join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
@@ -1010,6 +1209,7 @@ index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf38622
 +    ))
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn create_remote_ssh_config_file(
 +    path: &std::path::Path,
 +) -> std::io::Result<std::fs::File> {
@@ -1019,22 +1219,27 @@ index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf38622
 +        .open(path)
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn remote_private_temp_base() -> PathBuf {
 +    std::env::temp_dir()
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn clipboard_image_staging_dir() -> PathBuf {
 +    std::env::temp_dir().join(format!("herdr-clipboard-images-{}", std::process::id()))
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn remote_bridge_endpoint_path(readable_name: &str, _short_name: &str) -> PathBuf {
 +    std::env::temp_dir().join(readable_name)
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn remote_reattach_program(program: &str) -> String {
 +    program.to_string()
 +}
 +
++#[cfg(not(unix))]
 +pub(crate) fn remote_reattach_arg(value: &str) -> String {
 +    value.to_string()
 +}
@@ -1042,8 +1247,29 @@ index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf38622
  /// Unsupported platform stub.
  pub fn raise_server_nofile_limit() {}
  
+@@ -40,13 +103,20 @@ pub(crate) fn scrollback_editor_argv(_path: &std::path::Path) -> std::io::Result
+ }
+ 
+ /// Unsupported platform stub.
++#[cfg(not(unix))]
+ pub fn detach_server_daemon_command(_command: &mut Command) {}
+ 
+ /// Unsupported platform stub.
++#[cfg(not(unix))]
+ pub fn current_process_is_detached_server_daemon() -> bool {
+     false
+ }
+ 
++#[cfg(not(unix))]
++pub(crate) fn ensure_private_directory(path: &std::path::Path) -> std::io::Result<()> {
++    std::fs::create_dir_all(path)
++}
++
+ pub(crate) fn available_pane_shell(_child_pid: u32) -> Option<String> {
+     None
+ }
 diff --git a/src/platform/linux.rs b/src/platform/linux.rs
-index 6557b41bf4f796069b488ac556ff2527373c2fa3..69001bea8ac48b34eacb1485274bf1bdd4d356f4 100644
+index 6557b41bf4f796069b488ac556ff2527373c2fa3..61c73e3a70783170e044cbf4d8c1838b69745fa9 100644
 --- a/src/platform/linux.rs
 +++ b/src/platform/linux.rs
 @@ -11,6 +11,12 @@ use super::{
@@ -1052,15 +1278,15 @@ index 6557b41bf4f796069b488ac556ff2527373c2fa3..69001bea8ac48b34eacb1485274bf1bd
  
 +pub(crate) use super::unix_common::{
 +    clipboard_image_staging_dir, create_remote_ssh_config_dir, create_remote_ssh_config_file,
-+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_arg,
-+    remote_reattach_program, remote_ssh_config_paths,
++    ensure_private_directory, remote_bridge_endpoint_path, remote_private_temp_base,
++    remote_reattach_arg, remote_reattach_program, remote_ssh_config_paths,
 +};
 +
  const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
  
  #[derive(Debug, Clone, PartialEq, Eq)]
 diff --git a/src/platform/macos.rs b/src/platform/macos.rs
-index e9c89ede2b9c040eba570573ea77b25d8689e0c0..ba5b45b378ed45dcf22256ea7e49787f6e37e758 100644
+index e9c89ede2b9c040eba570573ea77b25d8689e0c0..cec4da66b968e0fa65c287ffb4ae631ac8adc7ed 100644
 --- a/src/platform/macos.rs
 +++ b/src/platform/macos.rs
 @@ -12,6 +12,12 @@ use super::{
@@ -1069,18 +1295,18 @@ index e9c89ede2b9c040eba570573ea77b25d8689e0c0..ba5b45b378ed45dcf22256ea7e49787f
  
 +pub(crate) use super::unix_common::{
 +    clipboard_image_staging_dir, create_remote_ssh_config_dir, create_remote_ssh_config_file,
-+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_arg,
-+    remote_reattach_program, remote_ssh_config_paths,
++    ensure_private_directory, remote_bridge_endpoint_path, remote_private_temp_base,
++    remote_reattach_arg, remote_reattach_program, remote_ssh_config_paths,
 +};
 +
  const PROC_PGRP_ONLY: u32 = 2;
  const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
  
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
-index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..8a9a2ee0a0de4814baea3213192b69b8c2123f95 100644
+index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..5c2f26f163205dea1f36a34e8296dc3ba64975e6 100644
 --- a/src/platform/mod.rs
 +++ b/src/platform/mod.rs
-@@ -53,12 +53,19 @@ pub(crate) struct PlatformCapabilities {
+@@ -53,13 +53,20 @@ pub(crate) struct PlatformCapabilities {
  pub(crate) const fn capabilities() -> PlatformCapabilities {
      PlatformCapabilities {
          live_handoff: cfg!(unix),
@@ -1091,6 +1317,7 @@ index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..8a9a2ee0a0de4814baea3213192b69b8
      }
  }
  
+-#[cfg(any(target_os = "linux", target_os = "macos"))]
 +#[derive(Debug, Clone)]
 +pub(crate) struct RemoteSshConfigPaths {
 +    pub(crate) user_config: Option<std::path::PathBuf>,
@@ -1098,9 +1325,19 @@ index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..8a9a2ee0a0de4814baea3213192b69b8
 +    pub(crate) multiplexing: bool,
 +}
 +
- #[cfg(any(target_os = "linux", target_os = "macos"))]
++#[cfg(unix)]
  pub fn detach_server_daemon_command(command: &mut std::process::Command) {
      use std::os::unix::process::CommandExt;
+ 
+@@ -73,7 +80,7 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
+     }
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[cfg(unix)]
+ pub fn current_process_is_detached_server_daemon() -> bool {
+     unsafe { libc::getsid(0) == libc::getpid() }
+ }
 @@ -125,14 +132,11 @@ pub struct ClipboardCommand {
  }
  
@@ -1134,17 +1371,55 @@ index ba92ca637c918634c5d71951c4e6fcfc4d6ad941..8a9a2ee0a0de4814baea3213192b69b8
  #[cfg(target_os = "macos")]
  mod macos;
  #[cfg(target_os = "macos")]
+@@ -198,6 +204,13 @@ mod fallback;
+ #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+ pub use fallback::*;
+ 
++#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
++pub(crate) use unix_common::{
++    clipboard_image_staging_dir, create_remote_ssh_config_dir, create_remote_ssh_config_file,
++    ensure_private_directory, remote_bridge_endpoint_path, remote_private_temp_base,
++    remote_reattach_arg, remote_reattach_program, remote_ssh_config_paths,
++};
++
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ pub(crate) fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) -> Option<String> {
+     if job.process_group_id != child_pid
 diff --git a/src/platform/unix_common.rs b/src/platform/unix_common.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256c4b9d659
+index 0000000000000000000000000000000000000000..f2383b9f57d0673ec1a614f699faac2c65727ec7
 --- /dev/null
 +++ b/src/platform/unix_common.rs
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,164 @@
 +use std::path::PathBuf;
 +
++pub(crate) fn ensure_private_directory(path: &std::path::Path) -> std::io::Result<()> {
++    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
++
++    std::fs::create_dir_all(path)?;
++    let directory = std::fs::OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
++        .open(path)?;
++    if directory.metadata()?.uid() != effective_user_id() {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            format!(
++                "private Herdr directory is not owned by this user: {}",
++                path.display()
++            ),
++        ));
++    }
++    directory.set_permissions(std::fs::Permissions::from_mode(0o700))
++}
++
++fn effective_user_id() -> libc::uid_t {
++    // SAFETY: geteuid has no preconditions and does not dereference pointers.
++    unsafe { libc::geteuid() }
++}
++
 +pub(crate) fn clipboard_image_staging_dir() -> PathBuf {
-+    let user_id = unsafe { libc::geteuid() };
-+    std::env::temp_dir().join(format!("herdr-clipboard-images-{user_id}"))
++    std::env::temp_dir().join(format!("herdr-clipboard-images-{}", effective_user_id()))
 +}
 +
 +pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
@@ -1215,7 +1490,7 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +}
 +
 +pub(crate) fn remote_private_temp_base() -> PathBuf {
-+    std::env::temp_dir()
++    std::env::temp_dir().join(format!("herdr-remote-{}", effective_user_id()))
 +}
 +
 +pub(crate) fn remote_bridge_endpoint_path(readable_name: &str, short_name: &str) -> PathBuf {
@@ -1257,6 +1532,23 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +    use super::*;
 +
 +    #[test]
++    fn private_directory_is_owned_and_restricted() {
++        use std::os::unix::fs::PermissionsExt as _;
++
++        let path = std::env::temp_dir().join(format!(
++            "herdr-private-directory-test-{}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_dir_all(&path);
++
++        ensure_private_directory(&path).expect("create private directory");
++
++        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
++        assert_eq!(mode & 0o777, 0o700);
++        let _ = std::fs::remove_dir_all(path);
++    }
++
++    #[test]
 +    fn remote_ssh_config_dir_reports_overlong_control_socket_path() {
 +        let err = create_remote_ssh_config_dir(&"x".repeat(200)).unwrap_err();
 +        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -1264,11 +1556,27 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +    }
 +}
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584c6279ed1 100644
+index 6923d1fac9e0aedecc5af285c42774ed35eaa0e5..83fbc528de28a0a2532e5be9231fe4f370da143c 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -17,7 +17,10 @@ use windows_sys::{
+@@ -2,7 +2,7 @@ use std::{
+     collections::{HashMap, HashSet, VecDeque},
+     ffi::c_void,
+     mem::{size_of, MaybeUninit},
+-    path::PathBuf,
++    path::{Path, PathBuf},
+     ptr::{copy_nonoverlapping, null_mut},
+     sync::{Arc, Mutex, OnceLock},
+     time::{Duration, Instant},
+@@ -15,9 +15,17 @@ use windows_sys::{
+             CloseHandle, GlobalFree, LocalFree, HANDLE, HWND, INVALID_HANDLE_VALUE, NTSTATUS,
+             STATUS_SUCCESS, UNICODE_STRING,
          },
++        Security::{
++            Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT},
++            GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION,
++            PROTECTED_DACL_SECURITY_INFORMATION,
++        },
          System::{
              Console::GetConsoleWindow,
 -            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
@@ -1279,7 +1587,7 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
              Diagnostics::{
                  Debug::ReadProcessMemory,
                  ToolHelp::{
-@@ -27,8 +30,8 @@ use windows_sys::{
+@@ -27,8 +35,8 @@ use windows_sys::{
              },
              JobObjects::IsProcessInJob,
              LibraryLoader::GetModuleHandleW,
@@ -1290,7 +1598,7 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
              Threading::{
                  GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
                  CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-@@ -62,6 +65,8 @@ use windows_sys::{
+@@ -62,6 +70,8 @@ use windows_sys::{
  
  use super::{ClipboardImage, ForegroundJob, Signal};
  
@@ -1299,13 +1607,25 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
  
-@@ -97,6 +102,92 @@ const NOTIFICATION_TIMER_ID: usize = 1;
- const NOTIFICATION_SETUP_TIMEOUT: Duration = Duration::from_secs(2);
+@@ -96,6 +106,173 @@ const NOTIFICATION_ICON_ID: u32 = 1;
+ const NOTIFICATION_TIMER_ID: usize = 1;
  const NOTIFICATION_QUEUE_TIMEOUT_MILLIS: u32 = 60_000;
  const NOTIFICATION_VISIBLE_TIMEOUT_MILLIS: u32 = 30_000;
 +static PNG_CLIPBOARD_FORMAT: OnceLock<u32> = OnceLock::new();
 +
 +pub(crate) fn private_local_socket_security_descriptor(
++) -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
++    private_security_descriptor("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
++}
++
++fn private_directory_security_descriptor(
++) -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
++    // Inherit the restricted ACL onto child directories and files.
++    private_security_descriptor("D:P(A;OICI;GA;;;OW)(A;OICI;GA;;;SY)")
++}
++
++fn private_security_descriptor(
++    sddl: &str,
 +) -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
 +    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
 +    use widestring::U16CString;
@@ -1313,9 +1633,72 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
 +    // A protected DACL keeps terminal and API traffic available only to the
 +    // object owner and Local System. The latter permits supervised services
 +    // without exposing the pipe to other interactive users.
-+    let descriptor = U16CString::from_str("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
++    let descriptor = U16CString::from_str(sddl)
 +        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 +    SecurityDescriptor::deserialize(&descriptor)
++}
++
++pub(crate) fn ensure_private_directory(path: &Path) -> std::io::Result<()> {
++    use interprocess::os::windows::security_descriptor::AsSecurityDescriptor as _;
++    use std::os::windows::{ffi::OsStrExt as _, fs::MetadataExt as _};
++
++    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
++
++    std::fs::create_dir_all(path)?;
++    let metadata = std::fs::symlink_metadata(path)?;
++    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
++        return Err(std::io::Error::other(format!(
++            "private Herdr path is not a regular directory: {}",
++            path.display()
++        )));
++    }
++
++    let descriptor = private_directory_security_descriptor()?;
++    let mut dacl_present = 0;
++    let mut dacl_defaulted = 0;
++    let mut dacl = null_mut();
++    // SAFETY: `descriptor` owns a valid security descriptor for this call and
++    // all output pointers refer to initialized local variables.
++    if unsafe {
++        GetSecurityDescriptorDacl(
++            descriptor.as_sd().cast_mut(),
++            &mut dacl_present,
++            &mut dacl,
++            &mut dacl_defaulted,
++        )
++    } == 0
++        || dacl_present == 0
++        || dacl.is_null()
++    {
++        return Err(std::io::Error::last_os_error());
++    }
++
++    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
++    if wide.contains(&0) {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            format!("private Herdr path contains NUL: {}", path.display()),
++        ));
++    }
++    wide.push(0);
++    // SAFETY: `wide` is a live NUL-terminated path and `dacl` remains owned by
++    // `descriptor` for the duration of this synchronous call.
++    let status = unsafe {
++        SetNamedSecurityInfoW(
++            wide.as_mut_ptr(),
++            SE_FILE_OBJECT,
++            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
++            null_mut(),
++            null_mut(),
++            dacl,
++            null_mut(),
++        )
++    };
++    if status == 0 {
++        Ok(())
++    } else {
++        Err(std::io::Error::from_raw_os_error(status as i32))
++    }
 +}
 +
 +pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
@@ -1332,11 +1715,17 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
 +
 +pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
 +    let base = remote_private_temp_base();
-+    std::fs::create_dir_all(&base)?;
++    ensure_private_directory(&base)?;
 +    for attempt in 0..100 {
 +        let dir = base.join(format!("ssh-{}-{attempt}", std::process::id()));
 +        match std::fs::create_dir(&dir) {
-+            Ok(()) => return Ok(dir),
++            Ok(()) => match ensure_private_directory(&dir) {
++                Ok(()) => return Ok(dir),
++                Err(err) => {
++                    let _ = std::fs::remove_dir(&dir);
++                    return Err(err);
++                }
++            },
 +            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
 +            Err(err) => return Err(err),
 +        }
@@ -1392,7 +1781,7 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
  
  pub(crate) fn should_draw_host_cursor_by_default() -> bool {
      true
-@@ -701,9 +792,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
+@@ -678,9 +855,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
      }
  }
  
@@ -1463,7 +1852,7 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
      None
  }
  
-@@ -959,6 +1109,8 @@ struct ProcessHandle(HANDLE);
+@@ -937,6 +1173,8 @@ struct ProcessHandle(HANDLE);
  
  struct ClipboardGuard;
  
@@ -1472,7 +1861,7 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
  impl Drop for ClipboardGuard {
      fn drop(&mut self) {
          unsafe {
-@@ -967,6 +1119,14 @@ impl Drop for ClipboardGuard {
+@@ -945,6 +1183,14 @@ impl Drop for ClipboardGuard {
      }
  }
  
@@ -1487,6 +1876,98 @@ index a810fa17886c827e9387a389ab9138c0464c183f..4d2538ab9bef1a13a49c2829f89c7584
  impl ProcessHandle {
      fn open(pid: u32, access: u32) -> Option<Self> {
          if pid == 0 {
+@@ -1360,6 +1606,14 @@ mod tests {
+     use windows_sys::Win32::System::Console::{
+         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+     };
++    use windows_sys::Win32::{
++        Foundation::LocalFree,
++        Security::{
++            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
++            GetAce, GetSecurityDescriptorControl, ACE_HEADER, CONTAINER_INHERIT_ACE,
++            DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, SE_DACL_PROTECTED,
++        },
++    };
+ 
+     #[test]
+     fn windows_notification_text_is_null_terminated_and_unicode_safe() {
+@@ -1377,6 +1631,76 @@ mod tests {
+         assert_eq!(super::notification_event(lparam), super::NIN_BALLOONSHOW);
+     }
+ 
++    #[test]
++    fn windows_private_directory_has_a_protected_inheritable_dacl() {
++        use std::os::windows::ffi::OsStrExt as _;
++
++        let path = std::env::temp_dir().join(format!(
++            "herdr-private-directory-test-{}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_dir_all(&path);
++        super::ensure_private_directory(&path).expect("create private directory");
++
++        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
++        wide.push(0);
++        let mut descriptor = std::ptr::null_mut();
++        let mut dacl = std::ptr::null_mut();
++        // SAFETY: `wide` is NUL-terminated and the descriptor output pointer is
++        // valid. Windows allocates the returned descriptor with LocalAlloc.
++        let status = unsafe {
++            GetNamedSecurityInfoW(
++                wide.as_ptr(),
++                SE_FILE_OBJECT,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                &mut dacl,
++                std::ptr::null_mut(),
++                &mut descriptor,
++            )
++        };
++        assert_eq!(status, 0);
++        assert!(!descriptor.is_null());
++        assert!(!dacl.is_null());
++
++        let mut control = 0;
++        let mut revision = 0;
++        // SAFETY: `descriptor` is the valid descriptor returned above and both
++        // output pointers refer to initialized local variables.
++        assert_ne!(
++            unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
++            0
++        );
++        assert_ne!(control & SE_DACL_PROTECTED, 0);
++
++        let inherit_flags = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
++        let mut ace_flags = Vec::new();
++        // SAFETY: `dacl` belongs to the valid descriptor above. GetAce returns
++        // pointers into that descriptor, which remains live for this loop.
++        for index in 0..unsafe { (*dacl).AceCount } {
++            let mut ace = std::ptr::null_mut();
++            assert_ne!(unsafe { GetAce(dacl, index.into(), &mut ace) }, 0);
++            assert!(!ace.is_null());
++            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
++            ace_flags.push(header.AceFlags);
++        }
++        assert!(
++            ace_flags
++                .iter()
++                .filter(|flags| **flags & inherit_flags == inherit_flags)
++                .count()
++                >= 2,
++            "owner and System ACEs must inherit to containers and objects: {ace_flags:?}"
++        );
++
++        // SAFETY: ownership of the LocalAlloc descriptor is returned exactly once.
++        unsafe {
++            LocalFree(descriptor);
++        }
++        let _ = std::fs::remove_dir_all(path);
++    }
++
+     #[test]
+     fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
+         use base64::Engine as _;
 diff --git a/src/platform/windows/clipboard_image.rs b/src/platform/windows/clipboard_image.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c767327da5355
@@ -2192,10 +2673,10 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
      if is_remote_auth_error(err) {
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d1f2e07a5
+index 0000000000000000000000000000000000000000..59b9b11aab7b3d3f4d5ceb3679d7de4d7ab0850b
 --- /dev/null
 +++ b/src/remote/attach.rs
-@@ -0,0 +1,3622 @@
+@@ -0,0 +1,3648 @@
 +//! Remote thin-client launcher over SSH command stdio.
 +
 +use std::collections::BTreeMap;
@@ -2855,6 +3336,12 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +    }
 +}
 +
++impl Drop for InstallSource {
++    fn drop(&mut self) {
++        self.cleanup();
++    }
++}
++
 +fn prepare_remote_herdr(
 +    ssh: &RemoteSsh,
 +    platform: RemotePlatform,
@@ -2902,7 +3389,7 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +    )?;
 +    let source = resolve_install_source(&remote_herdr.platform, override_binary)?;
 +    let install_result = ssh.install_herdr(&remote_herdr, &source.path);
-+    source.cleanup();
++    drop(source);
 +    install_result?;
 +
 +    if !remote_binary_matches(ssh, &remote_herdr)? {
@@ -3679,19 +4166,18 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +
 +    let dir = private_download_dir(&asset_key)?;
 +    let path = dir.join("herdr.tmp");
++    let source = InstallSource::temporary(path, dir);
 +    let status = crate::noninteractive_process::curl_command()
 +        .args(["-sfL", "--max-time", "120", "-o"])
-+        .arg(&path)
++        .arg(&source.path)
 +        .arg(&asset.url)
 +        .status()
 +        .map_err(|err| io::Error::new(err.kind(), format!("download failed: {err}")))?;
 +    if !status.success() {
-+        let _ = fs::remove_dir_all(&dir);
 +        return Err(io::Error::other("download failed"));
 +    }
 +    if let Some(expected) = &asset.sha256 {
-+        if let Err(err) = crate::checksum::verify_sha256(&path, expected) {
-+            let _ = fs::remove_dir_all(&dir);
++        if let Err(err) = crate::checksum::verify_sha256(&source.path, expected) {
 +            return Err(io::Error::new(
 +                err.kind(),
 +                format!("downloaded remote asset checksum verification failed: {err}"),
@@ -3699,7 +4185,7 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +        }
 +    }
 +
-+    Ok(InstallSource::temporary(path, dir))
++    Ok(source)
 +}
 +
 +fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
@@ -3762,7 +4248,7 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +        }
 +        return assets.get(asset_key).map(remote_asset_info).ok_or_else(|| {
 +            io::Error::other(format!(
-+                "no {asset_key} binary in the preview manifest for build {build_id}"
++                "no {asset_key} binary in the preview manifest for build {build_id}; set {REMOTE_BINARY_ENV_VAR} to a matching local binary or install Herdr on the remote host manually"
 +            ))
 +        });
 +    }
@@ -3790,14 +4276,14 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +        .map(remote_asset_info)
 +        .ok_or_else(|| {
 +            io::Error::other(format!(
-+                "no {asset_key} binary in the release manifest for herdr {current_version}"
++                "no {asset_key} binary in the release manifest for herdr {current_version}; set {REMOTE_BINARY_ENV_VAR} to a matching local binary or install Herdr on the remote host manually"
 +            ))
 +        })
 +}
 +
 +fn private_download_dir(asset_key: &str) -> io::Result<PathBuf> {
 +    let base = crate::platform::remote_private_temp_base();
-+    fs::create_dir_all(&base)?;
++    crate::platform::ensure_private_directory(&base)?;
 +    for attempt in 0..100 {
 +        let dir = base.join(format!(
 +            "herdr-remote-{}-{}-{attempt}",
@@ -3805,7 +4291,13 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +            asset_key
 +        ));
 +        match fs::create_dir(&dir) {
-+            Ok(()) => return Ok(dir),
++            Ok(()) => match crate::platform::ensure_private_directory(&dir) {
++                Ok(()) => return Ok(dir),
++                Err(err) => {
++                    let _ = fs::remove_dir(&dir);
++                    return Err(err);
++                }
++            },
 +            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
 +            Err(err) => return Err(err),
 +        }
@@ -3961,14 +4453,14 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +                            thread_ssh_options.as_ref(),
 +                            &thread_stop,
 +                        ) {
-+                            eprintln!("herdr: remote bridge failed: {err}");
++                            tracing::warn!(err = %err, "remote bridge failed");
 +                        }
 +                    }
 +                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
 +                        thread::sleep(BRIDGE_ACCEPT_POLL);
 +                    }
 +                    Err(err) => {
-+                        eprintln!("herdr: remote bridge listener failed: {err}");
++                        tracing::warn!(err = %err, "remote bridge listener failed");
 +                        break;
 +                    }
 +                }
@@ -4263,7 +4755,6 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +                Err(err) => return Err(err),
 +            }
 +        }
-+        stream.flush()?;
 +        total += read as u64;
 +    }
 +}
@@ -5711,6 +6202,22 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +            .expect("override source");
 +        assert_eq!(source.path, PathBuf::from("/tmp/herdr-aarch64"));
 +        assert!(source.temporary_dir.is_none());
++    }
++
++    #[test]
++    fn temporary_install_source_cleans_up_on_drop() {
++        let dir = std::env::temp_dir().join(format!(
++            "herdr-install-source-drop-test-{}",
++            std::process::id()
++        ));
++        let _ = fs::remove_dir_all(&dir);
++        fs::create_dir(&dir).unwrap();
++        let path = dir.join("herdr.tmp");
++        fs::write(&path, b"fixture").unwrap();
++
++        drop(InstallSource::temporary(path, dir.clone()));
++
++        assert!(!dir.exists());
 +    }
 +
 +    #[cfg(unix)]
@@ -8938,10 +9445,10 @@ index 6fe927c1cc0f99c4f2fbfd99bf9b758f4acfd15e..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b91aa08809f068240272ef916a50e54b05306e60
+index 0000000000000000000000000000000000000000..f820755dc0bbe3b8395ebaf1b907a0a89ab3266e
 --- /dev/null
 +++ b/src/remote/windows.rs
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,140 @@
 +//! Windows remote-host side of the SSH stdio bridge.
 +
 +use std::io;
@@ -8967,14 +9474,29 @@ index 0000000000000000000000000000000000000000..b91aa08809f068240272ef916a50e54b
 +        )
 +    })?;
 +    let (mut socket_to_stdout, mut stdin_to_socket) = stream.split();
-+    let mut stdout = io::stdout().lock();
++    let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(2);
 +
-+    let _upload = thread::spawn(move || {
-+        let mut stdin = io::stdin();
-+        let _ = copy_flush(&mut stdin, &mut stdin_to_socket);
-+    });
++    let upload_finished = finished_tx.clone();
++    let _upload = thread::Builder::new()
++        .name("herdr-remote-bridge-upload".into())
++        .spawn(move || {
++            let mut stdin = io::stdin();
++            let result = io::copy(&mut stdin, &mut stdin_to_socket).map(|_| ());
++            let _ = upload_finished.send(result);
++        })?;
++    let _download = thread::Builder::new()
++        .name("herdr-remote-bridge-download".into())
++        .spawn(move || {
++            let mut stdout = io::stdout().lock();
++            let result = copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ());
++            let _ = finished_tx.send(result);
++        })?;
 +
-+    copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
++    // Named pipes have no half-close. Returning ends this command-only process
++    // and closes both directions when either SSH stdin or server output ends.
++    finished_rx
++        .recv()
++        .map_err(|_| io::Error::other("remote bridge workers exited without a result"))?
 +}
 +
 +fn ensure_remote_server_running() -> io::Result<()> {
@@ -9165,7 +9687,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
          let deadline = std::time::Instant::now() + Duration::from_secs(1);
          loop {
 diff --git a/src/server/clipboard_image.rs b/src/server/clipboard_image.rs
-index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df729328f8e8 100644
+index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..3ca5f4f76694e26a578adda06c39b1ae35453464 100644
 --- a/src/server/clipboard_image.rs
 +++ b/src/server/clipboard_image.rs
 @@ -72,11 +72,7 @@ fn sanitize_extension(extension: &str) -> &'static str {
@@ -9187,20 +9709,22 @@ index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df72
  #[cfg(windows)]
 -fn restrict_file_options(_options: &mut fs::OpenOptions) {}
 +fn restrict_file_options(_options: &mut fs::OpenOptions) {
-+    // Files inherit the user-profile ACL from `config::state_dir()`.
++    // Files inherit the protected owner/System DACL from the staging directory.
 +}
  
  #[cfg(unix)]
  fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
-@@ -112,6 +110,8 @@ fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
- 
- #[cfg(windows)]
- fn restrict_dir_permissions(_dir: &Path) -> io::Result<()> {
-+    // The Windows staging directory lives below the per-user state directory
-+    // rather than the shared system temp directory and inherits its ACL.
-     Ok(())
+@@ -111,8 +109,8 @@ fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
  }
  
+ #[cfg(windows)]
+-fn restrict_dir_permissions(_dir: &Path) -> io::Result<()> {
+-    Ok(())
++fn restrict_dir_permissions(dir: &Path) -> io::Result<()> {
++    crate::platform::ensure_private_directory(dir)
+ }
+ 
+ fn cleanup_stale(dir: &Path) {
 diff --git a/src/update.rs b/src/update.rs
 index 3455841d2a90da519499f0c41daf5557c899cb95..2120fb3c9cad9fd20cfae7dee307298120d7fca6 100644
 --- a/src/update.rs
@@ -9219,3 +9743,4 @@ index 3455841d2a90da519499f0c41daf5557c899cb95..2120fb3c9cad9fd20cfae7dee3072981
          return true;
 -- 
 2.55.0.windows.3
+
