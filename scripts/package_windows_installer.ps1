@@ -320,6 +320,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\herdr-installer.nsi"
 $helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
+$skillSource = Join-Path $projectRoot "SKILL.md"
 $StageDir = (Resolve-Path -LiteralPath $StageDir).Path
 $LauncherExe = (Resolve-Path -LiteralPath $LauncherExe).Path
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
@@ -331,10 +332,20 @@ if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
 if (Test-Path -LiteralPath $OutputPath) {
     throw "Refusing to overwrite an existing installer output: $OutputPath"
 }
-foreach ($required in @($packager, $installerScript, $helperScript)) {
+foreach ($required in @($packager, $installerScript, $helperScript, $skillSource)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required installer source does not exist: $required"
     }
+    if ((Get-Item -LiteralPath $required -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing a reparse-point installer source: $required"
+    }
+}
+$skillText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillSource))
+$skillValidationText = $skillText.Replace("`r`n", "`n")
+if ($skillValidationText.Contains("`r") -or
+    -not $skillValidationText.StartsWith("---`n", [StringComparison]::Ordinal) -or
+    $skillValidationText -cnotmatch '(?m)^name: herdr$') {
+    throw "Root SKILL.md is not the canonical Herdr agent skill."
 }
 Assert-X64Pe -Path $LauncherExe
 $payloadExe = Join-Path $StageDir "herdr.exe"
@@ -390,6 +401,7 @@ try {
         "/DHERDR_STAGE_DIR=$StageDir",
         "/DHERDR_LAUNCHER_EXE=$LauncherExe",
         "/DHERDR_HELPER_PS1=$helperScript",
+        "/DHERDR_SKILL_MD=$skillSource",
         "/DHERDR_BUILD_ID=$BuildId",
         "/DHERDR_DISPLAY_VERSION=$DisplayVersion",
         "/DHERDR_NUMERIC_VERSION=$NumericVersion",

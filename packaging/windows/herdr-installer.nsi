@@ -7,6 +7,9 @@
 !ifndef HERDR_HELPER_PS1
   !error "HERDR_HELPER_PS1 is required"
 !endif
+!ifndef HERDR_SKILL_MD
+  !error "HERDR_SKILL_MD is required"
+!endif
 !ifndef HERDR_BUILD_ID
   !error "HERDR_BUILD_ID is required"
 !endif
@@ -122,6 +125,11 @@ FunctionEnd
 Function FailInstall
   Exch $0
   DetailPrint "$0"
+  !ifdef HERDR_TEST_UNINSTALL_FAULT
+    FileOpen $1 "$TEMP\herdr-install-failure-${HERDR_TEST_UNINSTALL_FAULT}.txt" w
+    FileWrite $1 "$0"
+    FileClose $1
+  !endif
   IfSilent install_failure_silent
   MessageBox MB_OK|MB_ICONSTOP "$0"
 install_failure_silent:
@@ -295,13 +303,16 @@ Section "Herdr" SEC_HERDR
   SetOutPath "$PLUGINSDIR"
   File /oname=herdr-launcher.exe "${HERDR_LAUNCHER_EXE}"
   File /oname=herdr-installer-helper.ps1 "${HERDR_HELPER_PS1}"
+  SetOutPath "$PLUGINSDIR\skill"
+  File /oname=SKILL.md "${HERDR_SKILL_MD}"
+  SetOutPath "$PLUGINSDIR"
   WriteUninstaller "$PLUGINSDIR\uninstall.exe"
   IfErrors 0 installer_inputs_ready
   Push "Herdr setup could not unpack its embedded, pre-verified files."
   Call FailInstall
 
 installer_inputs_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\herdr-installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\herdr-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\herdr-installer-helper.ps1" -BuildId "${HERDR_BUILD_ID}" -DisplayVersion "${HERDR_DISPLAY_VERSION}" -NumericVersion "${HERDR_NUMERIC_VERSION}" -ParentPid "$ParentPid"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\herdr-installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\herdr-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\herdr-installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -BuildId "${HERDR_BUILD_ID}" -DisplayVersion "${HERDR_DISPLAY_VERSION}" -NumericVersion "${HERDR_NUMERIC_VERSION}" -ParentPid "$ParentPid"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete

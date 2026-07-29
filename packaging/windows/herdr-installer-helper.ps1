@@ -8,6 +8,7 @@ param(
     [string]$LauncherPath,
     [string]$UninstallerPath,
     [string]$HelperSourcePath,
+    [string]$SkillSourcePath,
     [string]$BuildId,
     [string]$DisplayVersion,
     [string]$NumericVersion,
@@ -25,12 +26,287 @@ $script:PointerPattern = '\Aherdr-pointer-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{1
 $script:RuntimePattern = '\Aherdr-runtime-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{12})\n\z'
 $script:LeasePattern = '^([0-9a-f]{12}\.[0-9a-f]{12})\.lease$'
 $script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
-$script:InstallManifestHeader = "herdr-install-manifest-v1"
+$script:InstallManifestHeader = "herdr-install-manifest-v2"
+$script:AgentSkillTransactionMarkerName = ".herdr-agent-skill-transaction"
+$script:AgentSkillTransactionMarkerNewName = ".herdr-agent-skill-transaction.new"
+$script:AgentSkillPhaseStaged = ".herdr-agent-skill-staged"
+$script:AgentSkillPhasePublishing = ".herdr-agent-skill-publishing"
+$script:AgentSkillPhasePublished = ".herdr-agent-skill-published"
+$script:AgentSkillPhaseCompleting = ".herdr-agent-skill-completing"
+$script:AgentSkillPhaseRollingBack = ".herdr-agent-skill-rolling-back"
+$script:AgentSkillRemovalOwnerName = ".herdr-agent-skill-removal"
+$script:AgentSkillRemovalCandidateName = "owned-SKILL.md"
+$script:AgentSkillRemovalCleanupPattern = '^\.herdr-installer-skill-cleanup\.([0-9a-f]{32})$'
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 $script:UninstallMarkerText = "herdr-uninstall-v1`n"
 $script:TransactionMarkerName = ".herdr-installer-transaction"
 $script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
+
+if ($null -eq ("Herdr.Installer.PinnedSkillFile" -as [type])) {
+    $pinnedSkillFileSource = @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace Herdr.Installer
+{
+    public sealed class PinnedSkillFile : IDisposable
+    {
+        private const uint DeleteAccess = 0x00010000;
+        private const uint FileReadData = 0x00000001;
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+        private const int FileRenameInfo = 3;
+        private const int FileDispositionInfo = 4;
+
+        private SafeFileHandle handle;
+        private bool disposed;
+
+        private PinnedSkillFile(SafeFileHandle handle, string sha256Hex)
+        {
+            this.handle = handle;
+            this.Sha256Hex = sha256Hex;
+        }
+
+        public string Sha256Hex { get; private set; }
+
+        public static PinnedSkillFile Open(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("A skill file path is required.", "path");
+            }
+            SafeFileHandle file = CreateFileW(
+                Path.GetFullPath(path),
+                DeleteAccess | FileReadData | FileReadAttributes,
+                0,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint,
+                IntPtr.Zero);
+            if (file.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                file.Dispose();
+                throw new Win32Exception(error, "Could not pin detached SKILL.md");
+            }
+            try
+            {
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(file, out information))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect detached SKILL.md");
+                }
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    throw new InvalidDataException("Detached SKILL.md is a reparse point.");
+                }
+                if ((information.FileAttributes & FileAttributeDirectory) != 0)
+                {
+                    throw new InvalidDataException("Detached SKILL.md is a directory.");
+                }
+                if (information.NumberOfLinks != 1)
+                {
+                    throw new InvalidDataException("Detached SKILL.md must have exactly one hard link.");
+                }
+                string hash = HashSameHandle(file);
+                PinnedSkillFile result = new PinnedSkillFile(file, hash);
+                file = null;
+                return result;
+            }
+            finally
+            {
+                if (file != null)
+                {
+                    file.Dispose();
+                }
+            }
+        }
+
+        public void DeleteByHandle()
+        {
+            if (this.disposed)
+            {
+                throw new ObjectDisposedException("PinnedSkillFile");
+            }
+            FILE_DISPOSITION_INFO disposition = new FILE_DISPOSITION_INFO();
+            disposition.DeleteFile = 1;
+            if (!SetFileInformationByHandle(
+                    this.handle,
+                    FileDispositionInfo,
+                    ref disposition,
+                    1))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not delete pinned detached SKILL.md");
+            }
+            this.handle.Dispose();
+            this.handle = null;
+            this.disposed = true;
+            GC.SuppressFinalize(this);
+        }
+
+        public void MoveTo(string destinationPath)
+        {
+            if (this.disposed)
+            {
+                throw new ObjectDisposedException("PinnedSkillFile");
+            }
+            string destination = Path.GetFullPath(destinationPath);
+            byte[] name = Encoding.Unicode.GetBytes(destination);
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            int lengthOffset = rootOffset + IntPtr.Size;
+            int nameOffset = lengthOffset + 4;
+            int bufferSize = checked(nameOffset + name.Length + 2);
+            IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+            try
+            {
+                for (int index = 0; index < bufferSize; index++)
+                {
+                    Marshal.WriteByte(buffer, index, 0);
+                }
+                Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
+                Marshal.WriteInt32(buffer, lengthOffset, name.Length);
+                Marshal.Copy(name, 0, new IntPtr(buffer.ToInt64() + nameOffset), name.Length);
+                if (!SetFileInformationByHandleBuffer(
+                        this.handle,
+                        FileRenameInfo,
+                        buffer,
+                        bufferSize))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not isolate pinned detached SKILL.md");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (this.handle != null)
+            {
+                this.handle.Dispose();
+                this.handle = null;
+            }
+            this.disposed = true;
+            GC.SuppressFinalize(this);
+        }
+
+        private static string HashSameHandle(SafeFileHandle file)
+        {
+            bool addedReference = false;
+            file.DangerousAddRef(ref addedReference);
+            try
+            {
+#pragma warning disable 618
+                using (FileStream stream = new FileStream(
+                    file.DangerousGetHandle(),
+                    FileAccess.Read,
+                    false,
+                    65536,
+                    false))
+#pragma warning restore 618
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    byte[] hash = sha256.ComputeHash(stream);
+                    char[] text = new char[hash.Length * 2];
+                    const string alphabet = "0123456789abcdef";
+                    for (int index = 0; index < hash.Length; index++)
+                    {
+                        text[index * 2] = alphabet[hash[index] >> 4];
+                        text[index * 2 + 1] = alphabet[hash[index] & 0x0f];
+                    }
+                    return new string(text);
+                }
+            }
+            finally
+            {
+                if (addedReference)
+                {
+                    file.DangerousRelease();
+                }
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME
+        {
+            public uint LowDateTime;
+            public uint HighDateTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BY_HANDLE_FILE_INFORMATION
+        {
+            public uint FileAttributes;
+            public FILETIME CreationTime;
+            public FILETIME LastAccessTime;
+            public FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct FILE_DISPOSITION_INFO
+        {
+            public byte DeleteFile;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out BY_HANDLE_FILE_INFORMATION information);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int informationClass,
+            ref FILE_DISPOSITION_INFO information,
+            int bufferSize);
+
+        [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandleBuffer(
+            SafeFileHandle file,
+            int informationClass,
+            IntPtr information,
+            int bufferSize);
+    }
+}
+'@
+    if ($PSVersionTable.PSEdition -ceq "Desktop") {
+        Add-Type `
+            -TypeDefinition $pinnedSkillFileSource `
+            -ReferencedAssemblies @([ComponentModel.Win32Exception].Assembly.Location)
+    } else {
+        Add-Type -TypeDefinition $pinnedSkillFileSource
+    }
+}
 
 function Assert-HerdrBuildId {
     param([Parameter(Mandatory = $true)][string]$Value)
@@ -193,6 +469,43 @@ function Get-HerdrSha256 {
     }
 }
 
+function Get-HerdrAgentSkillSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $text = (Read-HerdrStrictUtf8 -Path $Path).Replace("`r`n", "`n")
+    if ($text.Contains("`r")) {
+        throw "Herdr agent skill contains an unsupported carriage return: $Path"
+    }
+    $lines = @($text -split "`n")
+    if ($lines.Count -lt 4 -or $lines[0] -cne "---") {
+        throw "Herdr agent skill lacks YAML frontmatter: $Path"
+    }
+    $frontmatterEnd = -1
+    for ($index = 1; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -ceq "---") {
+            $frontmatterEnd = $index
+            break
+        }
+    }
+    if ($frontmatterEnd -lt 2 -or @($lines[1..($frontmatterEnd - 1)] | Where-Object { $_ -ceq "name: herdr" }).Count -ne 1) {
+        throw "Herdr agent skill frontmatter must contain exactly one 'name: herdr' entry: $Path"
+    }
+    return Get-HerdrSha256 -Path $Path
+}
+
+function Get-HerdrAgentSkillsRoot {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        throw "USERPROFILE is not set; the cross-agent skill directory cannot be located."
+    }
+    $userProfile = Get-HerdrFullPath -Path $env:USERPROFILE
+    Assert-HerdrRegularDirectory -Path $userProfile
+    $skillsRoot = [IO.Path]::GetFullPath((Join-Path $userProfile ".agents\skills")).TrimEnd('\')
+    if (-not (Test-HerdrPathWithin -Path $skillsRoot -Root $userProfile)) {
+        throw "Cross-agent skill directory escaped USERPROFILE: $skillsRoot"
+    }
+    return $skillsRoot
+}
+
 function Get-HerdrTextSha256 {
     param([Parameter(Mandatory = $true)][string]$Text)
 
@@ -283,6 +596,979 @@ function Copy-HerdrDurableTree {
     foreach ($file in @($entries | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName)) {
         $relative = Get-HerdrRelativePath -Root $SourceRoot -Path $file.FullName
         Copy-HerdrDurableFile -Source $file.FullName -Destination (Join-Path $DestinationRoot $relative)
+    }
+}
+
+function Initialize-HerdrAgentSkillsRoot {
+    param([Parameter(Mandatory = $true)][string]$AgentSkillsRoot)
+
+    $AgentSkillsRoot = Get-HerdrFullPath -Path $AgentSkillsRoot
+    $parent = Split-Path -Parent $AgentSkillsRoot
+    $grandparent = Split-Path -Parent $parent
+    Assert-HerdrRegularDirectory -Path $grandparent
+    if (Test-Path -LiteralPath $AgentSkillsRoot) {
+        Assert-HerdrRegularDirectory -Path $parent
+        Assert-HerdrRegularDirectory -Path $AgentSkillsRoot
+        return $AgentSkillsRoot
+    }
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent | Out-Null
+    }
+    Assert-HerdrRegularDirectory -Path $parent
+    New-Item -ItemType Directory -Path $AgentSkillsRoot | Out-Null
+    Assert-HerdrRegularDirectory -Path $AgentSkillsRoot
+    return $AgentSkillsRoot
+}
+
+function Assert-HerdrReplaceableAgentSkillPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to replace a reparse-point Herdr agent skill: $Path"
+    }
+    if ($item.PSIsContainer) {
+        [void](Get-HerdrSafeTreeEntries -Root $Path)
+    } else {
+        Assert-HerdrRegularFile -Path $Path
+    }
+}
+
+function Remove-HerdrReplaceableAgentSkillPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    Assert-HerdrReplaceableAgentSkillPath -Path $Path
+    $item = Get-Item -LiteralPath $Path -Force
+    if (-not $item.PSIsContainer) {
+        Remove-Item -LiteralPath $Path -Force
+        return
+    }
+    $entries = @(Get-HerdrSafeTreeEntries -Root $Path)
+    foreach ($file in @($entries | Where-Object { -not $_.PSIsContainer })) {
+        Remove-Item -LiteralPath $file.FullName -Force
+    }
+    foreach ($directory in @($entries | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)) {
+        Remove-Item -LiteralPath $directory.FullName -Force
+    }
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Move-HerdrAgentSkillPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    Assert-HerdrReplaceableAgentSkillPath -Path $Source
+    $item = Get-Item -LiteralPath $Source -Force
+    if ($item.PSIsContainer) {
+        [IO.Directory]::Move($Source, $Destination)
+    } else {
+        [IO.File]::Move($Source, $Destination)
+    }
+}
+
+function Get-HerdrAgentSkillLockPath {
+    param([Parameter(Mandatory = $true)][string]$AgentSkillsRoot)
+
+    $root = Get-HerdrFullPath -Path $AgentSkillsRoot
+    return Join-Path (Split-Path -Parent $root) ".herdr-agent-skill-installer.lock"
+}
+
+function Assert-HerdrAgentSkillTransactionPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot
+    )
+
+    $root = Get-HerdrFullPath -Path $AgentSkillsRoot
+    $fullPath = Get-HerdrFullPath -Path $Path
+    $name = Split-Path -Leaf $fullPath
+    if (-not ([IO.Path]::GetFullPath((Split-Path -Parent $fullPath)).Equals($root, [StringComparison]::OrdinalIgnoreCase)) -or
+        $name -cnotmatch '^\.herdr-installer-skill\.[0-9a-f]{32}$') {
+        throw "Refusing an unrecognized Herdr agent skill transaction: $Path"
+    }
+    Assert-HerdrRegularDirectory -Path $fullPath
+    return $fullPath
+}
+
+function Get-HerdrAgentSkillTransactionMarkerText {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DisplayVersion,
+        [Parameter(Mandatory = $true)][string]$SkillSha256,
+        [Parameter(Mandatory = $true)][bool]$HadPrevious
+    )
+
+    if ($DisplayVersion -cnotmatch '^[0-9A-Za-z._+\-]+$' -or $SkillSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Invalid Herdr agent skill transaction identity."
+    }
+    $rootHash = Get-HerdrTextSha256 -Text ((Get-HerdrFullPath -Path $InstallRoot).ToLowerInvariant())
+    $hadPreviousValue = if ($HadPrevious) { "1" } else { "0" }
+    return "herdr-agent-skill-transaction-v2`ninstall_root_sha256=$rootHash`ndisplay_version=$DisplayVersion`nskill_sha256=$SkillSha256`nhad_previous=$hadPreviousValue`n"
+}
+
+function Test-HerdrExactAgentSkill {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    try {
+        Assert-HerdrRegularDirectory -Path $Path
+        $entries = @(Get-ChildItem -LiteralPath $Path -Force)
+        return $entries.Count -eq 1 -and $entries[0].Name -ceq "SKILL.md" -and -not $entries[0].PSIsContainer -and
+            -not ($entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            (Get-HerdrSha256 -Path (Join-Path $Path "SKILL.md")) -ceq $ExpectedSha256
+    } catch {
+        return $false
+    }
+}
+
+function Assert-HerdrAgentSkillTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $Path = Assert-HerdrAgentSkillTransactionPath -Path $Path -AgentSkillsRoot $AgentSkillsRoot
+    $entries = @(Get-ChildItem -LiteralPath $Path -Force)
+    foreach ($entry in $entries) {
+        if ($entry.Name -cnotin @(
+            $script:AgentSkillTransactionMarkerName,
+            $script:AgentSkillPhaseStaged,
+            $script:AgentSkillPhasePublishing,
+            $script:AgentSkillPhasePublished,
+            $script:AgentSkillPhaseCompleting,
+            $script:AgentSkillPhaseRollingBack,
+            $script:AgentSkillRemovalOwnerName,
+            $script:AgentSkillRemovalCandidateName,
+            "new",
+            "previous",
+            "discard",
+            "discard-new"
+        )) {
+            throw "Herdr agent skill transaction contains unexpected content: $($entry.FullName)"
+        }
+    }
+    $marker = Join-Path $Path $script:AgentSkillTransactionMarkerName
+    $text = Read-HerdrStrictUtf8 -Path $marker
+    $match = [regex]::Match(
+        $text,
+        '\Aherdr-agent-skill-transaction-v2\ninstall_root_sha256=([0-9a-f]{64})\ndisplay_version=([0-9A-Za-z._+\-]+)\nskill_sha256=([0-9a-f]{64})\nhad_previous=([01])\n\z'
+    )
+    $expectedRootHash = Get-HerdrTextSha256 -Text ((Get-HerdrFullPath -Path $InstallRoot).ToLowerInvariant())
+    if (-not $match.Success -or $match.Groups[1].Value -cne $expectedRootHash) {
+        throw "Herdr agent skill transaction marker is invalid: $Path"
+    }
+    $phaseNames = @(
+        $script:AgentSkillPhaseStaged,
+        $script:AgentSkillPhasePublishing,
+        $script:AgentSkillPhasePublished,
+        $script:AgentSkillPhaseCompleting,
+        $script:AgentSkillPhaseRollingBack
+    )
+    $phases = @($entries | Where-Object { $phaseNames -ccontains $_.Name })
+    if ($phases.Count -ne 1 -or $phases[0].PSIsContainer -or
+        ($phases[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -or $phases[0].Length -ne 0) {
+        throw "Herdr agent skill transaction has an invalid phase owner: $Path"
+    }
+    $removalOwners = @($entries | Where-Object { $_.Name -ceq $script:AgentSkillRemovalOwnerName })
+    if ($removalOwners.Count -gt 1 -or
+        ($removalOwners.Count -eq 1 -and ($removalOwners[0].PSIsContainer -or
+            ($removalOwners[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $removalOwners[0].Length -ne 0))) {
+        throw "Herdr agent skill transaction has an invalid removal owner: $Path"
+    }
+    $operation = if ($removalOwners.Count -eq 1) { "Removal" } else { "Install" }
+    $new = Join-Path $Path "new"
+    if ($operation -ceq "Removal") {
+        if ($phases[0].Name -cnotin @(
+            $script:AgentSkillPhaseStaged,
+            $script:AgentSkillPhasePublishing,
+            $script:AgentSkillPhaseCompleting
+        )) {
+            throw "Herdr agent skill removal transaction has an invalid phase: $Path"
+        }
+        foreach ($forbidden in @("new", "discard", "discard-new")) {
+            if (Test-Path -LiteralPath (Join-Path $Path $forbidden)) {
+                throw "Herdr agent skill removal transaction contains install-only content: $Path"
+            }
+        }
+        $previous = Join-Path $Path "previous"
+        if (Test-Path -LiteralPath $previous) {
+            Assert-HerdrRegularDirectory -Path $previous
+        }
+        $candidate = Join-Path $Path $script:AgentSkillRemovalCandidateName
+        if (Test-Path -LiteralPath $candidate) {
+            Assert-HerdrRegularFile -Path $candidate
+        }
+    } else {
+        if (Test-Path -LiteralPath (Join-Path $Path $script:AgentSkillRemovalCandidateName)) {
+            throw "Herdr agent skill install transaction contains a removal candidate: $Path"
+        }
+        if (Test-Path -LiteralPath $new) {
+            if ($phases[0].Name -ceq $script:AgentSkillPhaseRollingBack) {
+                Assert-HerdrRegularDirectory -Path $new
+                $partialEntries = @(Get-ChildItem -LiteralPath $new -Force)
+                if ($partialEntries.Count -gt 1 -or
+                    ($partialEntries.Count -eq 1 -and ($partialEntries[0].Name -cne "SKILL.md" -or
+                        $partialEntries[0].PSIsContainer -or
+                        ($partialEntries[0].Attributes -band [IO.FileAttributes]::ReparsePoint)))) {
+                    throw "Herdr agent skill rollback has invalid staged cleanup content: $Path"
+                }
+            } elseif (-not (Test-HerdrExactAgentSkill -Path $new -ExpectedSha256 $match.Groups[3].Value)) {
+                throw "Herdr agent skill transaction has an invalid staged skill: $Path"
+            }
+        }
+        foreach ($name in @("previous", "discard", "discard-new")) {
+            $owned = Join-Path $Path $name
+            if (Test-Path -LiteralPath $owned) {
+                Assert-HerdrReplaceableAgentSkillPath -Path $owned
+            }
+        }
+    }
+    return [PSCustomObject]@{
+        Path = $Path
+        DisplayVersion = $match.Groups[2].Value
+        SkillSha256 = $match.Groups[3].Value
+        HadPrevious = $match.Groups[4].Value -ceq "1"
+        Phase = $phases[0].Name
+        Operation = $operation
+    }
+}
+
+function Test-HerdrAgentSkillTransactionCommitted {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $manifestPath = Join-Path $InstallRoot "state\install.manifest"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return $false
+    }
+    $manifest = Read-HerdrInstallManifestFile -Path $manifestPath
+    return $manifest.DisplayVersion -ceq $Transaction.DisplayVersion -and
+        $manifest.SkillSha256 -ceq $Transaction.SkillSha256
+}
+
+function Complete-HerdrAgentSkillTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [switch]$RequireExactTarget
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction -Path $Path -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Install") {
+        throw "A Herdr agent skill removal transaction cannot use install completion."
+    }
+    if ($transaction.Phase -cne $script:AgentSkillPhasePublished -and
+        $transaction.Phase -cne $script:AgentSkillPhaseCompleting) {
+        throw "Cannot complete a Herdr agent skill transaction before publication."
+    }
+    if (-not (Test-HerdrAgentSkillTransactionCommitted -Transaction $transaction -InstallRoot $InstallRoot)) {
+        throw "Cannot complete a Herdr agent skill transaction before its install manifest commit."
+    }
+    if ($RequireExactTarget -and
+        -not (Test-HerdrExactAgentSkill -Path (Join-Path $AgentSkillsRoot "herdr") -ExpectedSha256 $transaction.SkillSha256)) {
+        throw "Published Herdr agent skill changed before installer completion."
+    }
+    $phase = Join-Path $Path $transaction.Phase
+    if ($transaction.Phase -ceq $script:AgentSkillPhasePublished) {
+        $completing = Join-Path $Path $script:AgentSkillPhaseCompleting
+        [IO.File]::Move($phase, $completing)
+        $phase = $completing
+    }
+    foreach ($name in @("new", "previous", "discard", "discard-new")) {
+        $owned = Join-Path $Path $name
+        if (Test-Path -LiteralPath $owned) {
+            Remove-HerdrReplaceableAgentSkillPath -Path $owned
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $Path $script:AgentSkillTransactionMarkerName) -Force
+    Remove-Item -LiteralPath $phase -Force
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Undo-HerdrAgentSkillTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction -Path $Path -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Install") {
+        throw "A Herdr agent skill removal transaction cannot use install rollback."
+    }
+    if ($transaction.Phase -ceq $script:AgentSkillPhaseCompleting) {
+        throw "A completing Herdr agent skill transaction cannot be rolled back."
+    }
+    $originalPhase = $transaction.Phase
+    $phase = Join-Path $Path $originalPhase
+    if ($originalPhase -cne $script:AgentSkillPhaseRollingBack) {
+        $rollingBack = Join-Path $Path $script:AgentSkillPhaseRollingBack
+        [IO.File]::Move($phase, $rollingBack)
+        $phase = $rollingBack
+    }
+    $target = Join-Path $AgentSkillsRoot "herdr"
+    $new = Join-Path $Path "new"
+    $previous = Join-Path $Path "previous"
+    $discard = Join-Path $Path "discard"
+    $discardNew = Join-Path $Path "discard-new"
+
+    if ($originalPhase -cne $script:AgentSkillPhaseStaged) {
+        if ($transaction.HadPrevious) {
+            if (Test-Path -LiteralPath $previous) {
+                if (Test-Path -LiteralPath $target) {
+                    if (-not (Test-HerdrExactAgentSkill -Path $target -ExpectedSha256 $transaction.SkillSha256)) {
+                        throw "A changed Herdr agent skill blocks safe transaction rollback."
+                    }
+                    Move-HerdrAgentSkillPath -Source $target -Destination $discard
+                }
+                Move-HerdrAgentSkillPath -Source $previous -Destination $target
+            } elseif ((Test-Path -LiteralPath $discard) -and -not (Test-Path -LiteralPath $target)) {
+                throw "Herdr agent skill rollback lost its previous target."
+            }
+        } elseif (-not (Test-Path -LiteralPath $new) -and (Test-Path -LiteralPath $target)) {
+            if (-not (Test-HerdrExactAgentSkill -Path $target -ExpectedSha256 $transaction.SkillSha256)) {
+                throw "A changed Herdr agent skill blocks safe transaction rollback."
+            }
+            Move-HerdrAgentSkillPath -Source $target -Destination $discard
+        }
+    }
+    if (Test-Path -LiteralPath $new) {
+        if (Test-Path -LiteralPath $discardNew) {
+            throw "Herdr agent skill rollback has duplicate staged cleanup owners."
+        }
+        Move-HerdrAgentSkillPath -Source $new -Destination $discardNew
+    }
+    foreach ($owned in @($previous, $discard, $discardNew)) {
+        if (Test-Path -LiteralPath $owned) {
+            Remove-HerdrReplaceableAgentSkillPath -Path $owned
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $Path $script:AgentSkillTransactionMarkerName) -Force
+    Remove-Item -LiteralPath $phase -Force
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Restore-HerdrAgentSkillTransactions {
+    param(
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $cleanupPaths = @(Get-ChildItem -LiteralPath $AgentSkillsRoot -Force | Where-Object {
+        $_.Name -cmatch $script:AgentSkillRemovalCleanupPattern
+    })
+    foreach ($cleanupPath in $cleanupPaths) {
+        Remove-HerdrAgentSkillRemovalCleanupPath `
+            -Path $cleanupPath.FullName `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+    }
+    $transactions = @(Get-ChildItem -LiteralPath $AgentSkillsRoot -Force -Directory | Where-Object {
+        $_.Name -cmatch '^\.herdr-installer-skill\.[0-9a-f]{32}$'
+    })
+    if ($transactions.Count -gt 1) {
+        throw "Multiple interrupted Herdr agent skill transactions require manual review."
+    }
+    foreach ($transactionPath in $transactions) {
+        $transactionFullPath = Assert-HerdrAgentSkillTransactionPath `
+            -Path $transactionPath.FullName `
+            -AgentSkillsRoot $AgentSkillsRoot
+        $marker = Join-Path $transactionFullPath $script:AgentSkillTransactionMarkerName
+        if (-not (Test-Path -LiteralPath $marker)) {
+            $entries = @(Get-ChildItem -LiteralPath $transactionFullPath -Force)
+            if ($entries.Count -eq 0) {
+                Remove-Item -LiteralPath $transactionFullPath -Force
+                continue
+            }
+            $entryNames = @($entries | ForEach-Object { $_.Name })
+            $creationNames = @(
+                "new",
+                $script:AgentSkillRemovalOwnerName,
+                $script:AgentSkillPhaseStaged,
+                $script:AgentSkillTransactionMarkerNewName
+            )
+            $cleanupNames = @($script:AgentSkillPhaseCompleting, $script:AgentSkillPhaseRollingBack)
+            $isCreation = @($entryNames | Where-Object { $creationNames -cnotcontains $_ }).Count -eq 0
+            $isCleanup = $entryNames.Count -eq 1 -and $cleanupNames -ccontains $entryNames[0]
+            if (-not $isCreation -and -not $isCleanup) {
+                throw "Markerless Herdr agent skill transaction contains unexpected content: $transactionFullPath"
+            }
+            foreach ($entry in $entries) {
+                if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    throw "Markerless Herdr agent skill transaction contains a reparse point: $($entry.FullName)"
+                }
+                if ($entry.Name -ceq "new") {
+                    Assert-HerdrRegularDirectory -Path $entry.FullName
+                    $stagedEntries = @(Get-ChildItem -LiteralPath $entry.FullName -Force)
+                    if ($stagedEntries.Count -gt 1 -or
+                        ($stagedEntries.Count -eq 1 -and ($stagedEntries[0].Name -cne "SKILL.md" -or
+                            $stagedEntries[0].PSIsContainer -or
+                            ($stagedEntries[0].Attributes -band [IO.FileAttributes]::ReparsePoint)))) {
+                        throw "Markerless Herdr agent skill staging contains unexpected content: $($entry.FullName)"
+                    }
+                } elseif ($entry.Name -ceq $script:AgentSkillTransactionMarkerNewName) {
+                    Assert-HerdrRegularFile -Path $entry.FullName
+                } elseif ($entry.PSIsContainer -or $entry.Length -ne 0) {
+                    throw "Markerless Herdr agent skill transaction file is invalid: $($entry.FullName)"
+                }
+            }
+            Remove-HerdrReplaceableAgentSkillPath -Path $transactionFullPath
+            if (-not (Test-Path -LiteralPath $transactionFullPath)) {
+                continue
+            }
+            throw "Markerless Herdr agent skill transaction cleanup did not reach terminal state: $transactionFullPath"
+        }
+        $transaction = Assert-HerdrAgentSkillTransaction `
+            -Path $transactionFullPath `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+        if ($transaction.Operation -ceq "Removal") {
+            Restore-HerdrAgentSkillRemovalTransaction `
+                -Path $transaction.Path `
+                -AgentSkillsRoot $AgentSkillsRoot `
+                -InstallRoot $InstallRoot
+        } elseif (($transaction.Phase -ceq $script:AgentSkillPhasePublished -or
+                $transaction.Phase -ceq $script:AgentSkillPhaseCompleting) -and
+            (Test-HerdrAgentSkillTransactionCommitted -Transaction $transaction -InstallRoot $InstallRoot)) {
+            Complete-HerdrAgentSkillTransaction -Path $transaction.Path -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+        } elseif ($transaction.Phase -ceq $script:AgentSkillPhaseCompleting) {
+            throw "A completing Herdr agent skill transaction lost its install manifest commit."
+        } else {
+            Undo-HerdrAgentSkillTransaction -Path $transaction.Path -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+        }
+    }
+}
+
+function New-HerdrAgentSkillTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DisplayVersion
+    )
+
+    $expectedHash = Get-HerdrAgentSkillSha256 -Path $SourcePath
+    $target = Join-Path $AgentSkillsRoot "herdr"
+    Assert-HerdrReplaceableAgentSkillPath -Path $target
+    $hadPrevious = Test-Path -LiteralPath $target
+    $transaction = Join-Path $AgentSkillsRoot (".herdr-installer-skill." + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $transaction | Out-Null
+    $staged = Join-Path $transaction "new"
+    New-Item -ItemType Directory -Path $staged | Out-Null
+    Copy-HerdrDurableFile -Source $SourcePath -Destination (Join-Path $staged "SKILL.md")
+    if ((Get-HerdrAgentSkillSha256 -Path (Join-Path $staged "SKILL.md")) -cne $expectedHash) {
+        throw "Staged Herdr agent skill differs from its embedded source."
+    }
+    Write-HerdrDurableBytes -Path (Join-Path $transaction $script:AgentSkillPhaseStaged) -Bytes ([byte[]]@())
+    $markerNew = Join-Path $transaction $script:AgentSkillTransactionMarkerNewName
+    Write-HerdrDurableText -Path $markerNew -Text (
+        Get-HerdrAgentSkillTransactionMarkerText `
+            -InstallRoot $InstallRoot `
+            -DisplayVersion $DisplayVersion `
+            -SkillSha256 $expectedHash `
+            -HadPrevious $hadPrevious
+    )
+    [IO.File]::Move($markerNew, (Join-Path $transaction $script:AgentSkillTransactionMarkerName))
+    return Assert-HerdrAgentSkillTransaction -Path $transaction -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+}
+
+function Publish-HerdrAgentSkillTransaction {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $state = Assert-HerdrAgentSkillTransaction `
+        -Path $Transaction.Path `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($state.Phase -cne $script:AgentSkillPhaseStaged) {
+        throw "Herdr agent skill transaction is not in its staged phase."
+    }
+    $staged = Join-Path $state.Path "new"
+    if (-not (Test-HerdrExactAgentSkill -Path $staged -ExpectedSha256 $state.SkillSha256)) {
+        throw "Herdr agent skill transaction does not contain its exact staged skill."
+    }
+    $target = Join-Path $AgentSkillsRoot "herdr"
+    Assert-HerdrReplaceableAgentSkillPath -Path $target
+    if ($state.HadPrevious -cne (Test-Path -LiteralPath $target)) {
+        throw "Herdr agent skill target changed after transaction staging."
+    }
+    $publishing = Join-Path $state.Path $script:AgentSkillPhasePublishing
+    [IO.File]::Move((Join-Path $state.Path $script:AgentSkillPhaseStaged), $publishing)
+    $previous = Join-Path $state.Path "previous"
+    if ($state.HadPrevious) {
+        Move-HerdrAgentSkillPath -Source $target -Destination $previous
+    }
+    [IO.Directory]::Move($staged, $target)
+    [IO.File]::Move($publishing, (Join-Path $state.Path $script:AgentSkillPhasePublished))
+    if (-not (Test-HerdrExactAgentSkill -Path $target -ExpectedSha256 $state.SkillSha256)) {
+        throw "Published Herdr agent skill does not exactly match its embedded source."
+    }
+}
+
+function Get-HerdrAgentSkillRemovalCleanupPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$TransactionPath,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot
+    )
+
+    $root = Get-HerdrFullPath -Path $AgentSkillsRoot
+    $transaction = Get-HerdrFullPath -Path $TransactionPath
+    if (-not ([IO.Path]::GetFullPath((Split-Path -Parent $transaction)).Equals($root, [StringComparison]::OrdinalIgnoreCase))) {
+        throw "Herdr agent skill removal transaction escaped its skills root: $TransactionPath"
+    }
+    $match = [regex]::Match((Split-Path -Leaf $transaction), '^\.herdr-installer-skill\.([0-9a-f]{32})$')
+    if (-not $match.Success) {
+        throw "Herdr agent skill removal transaction name is invalid: $TransactionPath"
+    }
+    return Join-Path $root (".herdr-installer-skill-cleanup." + $match.Groups[1].Value)
+}
+
+function Remove-HerdrAgentSkillRemovalCleanupPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $root = Get-HerdrFullPath -Path $AgentSkillsRoot
+    $cleanup = Get-HerdrFullPath -Path $Path
+    if (-not ([IO.Path]::GetFullPath((Split-Path -Parent $cleanup)).Equals($root, [StringComparison]::OrdinalIgnoreCase)) -or
+        (Split-Path -Leaf $cleanup) -cnotmatch $script:AgentSkillRemovalCleanupPattern) {
+        throw "Refusing an unrecognized Herdr agent skill removal cleanup path: $Path"
+    }
+    Assert-HerdrRegularDirectory -Path $cleanup
+    $entries = @(Get-ChildItem -LiteralPath $cleanup -Force)
+    $phaseNames = @(
+        $script:AgentSkillPhaseStaged,
+        $script:AgentSkillPhasePublishing,
+        $script:AgentSkillPhaseCompleting
+    )
+    foreach ($entry in $entries) {
+        if ($entry.Name -cnotin @(
+            $script:AgentSkillTransactionMarkerName,
+            $script:AgentSkillRemovalOwnerName
+        ) -and $phaseNames -cnotcontains $entry.Name) {
+            throw "Herdr agent skill removal cleanup contains unexpected content: $($entry.FullName)"
+        }
+        if ($entry.Name -ceq $script:AgentSkillTransactionMarkerName) {
+            $text = Read-HerdrStrictUtf8 -Path $entry.FullName
+            $match = [regex]::Match(
+                $text,
+                '\Aherdr-agent-skill-transaction-v2\ninstall_root_sha256=([0-9a-f]{64})\ndisplay_version=([0-9A-Za-z._+\-]+)\nskill_sha256=([0-9a-f]{64})\nhad_previous=1\n\z'
+            )
+            $expectedRootHash = Get-HerdrTextSha256 -Text ((Get-HerdrFullPath -Path $InstallRoot).ToLowerInvariant())
+            if (-not $match.Success -or $match.Groups[1].Value -cne $expectedRootHash) {
+                throw "Herdr agent skill removal cleanup marker is invalid: $($entry.FullName)"
+            }
+        } elseif ($entry.PSIsContainer -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -ne 0) {
+            throw "Herdr agent skill removal cleanup owner is invalid: $($entry.FullName)"
+        }
+    }
+    if (@($entries | Where-Object { $phaseNames -ccontains $_.Name }).Count -gt 1) {
+        throw "Herdr agent skill removal cleanup has multiple phase owners: $cleanup"
+    }
+    foreach ($entry in $entries) {
+        Remove-Item -LiteralPath $entry.FullName -Force
+    }
+    if (@(Get-ChildItem -LiteralPath $cleanup -Force).Count -ne 0) {
+        throw "Herdr agent skill removal cleanup did not reach an empty terminal state: $cleanup"
+    }
+    Remove-Item -LiteralPath $cleanup -Force
+}
+
+function Remove-HerdrAgentSkillRemovalTransactionOwner {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $state = Assert-HerdrAgentSkillTransaction `
+        -Path $Transaction.Path `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($state.Operation -cne "Removal") {
+        throw "An install transaction cannot use removal cleanup."
+    }
+    foreach ($name in @("previous", $script:AgentSkillRemovalCandidateName)) {
+        if (Test-Path -LiteralPath (Join-Path $state.Path $name)) {
+            throw "Herdr agent skill removal cleanup still owns detached content: $($state.Path)"
+        }
+    }
+    $cleanup = Get-HerdrAgentSkillRemovalCleanupPath `
+        -TransactionPath $state.Path `
+        -AgentSkillsRoot $AgentSkillsRoot
+    if (Test-Path -LiteralPath $cleanup) {
+        throw "Herdr agent skill removal cleanup path already exists: $cleanup"
+    }
+    [IO.Directory]::Move($state.Path, $cleanup)
+    Remove-HerdrAgentSkillRemovalCleanupPath `
+        -Path $cleanup `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+}
+
+function Move-HerdrAgentSkillRemovalCandidateBack {
+    param([Parameter(Mandatory = $true)][object]$Transaction)
+
+    $candidate = Join-Path $Transaction.Path $script:AgentSkillRemovalCandidateName
+    if (-not (Test-Path -LiteralPath $candidate)) {
+        return
+    }
+    Assert-HerdrRegularFile -Path $candidate
+    $previous = Join-Path $Transaction.Path "previous"
+    if (-not (Test-Path -LiteralPath $previous)) {
+        New-Item -ItemType Directory -Path $previous | Out-Null
+    }
+    Assert-HerdrRegularDirectory -Path $previous
+    $skill = Join-Path $previous "SKILL.md"
+    if (Test-Path -LiteralPath $skill) {
+        throw "Detached Herdr agent skill already contains SKILL.md; the isolated removal candidate is preserved."
+    }
+    [IO.File]::Move($candidate, $skill)
+}
+
+function Undo-HerdrAgentSkillRemovalTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction `
+        -Path $Path `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Removal" -or $transaction.Phase -ceq $script:AgentSkillPhaseCompleting) {
+        throw "Only an uncommitted Herdr agent skill removal can be restored."
+    }
+    Move-HerdrAgentSkillRemovalCandidateBack -Transaction $transaction
+    $previous = Join-Path $transaction.Path "previous"
+    if (Test-Path -LiteralPath $previous) {
+        $target = Join-Path $AgentSkillsRoot "herdr"
+        if (Test-Path -LiteralPath $target) {
+            throw "A concurrent Herdr agent skill replacement blocks restoration; detached content remains at $previous"
+        }
+        Assert-HerdrRegularDirectory -Path $previous
+        [IO.Directory]::Move($previous, $target)
+    }
+    Remove-HerdrAgentSkillRemovalTransactionOwner `
+        -Transaction $transaction `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+}
+
+function Remove-HerdrPinnedAgentSkillCandidate {
+    param(
+        [Parameter(Mandatory = $true)][object]$Transaction,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $candidate = Join-Path $Transaction.Path $script:AgentSkillRemovalCandidateName
+    $pinned = [Herdr.Installer.PinnedSkillFile]::Open($candidate)
+    if ($pinned.Sha256Hex -cne $ExpectedSha256) {
+        $actual = $pinned.Sha256Hex
+        $pinned.Dispose()
+        throw "Detached Herdr agent skill changed before deletion (expected $ExpectedSha256, found $actual); it is preserved."
+    }
+    try {
+        $pinned.DeleteByHandle()
+    } finally {
+        $pinned.Dispose()
+    }
+}
+
+function Restore-HerdrAgentSkillRemovalTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction `
+        -Path $Path `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Removal") {
+        throw "An install transaction cannot use removal recovery."
+    }
+    if ($transaction.Phase -cne $script:AgentSkillPhaseCompleting) {
+        Undo-HerdrAgentSkillRemovalTransaction `
+            -Path $transaction.Path `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+        return
+    }
+    if (Test-Path -LiteralPath (Join-Path $transaction.Path "previous")) {
+        throw "Committed Herdr agent skill removal retained unexpected detached directory content."
+    }
+    if (Test-Path -LiteralPath (Join-Path $transaction.Path $script:AgentSkillRemovalCandidateName)) {
+        Remove-HerdrPinnedAgentSkillCandidate `
+            -Transaction $transaction `
+            -ExpectedSha256 $transaction.SkillSha256
+    }
+    Remove-HerdrAgentSkillRemovalTransactionOwner `
+        -Transaction $transaction `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+}
+
+function Start-HerdrInstalledAgentSkillRemoval {
+    param(
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DisplayVersion,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $target = Join-Path $AgentSkillsRoot "herdr"
+    if (-not (Test-Path -LiteralPath $target)) {
+        return $null
+    }
+    $transactionPath = Join-Path $AgentSkillsRoot (".herdr-installer-skill." + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $transactionPath | Out-Null
+    Write-HerdrDurableBytes -Path (Join-Path $transactionPath $script:AgentSkillRemovalOwnerName) -Bytes ([byte[]]@())
+    Write-HerdrDurableBytes -Path (Join-Path $transactionPath $script:AgentSkillPhaseStaged) -Bytes ([byte[]]@())
+    $markerNew = Join-Path $transactionPath $script:AgentSkillTransactionMarkerNewName
+    Write-HerdrDurableText -Path $markerNew -Text (
+        Get-HerdrAgentSkillTransactionMarkerText `
+            -InstallRoot $InstallRoot `
+            -DisplayVersion $DisplayVersion `
+            -SkillSha256 $ExpectedSha256 `
+            -HadPrevious $true
+    )
+    [IO.File]::Move($markerNew, (Join-Path $transactionPath $script:AgentSkillTransactionMarkerName))
+    $transaction = Assert-HerdrAgentSkillTransaction `
+        -Path $transactionPath `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Removal") {
+        throw "Herdr agent skill removal transaction lost its operation owner."
+    }
+    $publishing = Join-Path $transactionPath $script:AgentSkillPhasePublishing
+    [IO.File]::Move((Join-Path $transactionPath $script:AgentSkillPhaseStaged), $publishing)
+    try {
+        Move-HerdrAgentSkillPath -Source $target -Destination (Join-Path $transactionPath "previous")
+    } catch {
+        $moveError = $_.Exception
+        Undo-HerdrAgentSkillRemovalTransaction `
+            -Path $transactionPath `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+        throw $moveError
+    }
+    return $transactionPath
+}
+
+function Publish-HerdrAgentSkillRemovalCandidate {
+    param(
+        [Parameter(Mandatory = $true)][string]$TransactionPath,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction `
+        -Path $TransactionPath `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Removal" -or
+        $transaction.Phase -cne $script:AgentSkillPhasePublishing -or
+        -not $transaction.HadPrevious -or
+        $transaction.SkillSha256 -cne $ExpectedSha256) {
+        throw "Herdr agent skill removal transaction identity changed before candidate publication."
+    }
+    $previous = Join-Path $transaction.Path "previous"
+    $entries = @(Get-ChildItem -LiteralPath $previous -Force)
+    if ($entries.Count -ne 1 -or $entries[0].Name -cne "SKILL.md" -or
+        $entries[0].PSIsContainer -or ($entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Undo-HerdrAgentSkillRemovalTransaction `
+            -Path $transaction.Path `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+        return $null
+    }
+    $candidate = Join-Path $transaction.Path $script:AgentSkillRemovalCandidateName
+    $pinned = $null
+    try {
+        $pinned = [Herdr.Installer.PinnedSkillFile]::Open($entries[0].FullName)
+        if ($pinned.Sha256Hex -cne $ExpectedSha256) {
+            $pinned.Dispose()
+            $pinned = $null
+            Undo-HerdrAgentSkillRemovalTransaction `
+                -Path $transaction.Path `
+                -AgentSkillsRoot $AgentSkillsRoot `
+                -InstallRoot $InstallRoot
+            return $null
+        }
+        $pinned.MoveTo($candidate)
+        $result = [PSCustomObject]@{
+            TransactionPath = $transaction.Path
+            Pinned = $pinned
+        }
+        $pinned = $null
+        return $result
+    } catch {
+        if ($null -ne $pinned) {
+            $pinned.Dispose()
+            $pinned = $null
+        }
+        Undo-HerdrAgentSkillRemovalTransaction `
+            -Path $transaction.Path `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+        throw
+    }
+}
+
+function Commit-HerdrAgentSkillRemovalCandidate {
+    param(
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $transaction = Assert-HerdrAgentSkillTransaction `
+        -Path $Candidate.TransactionPath `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    if ($transaction.Operation -cne "Removal" -or
+        $transaction.Phase -cne $script:AgentSkillPhasePublishing -or
+        -not $transaction.HadPrevious -or
+        $transaction.SkillSha256 -cne $ExpectedSha256) {
+        throw "Herdr agent skill removal transaction identity changed before candidate commit."
+    }
+    $previous = Join-Path $transaction.Path "previous"
+    $pinned = $Candidate.Pinned
+    if ($null -eq $pinned -or $pinned.Sha256Hex -cne $ExpectedSha256) {
+        throw "Pinned Herdr agent skill removal candidate identity changed before commit."
+    }
+    try {
+        try {
+            [IO.Directory]::Delete($previous)
+        } catch {
+            $pinned.Dispose()
+            $pinned = $null
+            Move-HerdrAgentSkillRemovalCandidateBack -Transaction $transaction
+            Undo-HerdrAgentSkillRemovalTransaction `
+                -Path $transaction.Path `
+                -AgentSkillsRoot $AgentSkillsRoot `
+                -InstallRoot $InstallRoot
+            return $false
+        }
+        $completing = Join-Path $transaction.Path $script:AgentSkillPhaseCompleting
+        [IO.File]::Move((Join-Path $transaction.Path $script:AgentSkillPhasePublishing), $completing)
+        $pinned.DeleteByHandle()
+        $pinned = $null
+    } finally {
+        if ($null -ne $pinned) {
+            $pinned.Dispose()
+        }
+    }
+    $completed = Assert-HerdrAgentSkillTransaction `
+        -Path $transaction.Path `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    Remove-HerdrAgentSkillRemovalTransactionOwner `
+        -Transaction $completed `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot
+    return $true
+}
+
+function Complete-HerdrInstalledAgentSkillRemoval {
+    param(
+        [Parameter(Mandatory = $true)][string]$TransactionPath,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $candidate = Publish-HerdrAgentSkillRemovalCandidate `
+        -TransactionPath $TransactionPath `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot `
+        -ExpectedSha256 $ExpectedSha256
+    if ($null -eq $candidate) {
+        return $false
+    }
+    return Commit-HerdrAgentSkillRemovalCandidate `
+        -Candidate $candidate `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot `
+        -ExpectedSha256 $ExpectedSha256
+}
+
+function Remove-HerdrInstalledAgentSkill {
+    param(
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$DisplayVersion,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    if ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Invalid owned Herdr agent skill hash."
+    }
+    if (-not (Test-Path -LiteralPath $AgentSkillsRoot -PathType Container)) {
+        return
+    }
+    $AgentSkillsRoot = Get-HerdrFullPath -Path $AgentSkillsRoot
+    $parent = Split-Path -Parent $AgentSkillsRoot
+    $grandparent = Split-Path -Parent $parent
+    foreach ($component in @($grandparent, $parent, $AgentSkillsRoot)) {
+        if (Test-HerdrReparsePoint -Path $component) {
+            return
+        }
+        Assert-HerdrRegularDirectory -Path $component
+    }
+    $target = Join-Path $AgentSkillsRoot "herdr"
+    if (-not (Test-Path -LiteralPath $target -PathType Container) -or (Test-HerdrReparsePoint -Path $target)) {
+        return
+    }
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($target)
+    while ($pending.Count -gt 0) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $pending.Pop() -Force)) {
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                return
+            }
+            if ($entry.PSIsContainer) {
+                $pending.Push($entry.FullName)
+            }
+        }
+    }
+    $transactionPath = Start-HerdrInstalledAgentSkillRemoval `
+        -AgentSkillsRoot $AgentSkillsRoot `
+        -InstallRoot $InstallRoot `
+        -DisplayVersion $DisplayVersion `
+        -ExpectedSha256 $ExpectedSha256
+    if ($null -ne $transactionPath) {
+        [void](Complete-HerdrInstalledAgentSkillRemoval `
+            -TransactionPath $transactionPath `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot `
+            -ExpectedSha256 $ExpectedSha256)
     }
 }
 
@@ -481,11 +1767,15 @@ function Assert-HerdrSameRuntime {
 function Get-HerdrInstallManifestText {
     param(
         [Parameter(Mandatory = $true)][string]$BootstrapPath,
+        [Parameter(Mandatory = $true)][string]$SkillSha256,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion
     )
 
-    return "$script:InstallManifestHeader`nbootstrap_sha256=$(Get-HerdrSha256 -Path $BootstrapPath)`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
+    if ($SkillSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Invalid Herdr agent skill SHA-256 for the install manifest."
+    }
+    return "$script:InstallManifestHeader`nbootstrap_sha256=$(Get-HerdrSha256 -Path $BootstrapPath)`nskill_sha256=$SkillSha256`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
 }
 
 function Read-HerdrInstallManifestFile {
@@ -495,24 +1785,39 @@ function Read-HerdrInstallManifestFile {
     $text = Read-HerdrStrictUtf8 -Path $path
     $match = [regex]::Match(
         $text,
-        '\Aherdr-install-manifest-v1\nbootstrap_sha256=([0-9a-f]{64})\ndisplay_version=([0-9A-Za-z._+\-]+)\nnumeric_version=([0-9]{1,5}(?:\.[0-9]{1,5}){3})\n\z'
+        '\Aherdr-install-manifest-v2\nbootstrap_sha256=([0-9a-f]{64})\nskill_sha256=([0-9a-f]{64})\ndisplay_version=([0-9A-Za-z._+\-]+)\nnumeric_version=([0-9]{1,5}(?:\.[0-9]{1,5}){3})\n\z'
     )
-    if (-not $match.Success) {
-        throw "Invalid managed install ownership manifest: $path"
+    $skillSha256 = $null
+    if ($match.Success) {
+        $bootstrapSha256 = $match.Groups[1].Value
+        $skillSha256 = $match.Groups[2].Value
+        $manifestDisplayVersion = $match.Groups[3].Value
+        $manifestNumericVersion = $match.Groups[4].Value
+    } else {
+        $match = [regex]::Match(
+            $text,
+            '\Aherdr-install-manifest-v1\nbootstrap_sha256=([0-9a-f]{64})\ndisplay_version=([0-9A-Za-z._+\-]+)\nnumeric_version=([0-9]{1,5}(?:\.[0-9]{1,5}){3})\n\z'
+        )
+        if (-not $match.Success) {
+            throw "Invalid managed install ownership manifest: $path"
+        }
+        $bootstrapSha256 = $match.Groups[1].Value
+        $manifestDisplayVersion = $match.Groups[2].Value
+        $manifestNumericVersion = $match.Groups[3].Value
     }
-    $manifestDisplayVersion = $match.Groups[2].Value
     if ($manifestDisplayVersion.Length -lt 25) {
         throw "Managed install display version does not contain a build ID: $path"
     }
     $manifestBuildId = $manifestDisplayVersion.Substring($manifestDisplayVersion.Length - 25)
     Assert-HerdrVersionIdentity `
         -DisplayVersion $manifestDisplayVersion `
-        -NumericVersion $match.Groups[3].Value `
+        -NumericVersion $manifestNumericVersion `
         -BuildId $manifestBuildId
     return [PSCustomObject]@{
-        BootstrapSha256 = $match.Groups[1].Value
+        BootstrapSha256 = $bootstrapSha256
+        SkillSha256 = $skillSha256
         DisplayVersion = $manifestDisplayVersion
-        NumericVersion = $match.Groups[3].Value
+        NumericVersion = $manifestNumericVersion
     }
 }
 
@@ -1362,6 +2667,7 @@ function New-HerdrManagedRootTree {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillSha256,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion
@@ -1380,6 +2686,7 @@ function New-HerdrManagedRootTree {
     Write-HerdrDurableText -Path (Join-Path $Destination "state\install.manifest") -Text (
         Get-HerdrInstallManifestText `
             -BootstrapPath (Join-Path $Destination "bin\herdr.exe") `
+            -SkillSha256 $SkillSha256 `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion
     )
@@ -1468,6 +2775,7 @@ function Install-HerdrManagedUpgrade {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillSha256,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -1491,9 +2799,12 @@ function Install-HerdrManagedUpgrade {
         $coordination = Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock") -TimeoutMilliseconds $LockTimeoutMilliseconds
         try {
             Assert-HerdrManagedRoot -InstallRoot $InstallRoot
-            $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
             Write-HerdrDurableText -Path (Join-Path $metadata "install.manifest") -Text (
-                "$script:InstallManifestHeader`nbootstrap_sha256=$($installManifest.BootstrapSha256)`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
+                Get-HerdrInstallManifestText `
+                    -BootstrapPath (Join-Path $InstallRoot "bin\herdr.exe") `
+                    -SkillSha256 $SkillSha256 `
+                    -DisplayVersion $DisplayVersion `
+                    -NumericVersion $NumericVersion
             )
             $runtimeDestination = Join-Path $InstallRoot "runtime\$BuildId"
             if (Test-Path -LiteralPath $runtimeDestination) {
@@ -1505,7 +2816,6 @@ function Install-HerdrManagedUpgrade {
 
             Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
             Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
-            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
 
             $activePath = Join-Path $stateDir "active"
             $activeBuild = Read-HerdrPointer -Path $activePath
@@ -1514,11 +2824,13 @@ function Install-HerdrManagedUpgrade {
                 if (Test-Path -LiteralPath $pendingPath) {
                     Remove-Item -LiteralPath $pendingPath -Force
                 }
+                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
                 return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
             }
             Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
             $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
             if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
+                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
                 return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
             }
             Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -1528,6 +2840,7 @@ function Install-HerdrManagedUpgrade {
             if ((Read-HerdrPointer -Path $activePath) -cne $BuildId -or (Test-Path -LiteralPath $pendingPath)) {
                 throw "Atomic pending activation did not publish the expected active pointer."
             }
+            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
             return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
         } finally {
             $coordination.Dispose()
@@ -1546,6 +2859,8 @@ function Install-HerdrLayout {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillSourcePath,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -1563,55 +2878,88 @@ function Install-HerdrLayout {
     Assert-HerdrRegularFile -Path $LauncherPath
     Assert-HerdrRegularFile -Path $UninstallerPath
     Assert-HerdrRegularFile -Path $HelperSourcePath
-
-    Restore-HerdrLegacyBackupIfNeeded -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -LegacyInstallLockPath $LegacyInstallLockPath -LockTimeoutMilliseconds $LockTimeoutMilliseconds
-    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-    if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
-        throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
-    }
-    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
-    if ($rootKind -eq "UninstallRetry") {
-        throw "A previous Herdr uninstall is incomplete; rerun uninstall before installing."
-    }
-    if ($rootKind -eq "Managed") {
-        return Install-HerdrManagedUpgrade `
-            -InstallRoot $InstallRoot `
-            -StageDir $StageDir `
-            -LauncherPath $LauncherPath `
-            -UninstallerPath $UninstallerPath `
-            -HelperSourcePath $HelperSourcePath `
-            -BuildId $BuildId `
-            -DisplayVersion $DisplayVersion `
-            -NumericVersion $NumericVersion `
-            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
-    }
-
-    $transaction = New-HerdrTransaction -Kind "fresh" -InstallRoot $InstallRoot
+    $AgentSkillsRoot = Initialize-HerdrAgentSkillsRoot -AgentSkillsRoot $AgentSkillsRoot
+    $skillLock = Open-HerdrShareModeLock `
+        -Path (Get-HerdrAgentSkillLockPath -AgentSkillsRoot $AgentSkillsRoot) `
+        -TimeoutMilliseconds $LockTimeoutMilliseconds
+    $skillTransaction = $null
     try {
-        $stagedRoot = Join-Path $transaction.Path "root"
-        New-HerdrManagedRootTree `
-            -Destination $stagedRoot `
-            -StageDir $StageDir `
-            -LauncherPath $LauncherPath `
-            -UninstallerPath $UninstallerPath `
-            -HelperSourcePath $HelperSourcePath `
-            -BuildId $BuildId `
-            -DisplayVersion $DisplayVersion `
-            -NumericVersion $NumericVersion
-        $legacyBackup = Publish-HerdrFreshTransaction `
-            -Transaction $transaction `
+        Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+        $skillTransaction = New-HerdrAgentSkillTransaction `
+            -SourcePath $SkillSourcePath `
+            -AgentSkillsRoot $AgentSkillsRoot `
             -InstallRoot $InstallRoot `
-            -LegacyReleasesRoot $LegacyReleasesRoot `
-            -LegacyInstallLockPath $LegacyInstallLockPath `
-            -RootKind $rootKind `
-            -ParentPid $ParentPid `
-            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
-            -ProcessProvider $ProcessProvider
-        return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId; LegacyBackup = $legacyBackup }
-    } finally {
-        if (Test-Path -LiteralPath $transaction.Path) {
-            Remove-HerdrTransaction -Path $transaction.Path -Kind "fresh" -InstallRoot $InstallRoot
+            -DisplayVersion $DisplayVersion
+        $skillSha256 = $skillTransaction.SkillSha256
+        Publish-HerdrAgentSkillTransaction `
+            -Transaction $skillTransaction `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot
+
+        Restore-HerdrLegacyBackupIfNeeded -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -LegacyInstallLockPath $LegacyInstallLockPath -LockTimeoutMilliseconds $LockTimeoutMilliseconds
+        Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
+        if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
+            throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
         }
+        $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
+        if ($rootKind -eq "UninstallRetry") {
+            throw "A previous Herdr uninstall is incomplete; rerun uninstall before installing."
+        }
+        if ($rootKind -eq "Managed") {
+            $result = Install-HerdrManagedUpgrade `
+                -InstallRoot $InstallRoot `
+                -StageDir $StageDir `
+                -LauncherPath $LauncherPath `
+                -UninstallerPath $UninstallerPath `
+                -HelperSourcePath $HelperSourcePath `
+                -SkillSha256 $skillSha256 `
+                -BuildId $BuildId `
+                -DisplayVersion $DisplayVersion `
+                -NumericVersion $NumericVersion `
+                -LockTimeoutMilliseconds $LockTimeoutMilliseconds
+        } else {
+            $transaction = New-HerdrTransaction -Kind "fresh" -InstallRoot $InstallRoot
+            try {
+                $stagedRoot = Join-Path $transaction.Path "root"
+                New-HerdrManagedRootTree `
+                    -Destination $stagedRoot `
+                    -StageDir $StageDir `
+                    -LauncherPath $LauncherPath `
+                    -UninstallerPath $UninstallerPath `
+                    -HelperSourcePath $HelperSourcePath `
+                    -SkillSha256 $skillSha256 `
+                    -BuildId $BuildId `
+                    -DisplayVersion $DisplayVersion `
+                    -NumericVersion $NumericVersion
+                $legacyBackup = Publish-HerdrFreshTransaction `
+                    -Transaction $transaction `
+                    -InstallRoot $InstallRoot `
+                    -LegacyReleasesRoot $LegacyReleasesRoot `
+                    -LegacyInstallLockPath $LegacyInstallLockPath `
+                    -RootKind $rootKind `
+                    -ParentPid $ParentPid `
+                    -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
+                    -ProcessProvider $ProcessProvider
+                $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId; LegacyBackup = $legacyBackup }
+            } finally {
+                if (Test-Path -LiteralPath $transaction.Path) {
+                    Remove-HerdrTransaction -Path $transaction.Path -Kind "fresh" -InstallRoot $InstallRoot
+                }
+            }
+        }
+        Complete-HerdrAgentSkillTransaction `
+            -Path $skillTransaction.Path `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -InstallRoot $InstallRoot `
+            -RequireExactTarget
+        return $result
+    } catch {
+        if ($null -ne $skillTransaction -and (Test-Path -LiteralPath $skillTransaction.Path)) {
+            Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+        }
+        throw
+    } finally {
+        $skillLock.Dispose()
     }
 }
 
@@ -1750,6 +3098,7 @@ function Invoke-HerdrInstall {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillSourcePath,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -1769,6 +3118,8 @@ function Invoke-HerdrInstall {
             -LauncherPath $LauncherPath `
             -UninstallerPath $UninstallerPath `
             -HelperSourcePath $HelperSourcePath `
+            -SkillSourcePath $SkillSourcePath `
+            -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
@@ -1783,79 +3134,107 @@ function Invoke-HerdrInstall {
 function Invoke-HerdrUninstallLayout {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
         [int]$LockTimeoutMilliseconds = 30000,
         [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
-    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-    $legacyRoot = Get-HerdrLegacyReleasesRoot
-    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $legacyRoot
-    if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
-        throw "Only an exact managed Herdr root can be uninstalled."
+    $skillLock = $null
+    if (Test-Path -LiteralPath $AgentSkillsRoot -PathType Container) {
+        $AgentSkillsRoot = Initialize-HerdrAgentSkillsRoot -AgentSkillsRoot $AgentSkillsRoot
+        $skillLock = Open-HerdrShareModeLock `
+            -Path (Get-HerdrAgentSkillLockPath -AgentSkillsRoot $AgentSkillsRoot) `
+            -TimeoutMilliseconds $LockTimeoutMilliseconds
     }
-    $stateDir = Join-Path $InstallRoot "state"
-    $coordination = Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock") -TimeoutMilliseconds $LockTimeoutMilliseconds
     try {
-        if (Test-Path -LiteralPath (Join-Path $stateDir "uninstall.pending")) {
-            Assert-HerdrUninstallRetryRoot -InstallRoot $InstallRoot
-        } else {
-            Assert-HerdrManagedRoot -InstallRoot $InstallRoot
+        Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
+        $legacyRoot = Get-HerdrLegacyReleasesRoot
+        $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $legacyRoot
+        if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
+            throw "Only an exact managed Herdr root can be uninstalled."
         }
-        $leaseStatus = if (Test-Path -LiteralPath (Join-Path $stateDir "leases")) {
-            Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
-        } else {
-            [PSCustomObject]@{ Active = @(); Stale = @(); Ambiguous = @() }
-        }
-        if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
-            throw "Herdr is still active. Close all managed sessions before uninstalling."
-        }
-        $uninstallTransactions = @(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall")
-        $processRoots = @($InstallRoot) + $uninstallTransactions
-        $processes = @(& $ProcessProvider)
-        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots $processRoots) {
-            throw "A process from the managed Herdr install tree is still active."
-        }
-        foreach ($path in $uninstallTransactions) {
-            Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
-        }
-
-        $transaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
-        $installManifestPath = Join-Path $stateDir "install.manifest"
-        if (Test-Path -LiteralPath $installManifestPath) {
-            Copy-HerdrDurableFile -Source $installManifestPath -Destination (Join-Path $transaction.Path "root.manifest")
-        }
-        if (-not (Test-Path -LiteralPath (Join-Path $stateDir "uninstall.pending"))) {
-            Write-HerdrDurableText -Path (Join-Path $transaction.Path "uninstall.pending") -Text $script:UninstallMarkerText
-            Publish-HerdrStagedFile `
-                -Source (Join-Path $transaction.Path "uninstall.pending") `
-                -Destination (Join-Path $stateDir "uninstall.pending") `
-                -BackupDir $transaction.Path
-        }
-        if (Test-Path -LiteralPath (Join-Path $InstallRoot "bin")) {
-            [IO.Directory]::Move((Join-Path $InstallRoot "bin"), (Join-Path $transaction.Path "bin"))
-        }
-        if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
-            [IO.Directory]::Move((Join-Path $InstallRoot "runtime"), (Join-Path $transaction.Path "runtime"))
-        }
-        Assert-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
-        Remove-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
-
-        Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
-        foreach ($name in @("active", "pending", "install.manifest")) {
-            $path = Join-Path $stateDir $name
-            if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Force
+        $stateDir = Join-Path $InstallRoot "state"
+        $coordination = Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock") -TimeoutMilliseconds $LockTimeoutMilliseconds
+        try {
+            if (Test-Path -LiteralPath (Join-Path $stateDir "uninstall.pending")) {
+                Assert-HerdrUninstallRetryRoot -InstallRoot $InstallRoot
+            } else {
+                Assert-HerdrManagedRoot -InstallRoot $InstallRoot
             }
+            $leaseStatus = if (Test-Path -LiteralPath (Join-Path $stateDir "leases")) {
+                Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
+            } else {
+                [PSCustomObject]@{ Active = @(); Stale = @(); Ambiguous = @() }
+            }
+            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
+                throw "Herdr is still active. Close all managed sessions before uninstalling."
+            }
+            $uninstallTransactions = @(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall")
+            $processRoots = @($InstallRoot) + $uninstallTransactions
+            $processes = @(& $ProcessProvider)
+            if (Test-HerdrProcessWithinRoots -Processes $processes -Roots $processRoots) {
+                throw "A process from the managed Herdr install tree is still active."
+            }
+            foreach ($path in $uninstallTransactions) {
+                Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
+            }
+
+            if ($null -ne $skillLock) {
+                Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $AgentSkillsRoot -InstallRoot $InstallRoot
+            }
+            $installManifestPath = Join-Path $stateDir "install.manifest"
+            if ($null -ne $skillLock -and (Test-Path -LiteralPath $installManifestPath)) {
+                $installManifest = Read-HerdrInstallManifestFile -Path $installManifestPath
+                if ($null -ne $installManifest.SkillSha256) {
+                    Remove-HerdrInstalledAgentSkill `
+                        -AgentSkillsRoot $AgentSkillsRoot `
+                        -InstallRoot $InstallRoot `
+                        -DisplayVersion $installManifest.DisplayVersion `
+                        -ExpectedSha256 $installManifest.SkillSha256
+                }
+            }
+
+            $transaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
+            if (Test-Path -LiteralPath $installManifestPath) {
+                Copy-HerdrDurableFile -Source $installManifestPath -Destination (Join-Path $transaction.Path "root.manifest")
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $stateDir "uninstall.pending"))) {
+                Write-HerdrDurableText -Path (Join-Path $transaction.Path "uninstall.pending") -Text $script:UninstallMarkerText
+                Publish-HerdrStagedFile `
+                    -Source (Join-Path $transaction.Path "uninstall.pending") `
+                    -Destination (Join-Path $stateDir "uninstall.pending") `
+                    -BackupDir $transaction.Path
+            }
+            if (Test-Path -LiteralPath (Join-Path $InstallRoot "bin")) {
+                [IO.Directory]::Move((Join-Path $InstallRoot "bin"), (Join-Path $transaction.Path "bin"))
+            }
+            if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
+                [IO.Directory]::Move((Join-Path $InstallRoot "runtime"), (Join-Path $transaction.Path "runtime"))
+            }
+            Assert-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
+            Remove-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
+
+            Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
+            foreach ($name in @("active", "pending", "install.manifest")) {
+                $path = Join-Path $stateDir $name
+                if (Test-Path -LiteralPath $path) {
+                    Remove-Item -LiteralPath $path -Force
+                }
+            }
+            $leasesDir = Join-Path $stateDir "leases"
+            if (Test-Path -LiteralPath $leasesDir) {
+                Remove-Item -LiteralPath $leasesDir -Force
+            }
+        } finally {
+            $coordination.Dispose()
         }
-        $leasesDir = Join-Path $stateDir "leases"
-        if (Test-Path -LiteralPath $leasesDir) {
-            Remove-Item -LiteralPath $leasesDir -Force
-        }
+        Assert-HerdrUninstallResidual -InstallRoot $InstallRoot
     } finally {
-        $coordination.Dispose()
+        if ($null -ne $skillLock) {
+            $skillLock.Dispose()
+        }
     }
-    Assert-HerdrUninstallResidual -InstallRoot $InstallRoot
 }
 
 function Invoke-HerdrUninstall {
@@ -1867,7 +3246,7 @@ function Invoke-HerdrUninstall {
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
     Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
-        Invoke-HerdrUninstallLayout -InstallRoot $InstallRoot
+        Invoke-HerdrUninstallLayout -InstallRoot $InstallRoot -AgentSkillsRoot (Get-HerdrAgentSkillsRoot)
         Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
     }
@@ -1883,6 +3262,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -LauncherPath $LauncherPath `
                     -UninstallerPath $UninstallerPath `
                     -HelperSourcePath $HelperSourcePath `
+                    -SkillSourcePath $SkillSourcePath `
                     -BuildId $BuildId `
                     -DisplayVersion $DisplayVersion `
                     -NumericVersion $NumericVersion `
