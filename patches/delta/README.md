@@ -10,7 +10,6 @@ than one monolith or a patch for every development commit:
 1. Windows terminal appearance.
 2. Windows remote attach and image transport.
 3. Windows managed distribution, installer lifecycle, and checked-in fork update handling.
-4. OpenCode retry notification filtering.
 
 When a feature evolves, refresh its existing mailbox in place. Add a new patch
 only when the change has a genuinely independent owner, verification plan, and

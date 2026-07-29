@@ -1,7 +1,7 @@
-From 98a11ac3957cd454a8c3f68fecf47d320b1195b0 Mon Sep 17 00:00:00 2001
+From abfc229da6c2583bb7a10e8632f33cbb280b3999 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
-Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
+Subject: [PATCH 2/3] feat(windows): unify remote attach and image transport
 
 Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection Unix-specific while providing the Windows fallback required by the shared attach path.
 ---

@@ -1,7 +1,7 @@
-From 3fae17762e25f078e581637a4d3b1df6bb46ccfb Mon Sep 17 00:00:00 2001
+From 93beb6edc81ae96efb4272fad684eb53a654d98a Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 09:51:56 +0200
-Subject: [PATCH 3/4] fix(windows): add managed installer distribution
+Subject: [PATCH 3/3] fix(windows): add managed installer distribution
 
 Add a per-user NSIS distribution with an immutable stable launcher,
 versioned runtimes, lease-aware lazy activation, legacy migration, and
