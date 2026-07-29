@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=9
+// HERDR_INTEGRATION_VERSION=10
 
 import net from "node:net";
 
@@ -50,6 +50,18 @@ function stateFromSessionStatus(status) {
   return typeof kind === "string"
     ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase())
     : undefined;
+}
+
+function isRetryableSessionError(error) {
+  if (error?.name !== "APIError") {
+    return false;
+  }
+
+  const data = error.data;
+  return (
+    data?.isRetryable === true ||
+    (typeof data?.statusCode === "number" && data.statusCode >= 500)
+  );
 }
 
 function request(method, params) {
@@ -186,8 +198,12 @@ export const HerdrAgentStatePlugin = async () => {
           break;
         case "permission.asked":
         case "question.asked":
-        case "session.error":
           await reportState("blocked", sessionID);
+          break;
+        case "session.error":
+          if (!isRetryableSessionError(properties.error)) {
+            await reportState("blocked", sessionID);
+          }
           break;
         case "session.idle":
           await reportState("idle", sessionID);

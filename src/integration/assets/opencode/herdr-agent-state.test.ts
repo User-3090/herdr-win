@@ -129,6 +129,48 @@ test("reports retry status as working", async () => {
   expect(requests.map(requestSessionID)).toEqual(["root-session"]);
 });
 
+test("ignores provider errors OpenCode will retry", async () => {
+  const plugin = await loadPlugin();
+
+  for (const data of [
+    { message: "Request timed out", isRetryable: true },
+    { message: "Service unavailable", isRetryable: false, statusCode: 503 },
+  ]) {
+    await plugin.event({
+      event: {
+        type: "session.error",
+        properties: {
+          sessionID: "root-session",
+          error: { name: "APIError", data },
+        },
+      },
+    });
+  }
+
+  expect(requests).toEqual([]);
+});
+
+test("reports terminal session errors as blocked", async () => {
+  const plugin = await loadPlugin();
+
+  await plugin.event({
+    event: {
+      type: "session.error",
+      properties: {
+        sessionID: "root-session",
+        error: {
+          name: "APIError",
+          data: { message: "Invalid request", isRetryable: false, statusCode: 400 },
+        },
+      },
+    },
+  });
+
+  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
+  expect(requests.map(requestState)).toEqual(["blocked"]);
+  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
+});
+
 test("reports child prompts without replacing the root session", async () => {
   const plugin = await loadPlugin();
 
