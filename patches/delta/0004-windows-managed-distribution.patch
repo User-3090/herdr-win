@@ -1,7 +1,7 @@
-From 93beb6edc81ae96efb4272fad684eb53a654d98a Mon Sep 17 00:00:00 2001
+From 141f26991d954b61e421e5d4f19fd8723b89e005 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 09:51:56 +0200
-Subject: [PATCH 3/3] fix(windows): add managed installer distribution
+Subject: [PATCH 3/4] fix(windows): add managed installer distribution
 
 Add a per-user NSIS distribution with an immutable stable launcher,
 versioned runtimes, lease-aware lazy activation, legacy migration, and
@@ -62,7 +62,7 @@ kill-on-close installer process job.
  create mode 100644 src/platform/windows/managed_install.rs
 
 diff --git a/Cargo.toml b/Cargo.toml
-index cffcc809c719fc97ab46404247ad5823022b5e55..b87665b0ee0c170afd76b13c6d5d45a3f6b0df7e 100644
+index cd61cbe17e31e7278a72b7489d93675b3290ef7d..56b5ecedc2958dbc971b631af3399fe32f1a01ac 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -3,6 +3,7 @@ name = "herdr"
@@ -73,7 +73,7 @@ index cffcc809c719fc97ab46404247ad5823022b5e55..b87665b0ee0c170afd76b13c6d5d45a3
  description = "terminal workspace manager for AI coding agents"
  license = "Apache-2.0"
  repository = "https://github.com/ogulcancelik/herdr"
-@@ -18,6 +19,10 @@ include = [
+@@ -19,6 +20,10 @@ include = [
      "Cargo.toml",
  ]
  
@@ -84,7 +84,7 @@ index cffcc809c719fc97ab46404247ad5823022b5e55..b87665b0ee0c170afd76b13c6d5d45a3
  [dependencies]
  base64 = "0.22.1"
  bincode = { version = "2", features = ["serde"] }
-@@ -51,6 +56,7 @@ widestring = "1.2.1"
+@@ -52,6 +57,7 @@ widestring = "1.2.1"
  windows-sys = { version = "0.61.2", features = [
      "Wdk_System_Threading",
      "Win32_Foundation",
@@ -92,7 +92,7 @@ index cffcc809c719fc97ab46404247ad5823022b5e55..b87665b0ee0c170afd76b13c6d5d45a3
      "Win32_System_DataExchange",
      "Win32_System_Diagnostics_Debug",
      "Win32_System_Diagnostics_ToolHelp",
-@@ -60,6 +66,7 @@ windows-sys = { version = "0.61.2", features = [
+@@ -61,6 +67,7 @@ windows-sys = { version = "0.61.2", features = [
      "Win32_System_Memory",
      "Win32_System_Ole",
      "Win32_System_Pipes",
@@ -4558,7 +4558,7 @@ index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435
 +    }
 +}
 diff --git a/src/main.rs b/src/main.rs
-index 8f4494d1149c3cd5d19163336b2d21509d6acac0..84f86411bc8a08c4cf67f8fdb63aa7ad05117e1e 100644
+index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd400ef3eeb8 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -63,6 +63,7 @@ mod cli;

@@ -1,7 +1,7 @@
-From 96797a71f3464f41b4e71e9957adc50b8a764133 Mon Sep 17 00:00:00 2001
+From dc36e13adabce7acd80a6114ca5b00124fc066dd Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 07:35:54 +0200
-Subject: [PATCH 1/3] feat(windows): preserve terminal appearance
+Subject: [PATCH 1/4] feat(windows): preserve terminal appearance
 
 Transport bounded host color and appearance events, keep software and native cursors visible with host and child-selected colors, and follow host appearance for otherwise unconfigured themes.
 ---
@@ -33,10 +33,10 @@ Transport bounded host color and appearance events, keep software and native cur
  25 files changed, 1203 insertions(+), 115 deletions(-)
 
 diff --git a/docs/next/CHANGELOG.md b/docs/next/CHANGELOG.md
-index f17668dd7f4bc744f5b38a530fb590a880b24bf1..b21c4c7b2c99c6d63cf187befca4c55ae68d173e 100644
+index a34f3ab790875ee1f68c6487cdfa1a9eb2946609..34cc29a168d8b6ecfc3cff568687db61afc01d5b 100644
 --- a/docs/next/CHANGELOG.md
 +++ b/docs/next/CHANGELOG.md
-@@ -35,6 +35,7 @@
+@@ -36,6 +36,7 @@
  
  ### Changed
  - Agent commands now accept only a unique live agent name or the pane ID currently hosting that agent. Names are cleared when the occupant exits, is released, or is replaced. The old top-level `wait` commands were replaced by `agent wait` and `pane wait-output`, and `agent send` was replaced by `agent send-keys`.
@@ -892,7 +892,7 @@ index fc601d3f576f7ea10ea9ceba45a15c437788fa6d..1e51c2f9a24099a78b237939800191a4
          assert!(config.theme.light_name.is_none());
          assert!(config.theme.custom.is_none());
 diff --git a/src/main.rs b/src/main.rs
-index b4517e21b99b571b82c028f65e6a921ca2c23739..097a8493b7b44f37ef9e0cc56084233d8f8b485d 100644
+index 098693f1bc86c2e240dd5c505c844b563041d28e..dfc6fc30cccc1bf91768f6a310d7a5fe6203e66d 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -120,7 +120,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration

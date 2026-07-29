@@ -1,7 +1,7 @@
-From abfc229da6c2583bb7a10e8632f33cbb280b3999 Mon Sep 17 00:00:00 2001
+From 262119e0beb79caa1bc89c11df5e7013ce3a227a Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
-Subject: [PATCH 2/3] feat(windows): unify remote attach and image transport
+Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
 
 Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection Unix-specific while providing the Windows fallback required by the shared attach path.
 ---
@@ -49,10 +49,10 @@ index abb6a40029a49e10831cbf4e96cba5f34b4e763e..2f8c68265e3063516e33f4f5077530b7
  ]
  
 diff --git a/Cargo.toml b/Cargo.toml
-index 891bcbab56e488d68801bed3bee5b1eb91ef5c14..cffcc809c719fc97ab46404247ad5823022b5e55 100644
+index 29d242923958ca6e6aa57b01c5386f17dcb21c3e..cd61cbe17e31e7278a72b7489d93675b3290ef7d 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -47,6 +47,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
+@@ -48,6 +48,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
  portable-pty = { path = "vendor/portable-pty" }
  
  [target.'cfg(windows)'.dependencies]
@@ -966,7 +966,7 @@ index c293a2785130207740ab610c60998c607eb994bc..fc2f93b0c2bb8e369aac9ea7cdd0a5cc
      fn temp_socket_marker_path(name: &str) -> PathBuf {
          std::env::temp_dir().join(format!("herdr-{name}-{}.sock", std::process::id()))
 diff --git a/src/main.rs b/src/main.rs
-index 097a8493b7b44f37ef9e0cc56084233d8f8b485d..8f4494d1149c3cd5d19163336b2d21509d6acac0 100644
+index dfc6fc30cccc1bf91768f6a310d7a5fe6203e66d..29bebcc27bd5d22101e71b729549fbb3396d308a 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -58,7 +58,6 @@ mod agent_resume;

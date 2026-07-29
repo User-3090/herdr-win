@@ -1,0 +1,1194 @@
+From feb8babf05519924f8b433fe72ec81821471f8e6 Mon Sep 17 00:00:00 2001
+From: hdosys <71881005+hdosys@users.noreply.github.com>
+Date: Wed, 29 Jul 2026 19:41:54 +0200
+Subject: [PATCH 4/4] fix(opencode): correlate retry error lifecycle
+
+Defer root-session errors until idle or a bounded fallback, cancel them when explicit continuing status follows, and prevent terminal blocked state from being overwritten by legacy idle events.
+---
+ .../assets/opencode/herdr-agent-state.js      | 480 ++++++++++++----
+ .../assets/opencode/herdr-agent-state.test.ts | 516 +++++++++++++++++-
+ src/integration/mod.rs                        |   2 +-
+ 3 files changed, 889 insertions(+), 109 deletions(-)
+
+diff --git a/src/integration/assets/opencode/herdr-agent-state.js b/src/integration/assets/opencode/herdr-agent-state.js
+index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce75b6be22 100644
+--- a/src/integration/assets/opencode/herdr-agent-state.js
++++ b/src/integration/assets/opencode/herdr-agent-state.js
+@@ -2,19 +2,18 @@
+ // managed by herdr; reinstalling or updating the integration overwrites this file.
+ // add custom hooks/plugins beside this file instead of editing it.
+ // HERDR_INTEGRATION_ID=opencode
+-// HERDR_INTEGRATION_VERSION=9
++// HERDR_INTEGRATION_VERSION=10
+ 
+ import net from "node:net";
+ 
+ const SOURCE = "herdr:opencode";
+ const AGENT = "opencode";
+ let reportSeq = Date.now() * 1000;
+-let requestChain = Promise.resolve();
+-let reportedRootSessionID;
+ 
+-// Track child sessions so their events cannot replace the pane's root session.
+-// Their user prompts still project state without attaching the child session id.
+-const childSessions = new Set();
++const ERROR_FALLBACK_MS = 5_000;
++const ERROR_RETRY_GRACE_MS = 1_000;
++const ERROR_MAX_FALLBACK_MS = 2_147_483_647;
++
+ const CHILD_EVENT_STATES = new Map([
+   ["permission.asked", "blocked"],
+   ["question.asked", "blocked"],
+@@ -23,6 +22,17 @@ const CHILD_EVENT_STATES = new Map([
+   ["question.rejected", "working"],
+ ]);
+ 
++const SESSION_STATE_BY_STATUS = new Map([
++  ["idle", "idle"],
++  ["active", "working"],
++  ["busy", "working"],
++  ["pending", "working"],
++  ["retry", "working"],
++  ["running", "working"],
++  ["streaming", "working"],
++  ["working", "working"],
++]);
++
+ function nextReportSeq() {
+   reportSeq += 1;
+   return reportSeq;
+@@ -34,143 +44,401 @@ function sessionIDFromProperties(properties) {
+     : undefined;
+ }
+ 
+-const SESSION_STATE_BY_STATUS = new Map([
+-  ["idle", "idle"],
+-  ["active", "working"],
+-  ["busy", "working"],
+-  ["pending", "working"],
+-  ["retry", "working"],
+-  ["running", "working"],
+-  ["streaming", "working"],
+-  ["working", "working"],
+-]);
++function sessionStatusKind(status) {
++  return typeof status === "string" ? status.toLowerCase() : status?.type?.toLowerCase();
++}
+ 
+ function stateFromSessionStatus(status) {
+-  const kind = typeof status === "string" ? status : status?.type;
++  const kind = sessionStatusKind(status);
+   return typeof kind === "string"
+-    ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase())
++    ? SESSION_STATE_BY_STATUS.get(kind)
+     : undefined;
+ }
+ 
+-function request(method, params) {
+-  const pending = requestChain.then(() => requestOnce(method, params));
+-  requestChain = pending.catch(() => {});
+-  return pending;
+-}
++export const HerdrAgentStatePlugin = async () => {
++  if (
++    process.env.HERDR_ENV !== "1" ||
++    !process.env.HERDR_SOCKET_PATH ||
++    !process.env.HERDR_PANE_ID
++  ) {
++    return {};
++  }
+ 
+-function requestOnce(method, params) {
+-  const paneId = process.env.HERDR_PANE_ID;
+-  const socketPath = process.env.HERDR_SOCKET_PATH;
+-
+-  if (!paneId || !socketPath) {
+-    return Promise.resolve();
+-  }
+-
+-  const socketEndpoint =
+-    process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+-
+-  const requestId = `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
+-    .toString()
+-    .padStart(6, "0")}`;
+-  const request = {
+-    id: requestId,
+-    method,
+-    params: {
+-      pane_id: paneId,
+-      source: SOURCE,
+-      agent: AGENT,
+-      seq: nextReportSeq(),
+-      ...params,
+-    },
+-  };
++  let requestChain = Promise.resolve();
++  let currentRootSessionID;
++  let unscopedErrorBlocked = false;
++  let disposed = false;
++  const sessionLifecycle = new Map();
++  const childParents = new Map();
++  const retiredChildren = new Set();
++  const activeClients = new Map();
+ 
+-  return new Promise((resolve) => {
+-    const client = net.createConnection(socketEndpoint, () => {
+-      client.write(`${JSON.stringify(request)}\n`);
+-    });
++  function requestOnce(method, params) {
++    if (disposed) {
++      return Promise.resolve();
++    }
++    const paneId = process.env.HERDR_PANE_ID;
++    const socketPath = process.env.HERDR_SOCKET_PATH;
++    if (!paneId || !socketPath) {
++      return Promise.resolve();
++    }
+ 
+-    const finish = () => {
+-      client.destroy();
+-      resolve();
++    const socketEndpoint =
++      process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
++    const request = {
++      id: `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
++        .toString()
++        .padStart(6, "0")}`,
++      method,
++      params: {
++        pane_id: paneId,
++        source: SOURCE,
++        agent: AGENT,
++        seq: nextReportSeq(),
++        ...params,
++      },
+     };
+ 
+-    client.setTimeout(500, finish);
+-    client.on("data", finish);
+-    client.on("error", finish);
+-    client.on("end", finish);
+-    client.on("close", resolve);
+-  });
+-}
++    return new Promise((resolve) => {
++      if (disposed) {
++        resolve();
++        return;
++      }
+ 
+-function reportSession(sessionID, sessionStartSource) {
+-  if (!sessionID) {
+-    return Promise.resolve();
++      let client;
++      let finished = false;
++      const finish = () => {
++        if (finished) {
++          return;
++        }
++        finished = true;
++        if (client) {
++          activeClients.delete(client);
++          client.destroy();
++        }
++        resolve();
++      };
++
++      client = net.createConnection(socketEndpoint, () => {
++        if (disposed) {
++          finish();
++          return;
++        }
++        client.write(`${JSON.stringify(request)}\n`);
++      });
++      activeClients.set(client, finish);
++      if (disposed) {
++        finish();
++        return;
++      }
++      client.setTimeout(500, finish);
++      client.on("data", finish);
++      client.on("error", finish);
++      client.on("end", finish);
++      client.on("close", finish);
++    });
+   }
+-  const params = { agent_session_id: sessionID };
+-  if (sessionStartSource) {
+-    params.session_start_source = sessionStartSource;
++
++  function request(method, params) {
++    const pending = requestChain.then(() => {
++      if (disposed) {
++        return;
++      }
++      return requestOnce(method, params);
++    });
++    requestChain = pending.catch(() => {});
++    return pending;
+   }
+-  return request("pane.report_agent_session", params);
+-}
+ 
+-function reportState(state, sessionID) {
+-  const params = { state };
+-  if (sessionID) {
+-    reportedRootSessionID = sessionID;
+-    params.agent_session_id = sessionID;
++  function reportSession(sessionID, sessionStartSource) {
++    if (disposed || !sessionID) {
++      return Promise.resolve();
++    }
++    const params = { agent_session_id: sessionID };
++    if (sessionStartSource) {
++      params.session_start_source = sessionStartSource;
++    }
++    return request("pane.report_agent_session", params);
+   }
+-  return request("pane.report_agent", params);
+-}
+ 
+-export const HerdrAgentStatePlugin = async () => {
+-  if (
+-    process.env.HERDR_ENV !== "1" ||
+-    !process.env.HERDR_SOCKET_PATH ||
+-    !process.env.HERDR_PANE_ID
+-  ) {
+-    return {};
++  function reportState(state, sessionID) {
++    if (disposed) {
++      return Promise.resolve();
++    }
++    const params = { state };
++    if (sessionID) {
++      params.agent_session_id = sessionID;
++    }
++    return request("pane.report_agent", params);
++  }
++
++  function lifecycleFor(sessionID) {
++    let lifecycle = sessionLifecycle.get(sessionID);
++    if (!lifecycle) {
++      lifecycle = {
++        pendingError: false,
++        timer: undefined,
++        retryNext: undefined,
++        blocked: false,
++      };
++      sessionLifecycle.set(sessionID, lifecycle);
++    }
++    return lifecycle;
++  }
++
++  function clearPendingError(lifecycle) {
++    if (lifecycle.timer !== undefined) {
++      clearTimeout(lifecycle.timer);
++    }
++    lifecycle.timer = undefined;
++    lifecycle.pendingError = false;
++  }
++
++  function clearSessionLifecycle(sessionID) {
++    if (!sessionID) {
++      return;
++    }
++    const lifecycle = sessionLifecycle.get(sessionID);
++    if (lifecycle) {
++      clearPendingError(lifecycle);
++      sessionLifecycle.delete(sessionID);
++    }
++  }
++
++  function retireChild(sessionID) {
++    if (!sessionID) {
++      return;
++    }
++    childParents.delete(sessionID);
++    retiredChildren.add(sessionID);
++  }
++
++  function retireChildrenOutsideRoot(rootSessionID) {
++    for (const [childSessionID, parentSessionID] of childParents) {
++      if (parentSessionID !== rootSessionID) {
++        retireChild(childSessionID);
++      }
++    }
++  }
++
++  function retireAllChildren() {
++    for (const childSessionID of [...childParents.keys()]) {
++      retireChild(childSessionID);
++    }
++  }
++
++  function establishRootSession(sessionID) {
++    if (!sessionID) {
++      return;
++    }
++    if (currentRootSessionID && currentRootSessionID !== sessionID) {
++      clearSessionLifecycle(currentRootSessionID);
++    }
++    retireChildrenOutsideRoot(sessionID);
++    clearSessionLifecycle(sessionID);
++    currentRootSessionID = sessionID;
++  }
++
++  function acceptsRootEvent(sessionID) {
++    if (!sessionID) {
++      return true;
++    }
++    if (!currentRootSessionID) {
++      establishRootSession(sessionID);
++      return true;
++    }
++    return sessionID === currentRootSessionID;
++  }
++
++  function markSessionContinuing(sessionID, status) {
++    if (!sessionID) {
++      return;
++    }
++    if (sessionStatusKind(status) !== "retry") {
++      clearSessionLifecycle(sessionID);
++      return;
++    }
++
++    const lifecycle = lifecycleFor(sessionID);
++    clearPendingError(lifecycle);
++    lifecycle.blocked = false;
++    lifecycle.retryNext =
++      typeof status === "object" && typeof status?.next === "number"
++        ? status.next
++        : undefined;
++  }
++
++  function errorFallbackDelay(lifecycle) {
++    const retryRemaining =
++      typeof lifecycle.retryNext === "number"
++        ? Math.max(0, lifecycle.retryNext - Date.now())
++        : 0;
++    return Math.min(
++      ERROR_MAX_FALLBACK_MS,
++      Math.max(ERROR_FALLBACK_MS, retryRemaining + ERROR_RETRY_GRACE_MS),
++    );
++  }
++
++  async function confirmPendingError(sessionID) {
++    if (disposed) {
++      return false;
++    }
++    const lifecycle = sessionLifecycle.get(sessionID);
++    if (!lifecycle?.pendingError) {
++      return false;
++    }
++    clearPendingError(lifecycle);
++    lifecycle.retryNext = undefined;
++    if (!lifecycle.blocked) {
++      lifecycle.blocked = true;
++      await reportState("blocked", sessionID);
++    }
++    return true;
++  }
++
++  function deferSessionError(sessionID) {
++    if (disposed) {
++      return;
++    }
++    const lifecycle = lifecycleFor(sessionID);
++    if (lifecycle.blocked) {
++      return;
++    }
++    clearPendingError(lifecycle);
++    lifecycle.pendingError = true;
++    lifecycle.timer = setTimeout(() => {
++      if (!disposed) {
++        void confirmPendingError(sessionID);
++      }
++    }, errorFallbackDelay(lifecycle));
++    lifecycle.timer.unref?.();
++  }
++
++  async function reportContinuing(state, sessionID, status) {
++    markSessionContinuing(sessionID, status);
++    if (!unscopedErrorBlocked) {
++      await reportState(state, sessionID);
++    }
++  }
++
++  async function reportIdleOrConfirmError(sessionID) {
++    if (unscopedErrorBlocked) {
++      return;
++    }
++    const lifecycle = sessionID ? sessionLifecycle.get(sessionID) : undefined;
++    if (sessionID && lifecycle?.pendingError) {
++      await confirmPendingError(sessionID);
++      return;
++    }
++    if (lifecycle?.blocked) {
++      return;
++    }
++    clearSessionLifecycle(sessionID);
++    await reportState("idle", sessionID);
++  }
++
++  function dispose() {
++    if (disposed) {
++      return;
++    }
++    disposed = true;
++    for (const lifecycle of sessionLifecycle.values()) {
++      clearPendingError(lifecycle);
++    }
++    sessionLifecycle.clear();
++    childParents.clear();
++    retiredChildren.clear();
++    currentRootSessionID = undefined;
++    unscopedErrorBlocked = false;
++    for (const finish of [...activeClients.values()]) {
++      finish();
++    }
++    activeClients.clear();
++    requestChain = Promise.resolve();
+   }
+ 
+   return {
+     "chat.message": async ({ sessionID }) => {
+-      if (sessionID && childSessions.has(sessionID)) {
++      if (
++        disposed ||
++        (sessionID &&
++          (retiredChildren.has(sessionID) || childParents.has(sessionID)))
++      ) {
+         return;
+       }
+-      await reportState("working", sessionID);
++      establishRootSession(sessionID);
++      if (!unscopedErrorBlocked) {
++        await reportState("working", sessionID);
++      }
+     },
+     event: async ({ event }) => {
++      if (disposed) {
++        return;
++      }
+       const type = event?.type;
+       const properties = event?.properties ?? {};
+       const sessionID = sessionIDFromProperties(properties);
+-
+       const info = properties.info;
++
++      if (type === "session.deleted" && info?.id && info.parentID) {
++        retireChild(info.id);
++        return;
++      }
++
++      if (
++        (sessionID && retiredChildren.has(sessionID)) ||
++        (info?.id && retiredChildren.has(info.id))
++      ) {
++        return;
++      }
++
+       if (info?.id && info.parentID) {
+-        childSessions.add(info.id);
++        if (!currentRootSessionID || info.parentID === currentRootSessionID) {
++          childParents.set(info.id, info.parentID);
++        } else {
++          retireChild(info.id);
++        }
++        return;
+       }
+-      if (sessionID && childSessions.has(sessionID)) {
++
++      if (sessionID && childParents.has(sessionID)) {
++        if (type === "session.deleted") {
++          retireChild(sessionID);
++          return;
++        }
+         const state = CHILD_EVENT_STATES.get(type);
+-        if (state) {
++        if (state && !unscopedErrorBlocked) {
+           await reportState(state);
+         }
+         return;
+       }
+ 
++      if (
++        type !== "session.created" &&
++        type !== "session.updated" &&
++        type !== "session.deleted" &&
++        !acceptsRootEvent(sessionID)
++      ) {
++        return;
++      }
++
+       switch (type) {
+         case "session.created":
+-          // A root session.created is a genuine new-session start (subagent
+-          // creates are dropped above). Signal it so herdr replaces the pane's
+-          // prior session id instead of treating the change as cross-talk.
++          establishRootSession(sessionID);
+           await reportSession(sessionID, "new");
+           break;
+         case "session.updated":
+-          if (sessionID && sessionID !== reportedRootSessionID) {
++          if (sessionID && !currentRootSessionID) {
++            establishRootSession(sessionID);
+             await reportSession(sessionID);
+           }
+           break;
+         case "session.status": {
+           const state = stateFromSessionStatus(properties.status);
+-          if (state) {
+-            await reportState(state, sessionID);
++          if (state === "working") {
++            await reportContinuing(state, sessionID, properties.status);
++          } else if (state === "idle") {
++            await reportIdleOrConfirmError(sessionID);
+           } else {
+             await reportSession(sessionID);
+           }
+@@ -182,21 +450,35 @@ export const HerdrAgentStatePlugin = async () => {
+         case "question.replied":
+         case "question.rejected":
+         case "session.compacted":
+-          await reportState("working", sessionID);
++          await reportContinuing("working", sessionID, "working");
+           break;
+         case "permission.asked":
+         case "question.asked":
+-        case "session.error":
++          clearSessionLifecycle(sessionID);
+           await reportState("blocked", sessionID);
+           break;
++        case "session.error":
++          if (!sessionID) {
++            unscopedErrorBlocked = true;
++            await reportState("blocked");
++            break;
++          }
++          deferSessionError(sessionID);
++          break;
+         case "session.idle":
+-          await reportState("idle", sessionID);
++          await reportIdleOrConfirmError(sessionID);
+           break;
+         case "session.deleted":
++          clearSessionLifecycle(sessionID);
++          if (sessionID && sessionID === currentRootSessionID) {
++            currentRootSessionID = undefined;
++            retireAllChildren();
++          }
+           break;
+         default:
+           break;
+       }
+     },
++    dispose,
+   };
+ };
+diff --git a/src/integration/assets/opencode/herdr-agent-state.test.ts b/src/integration/assets/opencode/herdr-agent-state.test.ts
+index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6428cce6e 100644
+--- a/src/integration/assets/opencode/herdr-agent-state.test.ts
++++ b/src/integration/assets/opencode/herdr-agent-state.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, expect, mock, test } from "bun:test";
++import { beforeEach, expect, mock, test, vi } from "bun:test";
+ 
+ const requests: unknown[] = [];
+ const clients: FakeClient[] = [];
+@@ -7,6 +7,7 @@ let autoAcknowledge = true;
+ let importCounter = 0;
+ 
+ type FakeClient = {
++  destroyed: boolean;
+   emit: (event: string) => void;
+ };
+ 
+@@ -15,6 +16,7 @@ mock.module("node:net", () => ({
+     createConnection(_path: string, onConnect: () => void) {
+       const handlers = new Map<string, () => void>();
+       const client = {
++        destroyed: false,
+         write(input: string) {
+           requests.push(JSON.parse(input.trim()));
+           requestWaiters.shift()?.();
+@@ -26,7 +28,9 @@ mock.module("node:net", () => ({
+         on(event: string, handler: () => void) {
+           handlers.set(event, handler);
+         },
+-        destroy() {},
++        destroy() {
++          client.destroyed = true;
++        },
+         emit(event: string) {
+           handlers.get(event)?.();
+         },
+@@ -48,16 +52,48 @@ beforeEach(() => {
+   process.env.HERDR_PANE_ID = "test:p1";
+ });
+ 
+-async function loadPlugin() {
++async function loadPluginFactory() {
+   importCounter += 1;
+   const { HerdrAgentStatePlugin } = await import(`./herdr-agent-state.js?test=${importCounter}`);
+-  return HerdrAgentStatePlugin();
++  return HerdrAgentStatePlugin;
++}
++
++async function loadPlugin() {
++  return (await loadPluginFactory())();
+ }
+ 
+ function waitForNextRequest(): Promise<void> {
+   return new Promise((resolve) => requestWaiters.push(resolve));
+ }
+ 
++function sessionStatusEvent(sessionID: string, status: Record<string, unknown>) {
++  return {
++    event: {
++      type: "session.status",
++      properties: { sessionID, status },
++    },
++  };
++}
++
++function apiErrorEvent(sessionID?: string) {
++  return {
++    event: {
++      type: "session.error",
++      properties: {
++        ...(sessionID ? { sessionID } : {}),
++        error: {
++          name: "APIError",
++          data: {
++            message: "Service unavailable",
++            statusCode: 503,
++            isRetryable: true,
++          },
++        },
++      },
++    },
++  };
++}
++
+ test("serializes lifecycle reports", async () => {
+   autoAcknowledge = false;
+   const plugin = await loadPlugin();
+@@ -91,7 +127,7 @@ test("serializes lifecycle reports", async () => {
+   expect(sequences[1]).toBe((sequences[0] as number) + 1);
+ });
+ 
+-test("suppresses redundant same-session updates", async () => {
++test("ignores session.updated once the current root is established", async () => {
+   const plugin = await loadPlugin();
+ 
+   await plugin.event({
+@@ -107,24 +143,486 @@ test("suppresses redundant same-session updates", async () => {
+     event: { type: "session.updated", properties: { sessionID: "replacement-session" } },
+   });
+ 
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
++test("reports retry status as working", async () => {
++  const plugin = await loadPlugin();
++
++  await plugin.event({
++    event: {
++      type: "session.status",
++      properties: { sessionID: "root-session", status: { type: "retry" } },
++    },
++  });
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++  expect(requests.map(requestState)).toEqual(["working"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
++test("error followed by retry reports working without blocked", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++
++    await plugin.event(apiErrorEvent("root-session"));
++    expect(requests).toHaveLength(0);
++
++    await plugin.event(
++      sessionStatusEvent("root-session", {
++        type: "retry",
++        attempt: 1,
++        message: "Service unavailable",
++        next: Date.now() + 2_000,
++      }),
++    );
++    vi.runAllTimers();
++    await Promise.resolve();
++
++    expect(requests.map(requestState)).toEqual(["working"]);
++    expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("retry then error then busy never reports blocked", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++
++    await plugin.event(
++      sessionStatusEvent("root-session", {
++        type: "retry",
++        attempt: 1,
++        message: "Service unavailable",
++        next: Date.now() + 30_000,
++      }),
++    );
++    await plugin.event(apiErrorEvent("root-session"));
++    vi.advanceTimersByTime(5_000);
++    await Promise.resolve();
++    expect(requests.map(requestState)).toEqual(["working"]);
++
++    await plugin.event(sessionStatusEvent("root-session", { type: "busy" }));
++    vi.runAllTimers();
++    await Promise.resolve();
++
++    expect(requests.map(requestState)).toEqual(["working", "working"]);
++    expect(requests.map(requestState)).not.toContain("blocked");
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("error then idle reports blocked once without idle overwrite", async () => {
++  const plugin = await loadPlugin();
++
++  await plugin.event(apiErrorEvent("root-session"));
++  await plugin.event(sessionStatusEvent("root-session", { type: "idle" }));
++  await plugin.event({
++    event: { type: "session.idle", properties: { sessionID: "root-session" } },
++  });
++
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
++test("error without follow-up reports blocked through bounded fallback", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++    await plugin.event(apiErrorEvent("root-session"));
++    expect(requests).toHaveLength(0);
++
++    const dispatched = waitForNextRequest();
++    vi.runAllTimers();
++    await dispatched;
++
++    expect(requests.map(requestState)).toEqual(["blocked"]);
++    expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("unrelated status cannot cancel another session pending error", async () => {
++  const plugin = await loadPlugin();
++
++  await plugin.event(apiErrorEvent("first-session"));
++  await plugin.event(
++    sessionStatusEvent("second-session", {
++      type: "retry",
++      attempt: 1,
++      message: "Service unavailable",
++      next: Date.now() + 2_000,
++    }),
++  );
++  await plugin.event(sessionStatusEvent("first-session", { type: "idle" }));
++
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual(["first-session"]);
++});
++
++test("session deletion clears a pending error fallback", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++    await plugin.event(apiErrorEvent("root-session"));
++    await plugin.event({
++      event: {
++        type: "session.deleted",
++        properties: { sessionID: "root-session" },
++      },
++    });
++
++    vi.runAllTimers();
++    await Promise.resolve();
++    expect(requests).toHaveLength(0);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("new session retires old pending lifecycle and stale events", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++    await plugin.event(apiErrorEvent("old-session"));
++    await plugin.event({
++      event: {
++        type: "session.created",
++        properties: { sessionID: "new-session" },
++      },
++    });
++
++    await plugin.event(sessionStatusEvent("old-session", { type: "idle" }));
++    await plugin.event(apiErrorEvent("old-session"));
++    await plugin.event({
++      event: {
++        type: "session.idle",
++        properties: { sessionID: "old-session" },
++      },
++    });
++    vi.runAllTimers();
++    await Promise.resolve();
++
++    expect(requests.map(requestMethod)).toEqual(["pane.report_agent_session"]);
++    expect(requests.map(requestSessionID)).toEqual(["new-session"]);
++    expect(requests.map(requestState)).toEqual([undefined]);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("unscoped error remains blocked across current root busy", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: { sessionID: "root-session" },
++    },
++  });
++  requests.length = 0;
++
++  await plugin.event(apiErrorEvent());
++  await plugin.event(sessionStatusEvent("root-session", { type: "busy" }));
++
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual([undefined]);
++});
++
++test("dispose cancels pending fallback and ignores later events", async () => {
++  vi.useFakeTimers();
++  try {
++    const plugin = await loadPlugin();
++    await plugin.event(apiErrorEvent("root-session"));
++    await plugin.dispose();
++    vi.runAllTimers();
++    await Promise.resolve();
++    await plugin.event(sessionStatusEvent("root-session", { type: "idle" }));
++
++    expect(requests).toHaveLength(0);
++  } finally {
++    vi.useRealTimers();
++  }
++});
++
++test("session.updated establishes only the initial current session", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.updated",
++      properties: { sessionID: "startup-root" },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.updated",
++      properties: { sessionID: "background-session" },
++    },
++  });
++  await plugin.event(sessionStatusEvent("startup-root", { type: "busy" }));
++  await plugin.event(sessionStatusEvent("background-session", { type: "busy" }));
++
+   expect(requests.map(requestMethod)).toEqual([
++    "pane.report_agent_session",
+     "pane.report_agent",
++  ]);
++  expect(requests.map(requestSessionID)).toEqual(["startup-root", "startup-root"]);
++});
++
++test("background session.updated cannot steal a pending terminal root", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event(apiErrorEvent("root-a"));
++  await plugin.event({
++    event: {
++      type: "session.updated",
++      properties: { sessionID: "root-b" },
++    },
++  });
++  await plugin.event(sessionStatusEvent("root-a", { type: "idle" }));
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-a"]);
++});
++
++test("chat.message establishes new root ownership", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: { sessionID: "root-a" },
++    },
++  });
++  await plugin["chat.message"]({ sessionID: "root-b" });
++  await plugin.event(sessionStatusEvent("root-a", { type: "busy" }));
++  await plugin.event(sessionStatusEvent("root-b", { type: "busy" }));
++
++  expect(requests.map(requestMethod)).toEqual([
+     "pane.report_agent_session",
++    "pane.report_agent",
++    "pane.report_agent",
+   ]);
+-  expect(requests.map(requestSessionID)).toEqual(["root-session", "replacement-session"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-a", "root-b", "root-b"]);
+ });
+ 
+-test("reports retry status as working", async () => {
++test("same-root chat cannot clear an unscoped error block", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: { sessionID: "root-session" },
++    },
++  });
++  requests.length = 0;
++
++  await plugin.event(apiErrorEvent());
++  await plugin["chat.message"]({ sessionID: "root-session" });
++
++  expect(requests.map(requestState)).toEqual(["blocked"]);
++  expect(requests.map(requestSessionID)).toEqual([undefined]);
++});
++
++test("old child reply is dropped after root replacement", async () => {
+   const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: { sessionID: "old-root" },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "old-child",
++        info: { id: "old-child", parentID: "old-root" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: { sessionID: "new-root" },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "permission.replied",
++      properties: { sessionID: "old-child" },
++    },
++  });
+ 
++  expect(requests.map(requestMethod)).toEqual([
++    "pane.report_agent_session",
++    "pane.report_agent_session",
++  ]);
++  expect(requests.map(requestSessionID)).toEqual(["old-root", "new-root"]);
++});
++
++test("canonical child deletion removes ownership before trailing reply", async () => {
++  const plugin = await loadPlugin();
+   await plugin.event({
+     event: {
+-      type: "session.status",
+-      properties: { sessionID: "root-session", status: { type: "retry" } },
++      type: "session.created",
++      properties: { sessionID: "root-session" },
+     },
+   });
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "child-session",
++        info: { id: "child-session", parentID: "root-session" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.deleted",
++      properties: {
++        sessionID: "child-session",
++        info: { id: "child-session", parentID: "root-session" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "question.replied",
++      properties: { sessionID: "child-session" },
++    },
++  });
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent_session"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
++test("no-root deleted child stays retired through trailing activity", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "child-session",
++        info: { id: "child-session", parentID: "unknown-root" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.deleted",
++      properties: {
++        sessionID: "child-session",
++        info: { id: "child-session", parentID: "unknown-root" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "question.replied",
++      properties: { sessionID: "child-session" },
++    },
++  });
++  await plugin["chat.message"]({ sessionID: "child-session" });
++
++  expect(requests).toHaveLength(0);
++});
++
++test("initial root retires children learned for another parent", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "old-child",
++        info: { id: "old-child", parentID: "old-parent" },
++      },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "session.updated",
++      properties: { sessionID: "new-root" },
++    },
++  });
++  await plugin.event({
++    event: {
++      type: "question.replied",
++      properties: { sessionID: "old-child" },
++    },
++  });
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent_session"]);
++  expect(requests.map(requestSessionID)).toEqual(["new-root"]);
++  expect(requests.map(requestState)).toEqual([undefined]);
++});
++
++test("initial status root retires children learned for another parent", async () => {
++  const plugin = await loadPlugin();
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "old-child",
++        info: { id: "old-child", parentID: "old-root" },
++      },
++    },
++  });
++  await plugin.event(sessionStatusEvent("new-root", { type: "busy" }));
++  await plugin.event({
++    event: {
++      type: "question.replied",
++      properties: { sessionID: "old-child" },
++    },
++  });
++  await plugin["chat.message"]({ sessionID: "old-child" });
+ 
+   expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++  expect(requests.map(requestState)).toEqual(["working"]);
++  expect(requests.map(requestSessionID)).toEqual(["new-root"]);
++});
++
++test("dispose drops queued statuses before socket dispatch", async () => {
++  autoAcknowledge = false;
++  const plugin = await loadPlugin();
++  const first = plugin.event(sessionStatusEvent("root-session", { type: "busy" }));
++  const second = plugin.event(sessionStatusEvent("root-session", { type: "busy" }));
++
++  await plugin.dispose();
++  await Promise.all([first, second]);
++
++  expect(requests).toHaveLength(0);
++  expect(clients).toHaveLength(0);
++});
++
++test("dispose destroys an in-flight socket and resolves its request", async () => {
++  autoAcknowledge = false;
++  const plugin = await loadPlugin();
++  const dispatched = waitForNextRequest();
++  const pending = plugin.event(sessionStatusEvent("root-session", { type: "busy" }));
++  await dispatched;
++
++  expect(clients).toHaveLength(1);
++  expect(clients[0]?.destroyed).toBe(false);
++  await plugin.dispose();
++  await pending;
++
++  expect(clients[0]?.destroyed).toBe(true);
++  expect(requests).toHaveLength(1);
++});
++
++test("a cached module can create a fresh plugin after disposal", async () => {
++  const factory = await loadPluginFactory();
++  const first = await factory();
++  await first.dispose();
++
++  const second = await factory();
++  await second.event(sessionStatusEvent("root-session", { type: "busy" }));
++
+   expect(requests.map(requestState)).toEqual(["working"]);
+   expect(requests.map(requestSessionID)).toEqual(["root-session"]);
+ });
+diff --git a/src/integration/mod.rs b/src/integration/mod.rs
+index 77d8ddda4da93388618f790909f5c23cc5b781a0..657ba5e1934a60c1223f78d27fdf3afece6123e1 100644
+--- a/src/integration/mod.rs
++++ b/src/integration/mod.rs
+@@ -157,7 +157,7 @@ const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
+ ];
+ const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
+ const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
+-const OPENCODE_INTEGRATION_VERSION: u32 = 9;
++const OPENCODE_INTEGRATION_VERSION: u32 = 10;
+ const KILO_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
+ const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/herdr-agent-state.js");
+ const KILO_INTEGRATION_VERSION: u32 = 4;
+-- 
+2.55.0.windows.3
+
