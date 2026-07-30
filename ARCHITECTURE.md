@@ -40,7 +40,10 @@ behavior; code and tests remain the detailed implementation truth.
   bounded clipboard/drop image transport, and the narrow Sandbox adapter. That
   adapter invokes the one pre-provisioned standalone guest payload at
   `C:\HerdrSandbox\runtime\herdr.exe`; it never addresses a managed
-  `runtime/<build-id>` installation inside the guest.
+  `runtime/<build-id>` installation inside the guest. On Windows,
+  `herdr status client --json` exposes this exact path as
+  `windows_remote_guest_executable` so consumers can reject an absent or different
+  adapter contract before provisioning.
 - Mailbox 0004 owns deterministic ConPTY packaging, managed Windows distribution,
   fork update sources, installer lifecycle, and the bounded legacy migration.
 - Mailbox 0005 owns OpenCode retry/error lifecycle correlation. It must preserve

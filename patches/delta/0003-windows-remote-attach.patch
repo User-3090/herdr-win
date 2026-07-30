@@ -1,4 +1,4 @@
-From d2d38ee95e1bfe0f5efa994dedbc8e2491f4fb5c Mon Sep 17 00:00:00 2001
+From 7835ffaba93f843fcdb9dc1307ac903c00bf9812 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -13,6 +13,7 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  .../src/content/docs/persistence-remote.mdx   |    8 +-
  .../src/content/docs/zh-cn/configuration.mdx  |    4 +-
  .../content/docs/zh-cn/persistence-remote.mdx |   10 +-
+ src/cli/status.rs                             |   27 +
  src/client/mod.rs                             |  291 +-
  src/ipc.rs                                    |  176 +-
  src/main.rs                                   |    1 -
@@ -30,7 +31,7 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
  src/update.rs                                 |    5 +
- 25 files changed, 5121 insertions(+), 3356 deletions(-)
+ 26 files changed, 5153 insertions(+), 3351 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -126,7 +127,7 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..ea500322cc1ed01d121dad06afae9c8a
  デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
  
 diff --git a/docs/next/website/src/content/docs/persistence-remote.mdx b/docs/next/website/src/content/docs/persistence-remote.mdx
-index a365ac8838673144952ce0b6dcf92d3125e27360..79fad991a402d9a12828813738921acd1f625fe4 100644
+index a365ac8838673144952ce0b6dcf92d3125e27360..7c2f645f6121c2a71448fb432c74f3e5ad5d8d02 100644
 --- a/docs/next/website/src/content/docs/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/persistence-remote.mdx
 @@ -65,9 +65,13 @@ herdr --remote workbox
@@ -134,7 +135,7 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..79fad991a402d9a12828813738921acd
  Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
  
 -Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
-+Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the standalone Herdr sandbox runtime at `C:\HerdrSandbox\runtime\herdr.exe`; automatic install and live handoff remain Unix-host-only.
++Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the standalone Herdr sandbox runtime at `C:\HerdrSandbox\runtime\herdr.exe`; automatic install and live handoff remain Unix-host-only. On Windows, `herdr status client --json` reports that exact adapter path as `windows_remote_guest_executable` so the Sandbox launcher can reject incompatible builds before provisioning.
  
 -By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 +On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or DIB clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
@@ -189,6 +190,55 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..9a1ec42220eb42eb30318e4463942a77
  
  默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
  
+diff --git a/src/cli/status.rs b/src/cli/status.rs
+index 49b3c129f5ed807ccca6bf4989a44407ef400431..d22bd3338f1c50e89cbe3f09d6a2eefded3a2fcc 100644
+--- a/src/cli/status.rs
++++ b/src/cli/status.rs
+@@ -223,6 +223,7 @@ struct ClientStatusJson {
+     protocol: u32,
+     binary: String,
+     session: Option<String>,
++    windows_remote_guest_executable: Option<&'static str>,
+ }
+ 
+ #[derive(Serialize)]
+@@ -256,6 +257,8 @@ fn client_status_json() -> ClientStatusJson {
+         protocol: crate::protocol::PROTOCOL_VERSION,
+         binary: current_exe_label(),
+         session: crate::session::active_name(),
++        windows_remote_guest_executable:
++            crate::remote::windows_remote_guest_executable(),
+     }
+ }
+ 
+@@ -329,3 +332,27 @@ fn print_status_help() {
+     eprintln!("  herdr status server [--json]  show running server status");
+     eprintln!("  herdr status client [--json]  show local client binary status");
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn client_status_json_exposes_windows_remote_guest_executable() {
++        let status = ClientStatusJson {
++            version: "test".to_string(),
++            channel: "test",
++            protocol: 1,
++            binary: "test".to_string(),
++            session: None,
++            windows_remote_guest_executable:
++                crate::remote::windows_remote_guest_executable(),
++        };
++
++        let value = serde_json::to_value(status).unwrap();
++        let expected = crate::remote::windows_remote_guest_executable()
++            .map(|path| serde_json::Value::String(path.to_string()))
++            .unwrap_or(serde_json::Value::Null);
++        assert_eq!(value["windows_remote_guest_executable"], expected);
++    }
++}
 diff --git a/src/client/mod.rs b/src/client/mod.rs
 index c2c2f8a7f695ab0830214e3e8dabaf242f103ab6..8500d546f8694c854c5c9dc68f3010835b9369a0 100644
 --- a/src/client/mod.rs
@@ -2038,10 +2088,10 @@ index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c7673
 +    }
 +}
 diff --git a/src/remote.rs b/src/remote.rs
-index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86bb179369e 100644
+index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a2450e7d7987 100644
 --- a/src/remote.rs
 +++ b/src/remote.rs
-@@ -1,151 +1,14 @@
+@@ -1,150 +1,23 @@
 +mod attach;
  #[cfg(unix)]
  mod unix;
@@ -2051,7 +2101,7 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
 -
 -#[cfg(windows)]
 -pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
--#[cfg(windows)]
+ #[cfg(windows)]
 -pub(crate) const REMOTE_KEYBINDINGS_ENV_VAR: &str = "HERDR_REMOTE_KEYBINDINGS";
 -
 -#[cfg(windows)]
@@ -2061,7 +2111,7 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
 -    Server,
 -}
 -
- #[cfg(windows)]
+-#[cfg(windows)]
 -impl RemoteKeybindings {
 -    fn parse(value: &str) -> Result<Self, String> {
 -        match value {
@@ -2164,8 +2214,12 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
 -
 -    Ok((cleaned, remote))
 -}
--
--#[cfg(windows)]
++mod windows;
+ 
++pub(crate) use attach::*;
++#[cfg(unix)]
++pub(crate) use unix::run_remote_client_bridge;
+ #[cfg(windows)]
 -fn validate_remote_target(target: &str) -> Result<&str, String> {
 -    if target.is_empty() {
 -        return Err("missing value for --remote".to_string());
@@ -2175,30 +2229,30 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
 -    }
 -    Ok(target)
 -}
--
--#[cfg(windows)]
++pub(crate) use windows::run_remote_client_bridge;
+ 
+ #[cfg(windows)]
 -pub(crate) fn run_remote(_remote: RemoteLaunch) -> std::io::Result<()> {
 -    debug_assert!(!crate::platform::capabilities().remote_attach);
 -    Err(std::io::Error::other(
 -        "remote mode is not supported on Windows yet",
 -    ))
--}
-+mod windows;
++pub(crate) fn windows_remote_guest_executable() -> Option<&'static str> {
++    Some(windows::REMOTE_HERDR_PATH)
+ }
  
-+pub(crate) use attach::*;
-+#[cfg(unix)]
-+pub(crate) use unix::run_remote_client_bridge;
- #[cfg(windows)]
+-#[cfg(windows)]
 -pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
 -    debug_assert!(!crate::platform::capabilities().remote_attach);
 -    Err(std::io::Error::other(
 -        "remote client bridge is not supported on Windows yet",
 -    ))
--}
-+pub(crate) use windows::run_remote_client_bridge;
++#[cfg(not(windows))]
++pub(crate) fn windows_remote_guest_executable() -> Option<&'static str> {
++    None
+ }
  
  pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
-     if is_remote_auth_error(err) {
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d1f2e07a5
@@ -8947,7 +9001,7 @@ index 6fe927c1cc0f99c4f2fbfd99bf9b758f4acfd15e..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d1c882f1e5a8f53858ec461bbe40f56f0db4e00
+index 0000000000000000000000000000000000000000..6f079629004c41cbde7ed2272c51b30f4f428b77
 --- /dev/null
 +++ b/src/remote/windows.rs
 @@ -0,0 +1,125 @@
@@ -8960,7 +9014,7 @@ index 0000000000000000000000000000000000000000..7d1c882f1e5a8f53858ec461bbe40f56
 +use base64::Engine as _;
 +use interprocess::local_socket::traits::Stream as _;
 +
-+const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr.exe";
++pub(super) const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr.exe";
 +
 +pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
 +    ensure_remote_server_running()?;
