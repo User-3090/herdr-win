@@ -1,3 +1,4 @@
+/.agent/
 /target
 /vendor/libghostty-vt/zig-pkg/
 __pycache__/
