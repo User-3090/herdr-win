@@ -1,4 +1,4 @@
-From 262119e0beb79caa1bc89c11df5e7013ce3a227a Mon Sep 17 00:00:00 2001
+From d2d38ee95e1bfe0f5efa994dedbc8e2491f4fb5c Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -103,7 +103,7 @@ index dda1629c537c6807c3a903cc22a5601c4dc9c2b0..137ed74cbcc199d65fb1cb64deca2fde
  ## キーバインド
  
 diff --git a/docs/next/website/src/content/docs/ja/persistence-remote.mdx b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
-index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf114946655a7d 100644
+index f8d3ff02f5be343971171672c9f1793384f3357d..ea500322cc1ed01d121dad06afae9c8a182636e8 100644
 --- a/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -114,7 +114,7 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf1149
 +リモートアタッチは x86_64 と aarch64 の Linux および macOS ホストをサポートします。Herdr はリモートのプラットフォームを確認し、リモートの `PATH` 上にある一致する `herdr` を優先してから、一般的な直接インストール、Homebrew、mise、Nix プロファイルのパスを確認します。一致するバイナリがない場合、対話的な実行では `~/.local/bin/herdr` へのインストールを提案します。非対話的な実行はホストを変更せずに失敗します。`~/.local/bin` がリモートの `PATH` にない場合、Herdr はインストール後に警告します。
  
 -ネイティブ Windows の `herdr --remote` は Windows ベータの範囲外です。Windows からはサーバーに SSH してそこで `herdr` を実行してください。
-+ネイティブ Windows クライアントは、これらの Linux および macOS ホストへアタッチできます。このフォークでは、`C:\HerdrSandbox\runtime\herdr\herdr.exe` にある Herdr サンドボックス配置向けの、事前プロビジョニング済み Windows ホストアダプターも維持されています。自動インストールとライブハンドオフは引き続き Unix ホスト専用です。
++ネイティブ Windows クライアントは、これらの Linux および macOS ホストへアタッチできます。このフォークでは、`C:\HerdrSandbox\runtime\herdr.exe` にある Herdr サンドボックスのスタンドアロンランタイム向けに、事前プロビジョニング済み Windows ホストアダプターも維持されています。自動インストールとライブハンドオフは引き続き Unix ホスト専用です。
  
 -デフォルトでは、`herdr --remote` はあなたの SSH config を最初に include し、その後にフォールバックのキープアライブ設定を加えた一時的な SSH config を通してブリッジを実行します。既存のユーザーのキープアライブ設定が優先されます。Herdr が生成するブリッジ設定を使わず素の `ssh` を使うには `[remote].manage_ssh_config = false` を設定してください。
 +Windows からのリモートアタッチでは、既定の `ctrl+v` リモート画像バインドが登録済み PNG または DIB クリップボード画像を既存のクライアントプロトコルで送信し、リモートホストへステージして、そのリモートパスを貼り付けます。PNG、JPEG、GIF、WebP、BMP の絶対パスをひとつドラッグまたは貼り付けた場合も、同じサイズ制限付き転送を使います。対応するクリップボード画像がない場合、テキスト入力はそのまま送られます。ショートカットを変更または無効化するには `keys.remote_image_paste` を設定してください。
@@ -126,7 +126,7 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..5f76b8d391a1a8d68e63226e9adf1149
  デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
  
 diff --git a/docs/next/website/src/content/docs/persistence-remote.mdx b/docs/next/website/src/content/docs/persistence-remote.mdx
-index a365ac8838673144952ce0b6dcf92d3125e27360..a2bd515d5e570357ca200191c31e8a3241903494 100644
+index a365ac8838673144952ce0b6dcf92d3125e27360..79fad991a402d9a12828813738921acd1f625fe4 100644
 --- a/docs/next/website/src/content/docs/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/persistence-remote.mdx
 @@ -65,9 +65,13 @@ herdr --remote workbox
@@ -134,7 +134,7 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..a2bd515d5e570357ca200191c31e8a32
  Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
  
 -Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
-+Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the Herdr sandbox layout at `C:\HerdrSandbox\runtime\herdr\herdr.exe`; automatic install and live handoff remain Unix-host-only.
++Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the standalone Herdr sandbox runtime at `C:\HerdrSandbox\runtime\herdr.exe`; automatic install and live handoff remain Unix-host-only.
  
 -By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 +On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or DIB clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
@@ -167,7 +167,7 @@ index 237c53b484abb82ecc21052ffc9e68291fbbf86b..15cfd738d0d39a302937d9875762c67c
  ## 按键绑定
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
-index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed8968ab636d 100644
+index a81a8469e54aba464c1daa01638ac651f31c7e73..9a1ec42220eb42eb30318e4463942a779198168f 100644
 --- a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -178,7 +178,7 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..790d2173b5732822db3cef1acf93ed89
 +远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查常见的直接安装、Homebrew、mise 和 Nix profile 路径。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
  
 -Windows 原生的 `herdr --remote` 不在 Windows 测试版范围内。在 Windows 上请 SSH 到服务器并在那里运行 `herdr`。
-+原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr\herdr.exe` 沙盒布局的预配置 Windows 主机适配器;自动安装和实时交接仍仅支持 Unix 主机。
++原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr.exe` 沙盒独立运行时的预配置 Windows 主机适配器;自动安装和实时交接仍仅支持 Unix 主机。
  
 -默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的桥接配置,而使用普通 `ssh`。
 +从 Windows 远程连接时,默认的 `ctrl+v` 远程图像按键会通过现有客户端协议发送已注册的 PNG 或 DIB 剪贴板图像,将其暂存在远程主机并粘贴远程路径。拖放或粘贴一个 PNG、JPEG、GIF、WebP 或 BMP 的绝对路径也会使用同样的受限传输。剪贴板中没有受支持的图像时,文本输入会原样发送。可通过 `keys.remote_image_paste` 更改或禁用此快捷键。
@@ -8947,7 +8947,7 @@ index 6fe927c1cc0f99c4f2fbfd99bf9b758f4acfd15e..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b91aa08809f068240272ef916a50e54b05306e60
+index 0000000000000000000000000000000000000000..7d1c882f1e5a8f53858ec461bbe40f56f0db4e00
 --- /dev/null
 +++ b/src/remote/windows.rs
 @@ -0,0 +1,125 @@
@@ -8960,7 +8960,7 @@ index 0000000000000000000000000000000000000000..b91aa08809f068240272ef916a50e54b
 +use base64::Engine as _;
 +use interprocess::local_socket::traits::Stream as _;
 +
-+const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr\herdr.exe";
++const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr.exe";
 +
 +pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
 +    ensure_remote_server_running()?;
@@ -9055,11 +9055,11 @@ index 0000000000000000000000000000000000000000..b91aa08809f068240272ef916a50e54b
 +    fn windows_remote_bridge_uses_concrete_guest_executable() {
 +        assert_eq!(
 +            decoded_remote_bridge_script(crate::session::DEFAULT_SESSION_NAME),
-+            "& 'C:\\HerdrSandbox\\runtime\\herdr\\herdr.exe' remote-client-bridge"
++            "& 'C:\\HerdrSandbox\\runtime\\herdr.exe' remote-client-bridge"
 +        );
 +        assert_eq!(
 +            decoded_remote_bridge_script("agent's work"),
-+            "& 'C:\\HerdrSandbox\\runtime\\herdr\\herdr.exe' --session 'agent''s work' remote-client-bridge"
++            "& 'C:\\HerdrSandbox\\runtime\\herdr.exe' --session 'agent''s work' remote-client-bridge"
 +        );
 +    }
 +
@@ -9228,4 +9228,3 @@ index 3455841d2a90da519499f0c41daf5557c899cb95..2120fb3c9cad9fd20cfae7dee3072981
          return true;
 -- 
 2.55.0.windows.3
-

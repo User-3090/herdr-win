@@ -36,7 +36,10 @@ behavior; code and tests remain the detailed implementation truth.
 - Mailbox 0001 owns Windows terminal appearance, color/cursor transport, rendering,
   and Windows VTI input behavior.
 - Mailbox 0003 owns shared remote orchestration, Windows SSH/named-pipe attach,
-  bounded clipboard/drop image transport, and the narrow Sandbox adapter.
+  bounded clipboard/drop image transport, and the narrow Sandbox adapter. That
+  adapter invokes the one pre-provisioned standalone guest payload at
+  `C:\HerdrSandbox\runtime\herdr.exe`; it never addresses a managed
+  `runtime/<build-id>` installation inside the guest.
 - Mailbox 0004 owns deterministic ConPTY packaging, managed Windows distribution,
   fork update sources, installer lifecycle, and the bounded legacy migration.
 - Mailbox 0005 owns OpenCode retry/error lifecycle correlation. It must preserve
