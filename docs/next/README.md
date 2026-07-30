@@ -4,7 +4,7 @@
 
 [![Patch replay](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml) [![Windows nightly](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/User-3090/herdr-win/blob/master/rust-toolchain.toml) [![Upstream](https://img.shields.io/badge/upstream-ogulcancelik%2Fherdr-181717?logo=github)](https://github.com/ogulcancelik/herdr) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/User-3090/herdr-win/blob/master/LICENSE)
 
-`herdr-win` publishes a native Windows x86_64 build by replaying a small, explicit patch queue on current upstream `master`. It is a distribution and patch control plane—not a separate product line—and keeps the Windows delta reviewable, replayable, and suitable for upstream integration.
+`herdr-win` publishes a native Windows x86_64 build by replaying a small, explicit patch queue on one selected upstream source. Scheduled Nightlies test current upstream `master`; manually requested releases use the reviewed commit recorded in `patches/delta/BASE`. It is a distribution and patch control plane—not a separate product line—and keeps the Windows delta reviewable, replayable, and suitable for upstream integration.
 
 [Install](#install-a-windows-nightly) · [Patch queue](#maintained-windows-delta) · [Upstream review](#for-upstream-maintainers) · [Nightlies](#how-nightlies-work) · [Contributing](#contributing) · [Upstream docs](https://herdr.dev/docs/)
 
@@ -107,6 +107,10 @@ The scheduled workflow:
 4. publishes an immutable portable ZIP and managed installer identified by both the upstream and herdr-win control revisions;
 5. generates and pushes the preview manifest only after that release is verified; and
 6. independently verifies that the public update feed exposes the tested build.
+
+A manual workflow dispatch runs the same build, package, immutable-publication,
+and feed gates against the reviewed upstream commit recorded in `BASE`; it does
+not refresh upstream or rewrite the maintained queue.
 
 A replay, build, package, or publication failure prevents the subsequent release state. The final public-feed check can fail after the immutable prerelease and manifest commit already exist; that leaves the workflow failed for diagnosis rather than mutating published artifacts. Ordinary pushes do not build or publish binaries. For release purposes this repository is the control plane; the nightly always builds a fresh upstream checkout rather than treating a long-lived integration branch as release source.
 

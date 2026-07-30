@@ -53,9 +53,12 @@ tests remain the detailed implementation truth.
 
 ## Release Promise
 
-- Published preview assets derive from one tested replay of current upstream plus
-  the maintained queue. The portable ZIP, managed installer, and manifest digest
-  identify the same source.
+- Published preview assets derive from one tested replay of the selected upstream
+  source plus the maintained queue. The portable ZIP, managed installer, and
+  manifest digest identify the same source.
+- A manually requested release uses the last reviewed upstream commit recorded in
+  `BASE`. The scheduled Nightly alone tests current upstream and publishes only if
+  the maintained queue still replays and every release gate passes.
 - Ordinary pushes do not publish binaries. A replay, build, package, immutability,
   digest, or feed-verification failure prevents or visibly fails the corresponding
   release stage rather than silently publishing a different build.

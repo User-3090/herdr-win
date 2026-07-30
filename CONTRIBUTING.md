@@ -69,7 +69,9 @@ that separate operation. Then use the exact approved upstream commit, replay and
 review the complete queue, update `BASE` only after that review, and run the full
 refresh gates. The scheduled nightly workflow may independently test current
 upstream; its execution or failure is not permission for an agent to rewrite the
-control checkout, `BASE`, or mailboxes.
+control checkout, `BASE`, or mailboxes. Manual `workflow_dispatch` publication is
+not an upstream refresh and must build from the commit already recorded in `BASE`;
+only the scheduled event may select official upstream `master`.
 
 Repository branding, GitHub Actions, patch metadata, and release orchestration
 must not be included in product mailboxes.

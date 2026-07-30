@@ -49,11 +49,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Select upstream source
+        id: upstream_source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $basePath = Join-Path $PWD "control\patches\delta\BASE"
+            $upstreamRef = [IO.File]::ReadAllText($basePath).Trim()
+            if ($upstreamRef -cnotmatch '^[0-9a-f]{40}$') {
+              throw "patches/delta/BASE must contain one full lowercase commit"
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "schedule") {
+            $upstreamRef = "master"
+          } else {
+            throw "unsupported release event $env:GITHUB_EVENT_NAME"
+          }
+          "ref=$upstreamRef" >> $env:GITHUB_OUTPUT
+
       - name: Checkout upstream Herdr
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: ogulcancelik/herdr
-          ref: master
+          ref: ${{ steps.upstream_source.outputs.ref }}
           path: source
           fetch-depth: 0
           persist-credentials: false
@@ -139,7 +157,7 @@ jobs:
             & git -C ..\source am --3way $patch
             if ($LASTEXITCODE -ne 0) {
               & git -C ..\source am --abort 2>$null
-              throw "failed to replay $entry on upstream master"
+              throw "failed to replay $entry on selected upstream source $base"
             }
           }
           & git -C ..\source diff --check "$base..HEAD"
@@ -594,7 +612,7 @@ jobs:
           {
             echo "Unofficial herdr-win Windows nightly built from upstream Herdr plus the maintained Windows delta."
             echo
-            echo "- Upstream master: \`${UPSTREAM_SHA}\`"
+            echo "- Upstream source: \`${UPSTREAM_SHA}\`"
             echo "- herdr-win control revision: \`${CONTROL_SHA}\`"
             echo "- Build identity: \`${BUILD_ID}\`"
             echo

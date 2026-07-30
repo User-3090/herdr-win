@@ -49,7 +49,9 @@ active memory owner.
   task requiring the user's explicit instruction; the scheduled nightly may test
   current upstream through its own workflow but does not authorize changing the
   control checkout, `BASE`, or the maintained mailboxes. Synchronizing this fork's
-  configured `origin` for normal collaboration and delivery remains allowed.
+  configured `origin` for normal collaboration and delivery remains allowed. A
+  manual `workflow_dispatch` release uses recorded `BASE`; only the scheduled
+  Nightly may select official upstream `master`.
 - `patches/upstream/` is a frozen historical archive. Never regenerate, rename, or
   delete it; external links may depend on exact paths.
 - `scripts/test_delta_patches.py` and `scripts/test_upstream_patches.py` own queue

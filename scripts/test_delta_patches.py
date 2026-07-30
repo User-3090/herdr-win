@@ -186,6 +186,14 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertIn(WINDOWS_INSTALLER_TARGET, workflow)
         self.assertIn('format -cne "nsis"', workflow)
         self.assertIn("installer_sha", workflow)
+        self.assertIn('$env:GITHUB_EVENT_NAME -eq "workflow_dispatch"', workflow)
+        self.assertIn('"control\\patches\\delta\\BASE"', workflow)
+        self.assertIn('$env:GITHUB_EVENT_NAME -eq "schedule"', workflow)
+        self.assertIn('$upstreamRef = "master"', workflow)
+        self.assertIn("ref: ${{ steps.upstream_source.outputs.ref }}", workflow)
+        self.assertIn("failed to replay $entry on selected upstream source $base", workflow)
+        self.assertIn('echo "- Upstream source: \\`${UPSTREAM_SHA}\\`"', workflow)
+        self.assertNotIn("SOURCE_MODE", workflow)
         self.assertNotIn("PREVIEW_GENERATOR.py", workflow)
         self.assertIn(
             'generator="$GITHUB_WORKSPACE/control/scripts/preview.py"', workflow
