@@ -43,15 +43,17 @@ active memory owner.
 - Keep the delta small, explicit, replayable, and upstreamable.
 - `patches/delta/` owns maintained product behavior; `series` owns order and
   `BASE` records the reviewed upstream commit.
-- Never autonomously fetch, merge, rebase, replay onto, or otherwise refresh from
-  official upstream `ogulcancelik/herdr` during ordinary work. Work against the
-  commit already recorded in `BASE`. An upstream refresh is a separate maintenance
-  task requiring the user's explicit instruction; the scheduled nightly may test
-  current upstream through its own workflow but does not authorize changing the
-  control checkout, `BASE`, or the maintained mailboxes. Synchronizing this fork's
-  configured `origin` for normal collaboration and delivery remains allowed. A
-  manual `workflow_dispatch` release uses recorded `BASE`; only the scheduled
-  Nightly may select official upstream `master`.
+- Never fetch, clone, query, download, check out, replay, test, or otherwise obtain
+  anything from official upstream `ogulcancelik/herdr` unless the user explicitly
+  requests that exact upstream operation in the current task. This prohibition also
+  covers dispatching or rerunning workflows that select upstream `master`; use only
+  already-local objects and the commit recorded in `BASE`, and report a blocked
+  gate instead of reaching upstream. A repository-owned scheduled Nightly may test
+  current upstream independently, but its existence or result grants an agent no
+  permission to access upstream, change `BASE`, or refresh maintained mailboxes.
+  Synchronizing this fork's configured `origin` for normal collaboration and
+  delivery remains allowed because it is not official upstream. A manual
+  `workflow_dispatch` release uses recorded `BASE`.
 - `patches/upstream/` is a frozen historical archive. Never regenerate, rename, or
   delete it; external links may depend on exact paths.
 - `scripts/test_delta_patches.py` and `scripts/test_upstream_patches.py` own queue
