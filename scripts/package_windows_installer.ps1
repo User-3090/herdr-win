@@ -18,6 +18,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
 
+    [string]$ProductName = "Herdr",
+
     [string]$NsisArchive,
     [string]$NsisCacheDir,
 
@@ -39,6 +41,11 @@ $NsisVersion = "3.12"
 $NsisArchiveName = "nsis-$NsisVersion.zip"
 $NsisArchiveUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NsisVersion/$NsisArchiveName"
 $NsisArchiveSha256 = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
+$CompanyName = "herdr-win"
+$Copyright = "Herdr contributors"
+$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
+$InstallerTestMarkerPrefix = "herdr"
+$ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
 $BuildIdPattern = '^[0-9a-f]{12}\.[0-9a-f]{12}$'
 $DisplayVersionPattern = '^((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))-preview\.([0-9a-f]{12}\.[0-9a-f]{12})$'
 $NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$'
@@ -314,11 +321,14 @@ function Get-VerifiedNsisArchive {
 if ($BuildId -cnotmatch $BuildIdPattern) {
     throw "Invalid build ID '$BuildId'. Expected 12 lowercase hex characters, a dot, and 12 lowercase hex characters."
 }
+if ($ProductName -cnotmatch $ProductNamePattern) {
+    throw "Invalid product name '$ProductName'."
+}
 Assert-VersionIdentity
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
-$installerScript = Join-Path $projectRoot "packaging\windows\herdr-installer.nsi"
+$installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 $helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
 $skillSource = Join-Path $projectRoot "SKILL.md"
 $StageDir = (Resolve-Path -LiteralPath $StageDir).Path
@@ -398,19 +408,24 @@ try {
         "/V3",
         "/WX",
         "/INPUTCHARSET", "UTF8",
-        "/DHERDR_STAGE_DIR=$StageDir",
-        "/DHERDR_LAUNCHER_EXE=$LauncherExe",
-        "/DHERDR_HELPER_PS1=$helperScript",
-        "/DHERDR_SKILL_MD=$skillSource",
-        "/DHERDR_BUILD_ID=$BuildId",
-        "/DHERDR_DISPLAY_VERSION=$DisplayVersion",
-        "/DHERDR_NUMERIC_VERSION=$NumericVersion",
-        "/DHERDR_OUTPUT_PATH=$temporaryOutput",
+        "/DARG_STAGE_DIR=$StageDir",
+        "/DARG_LAUNCHER_EXE=$LauncherExe",
+        "/DARG_HELPER_PS1=$helperScript",
+        "/DARG_SKILL_MD=$skillSource",
+        "/DINFO_PRODUCTNAME=$ProductName",
+        "/DINFO_COMPANYNAME=$CompanyName",
+        "/DINFO_COPYRIGHT=$Copyright",
+        "/DAPP_BUILD_ID=$BuildId",
+        "/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion",
+        "/DINFO_PRODUCTVERSION_FIXED=$NumericVersion",
+        "/DAPP_OUTPUT_PATH=$temporaryOutput",
+        "/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable",
+        "/DAPP_TEST_MARKER_PREFIX=$InstallerTestMarkerPrefix",
         $installerScript
     )
     if (-not [string]::IsNullOrWhiteSpace($TestUninstallFault)) {
         $makensisArguments = @(
-            "/DHERDR_TEST_UNINSTALL_FAULT=$TestUninstallFault"
+            "/DTEST_UNINSTALL_FAULT=$TestUninstallFault"
         ) + $makensisArguments
     }
     Invoke-NativeChecked $makensis $makensisArguments -TimeoutSeconds 180
@@ -420,4 +435,4 @@ try {
     Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Created Herdr installer: $OutputPath"
+Write-Host "Created $ProductName installer: $OutputPath"

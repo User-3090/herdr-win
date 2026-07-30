@@ -61,8 +61,21 @@ behavior; code and tests remain the detailed implementation truth.
 - NSIS owns the setup/uninstall executable shell, embedded inputs, user-visible
   progress/error boundary, and final self-cleanup. The packaged PowerShell helper
   owns filesystem lifecycle, validation, PATH/Installed Apps integration,
-  migration, and recoverable install/uninstall state. Rust owns runtime selection
-  and downloading/verifying/launching the immutable installer asset.
+  migration, optional user-settings removal, and recoverable install/uninstall
+  state. Rust owns runtime selection and downloading/verifying/launching the
+  immutable installer asset.
+- The packager passes one product display name into NSIS and the helper so setup
+  copy, install location, executable metadata, and Installed Apps registration do
+  not maintain separate product-name literals. The NSIS presentation reuses the
+  MUI2 welcome/custom-uninstall/instfiles page model used by the local Jobs
+  installer while relying only on NSIS-bundled standard graphics; the repository
+  does not generate or copy a product-specific installer banner/background.
+  Installer size uses the Jobs reference's exact
+  `SetDatablockOptimize on`, 32 MiB LZMA dictionary, and solid final LZMA settings.
+- Interactive and silent uninstall both default to removing
+  `%USERPROFILE%\.herdr`; the interactive checkbox or `/KEEP_SETTINGS` can preserve
+  it. Settings cleanup stays in the helper's validated filesystem boundary and
+  fails closed on ambiguous/reparse-point content rather than following it.
 - `src/distribution.rs` is the single fork channel/source configuration. New
   Windows clients consume the separately hashed immutable NSIS asset from the fork
   release; there is no upstream-source fallback. The portable ZIP remains only as

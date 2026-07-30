@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-NSI = PROJECT_ROOT / "packaging/windows/herdr-installer.nsi"
+NSI = PROJECT_ROOT / "packaging/windows/installer/project.nsi"
 HELPER = PROJECT_ROOT / "packaging/windows/herdr-installer-helper.ps1"
 PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
 POWERSHELL_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
@@ -21,7 +21,14 @@ SKILL = PROJECT_ROOT / "SKILL.md"
 
 class WindowsInstallerStaticTests(unittest.TestCase):
     def test_expected_owners_exist_and_are_registered(self) -> None:
-        for path in (NSI, HELPER, PACKAGER, POWERSHELL_TEST, FAULT_TEST, SKILL):
+        for path in (
+            NSI,
+            HELPER,
+            PACKAGER,
+            POWERSHELL_TEST,
+            FAULT_TEST,
+            SKILL,
+        ):
             self.assertTrue(path.is_file(), path)
         justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("scripts.test_windows_installer", justfile)
@@ -120,11 +127,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             ),
             3,
         )
-        self.assertIn("HERDR_SKILL_MD", nsi)
-        self.assertIn('/oname=SKILL.md "${HERDR_SKILL_MD}"', nsi)
+        self.assertIn("ARG_SKILL_MD", nsi)
+        self.assertIn('/oname=SKILL.md "${ARG_SKILL_MD}"', nsi)
         self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
         self.assertIn('$skillSource = Join-Path $projectRoot "SKILL.md"', packager)
-        self.assertIn('"/DHERDR_SKILL_MD=$skillSource"', packager)
+        self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
         self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
         self.assertIn("retained files from the previous Herdr skill version", lifecycle)
         self.assertIn("Owned skill remained public after atomic detach", lifecycle)
@@ -143,6 +150,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("retained the unchanged owned Herdr skill", fault_test)
         self.assertIn("Modified skill tree uninstall passed", fault_test)
         self.assertIn("AgentUserProfileRoot", fault_test)
+        self.assertIn('[string]$ProductName = "Herdr"', fault_test)
+        self.assertIn("-ProductName $ProductName", fault_test)
         self.assertIn("requires no interrupted Herdr agent skill transaction", fault_test)
 
     def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
@@ -202,21 +211,78 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, runtime_sources)
 
+    def test_nsis_template_is_product_neutral_and_matches_jobs_presentation(self) -> None:
+        nsi = NSI.read_text(encoding="utf-8")
+        for required in (
+            "ARG_STAGE_DIR",
+            "ARG_LAUNCHER_EXE",
+            "ARG_HELPER_PS1",
+            "ARG_SKILL_MD",
+            "APP_BUILD_ID",
+            "APP_OUTPUT_PATH",
+            "APP_START_GATE_ENV",
+            "APP_TEST_MARKER_PREFIX",
+            "INFO_PRODUCTNAME",
+            "INFO_COMPANYNAME",
+            "INFO_COPYRIGHT",
+            "INFO_PRODUCTVERSION_DISPLAY",
+            "INFO_PRODUCTVERSION_FIXED",
+        ):
+            self.assertIn(f"!ifndef {required}", nsi)
+        self.assertNotRegex(nsi, re.compile(r"herdr", re.IGNORECASE))
+        self.assertIn('Name "${INFO_PRODUCTNAME}"', nsi)
+        self.assertIn('Caption "${INFO_PRODUCTNAME} Setup"', nsi)
+        self.assertIn('BrandingText "${INFO_PRODUCTNAME}"', nsi)
+        self.assertIn('!include "MUI2.nsh"', nsi)
+        self.assertIn('!include "nsDialogs.nsh"', nsi)
+        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
+        self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
+        self.assertNotIn("LANG_GERMAN", nsi)
+        self.assertNotIn("APP_SELECT_INSTALLER_LANGUAGE", nsi)
+        self.assertNotIn("MUI_ICON", nsi)
+        self.assertNotIn("MUI_UNICON", nsi)
+        self.assertNotIn("MUI_WELCOMEFINISHPAGE_BITMAP", nsi)
+        self.assertIn("Page custom WelcomePage", nsi)
+        self.assertIn("Function WelcomePage", nsi)
+        self.assertNotIn("MUI_PAGE_WELCOME", nsi)
+        self.assertIn("!insertmacro MUI_PAGE_INSTFILES", nsi)
+        self.assertIn(
+            "UninstPage custom un.SettingsPage un.SettingsPageLeave", nsi
+        )
+        self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
+        self.assertNotIn("UninstPage uninstConfirm", nsi)
+        self.assertIn("SetDatablockOptimize on", nsi)
+        self.assertIn("SetCompressorDictSize 32", nsi)
+        self.assertIn("SetCompressor /SOLID /FINAL lzma", nsi)
+        self.assertIn("ManifestDPIAware true", nsi)
+
     def test_nsis_is_per_user_silent_safe_and_truthful(self) -> None:
         nsi = NSI.read_text(encoding="utf-8")
+        helper = HELPER.read_text(encoding="utf-8")
         self.assertIn("RequestExecutionLevel user", nsi)
-        self.assertIn('InstallDir "$LOCALAPPDATA\\Programs\\Herdr"', nsi)
+        self.assertIn(
+            'InstallDir "$LOCALAPPDATA\\Programs\\${INFO_PRODUCTNAME}"', nsi
+        )
         self.assertIn('WriteUninstaller "$PLUGINSDIR\\uninstall.exe"', nsi)
-        self.assertIn('VIProductVersion "${HERDR_NUMERIC_VERSION}"', nsi)
-        self.assertIn('VIAddVersionKey "ProductVersion" "${HERDR_DISPLAY_VERSION}"', nsi)
+        self.assertIn('VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"', nsi)
+        self.assertIn(
+            '"ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"', nsi
+        )
         self.assertIn("/PARENT_PID=", nsi)
         self.assertIn("/TIMEOUT=120000", nsi)
-        self.assertIn('ReadEnvStr $StartGate "HERDR_INSTALLER_START_GATE_V1"', nsi)
+        self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
         self.assertIn("Call WaitForUpdaterStartGate", nsi)
         self.assertIn("IntCmp $0 600", nsi)
+        self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
+        self.assertIn('${GetOptions} "$0" "/KEEP_SETTINGS" $1', nsi)
+        self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
+        self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
+        self.assertIn('-SettingsDisposition "$SettingsDisposition"', nsi)
+        self.assertIn('SettingsDisposition = "Keep"', helper)
+        self.assertIn('if ($SettingsDisposition -ceq "Remove")', helper)
         self.assertIn("SetErrorLevel 1", nsi)
         self.assertIn("SetErrorLevel 0", nsi)
-        self.assertIn('QuietUninstallString', HELPER.read_text(encoding="utf-8"))
+        self.assertIn("QuietUninstallString", helper)
         message_boxes = [match.start() for match in re.finditer(r"\bMessageBox\b", nsi)]
         self.assertEqual(len(message_boxes), 2)
         for position in message_boxes:
@@ -233,11 +299,28 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         positions = [cleanup.index(instruction) for instruction in ordered_cleanup]
         self.assertEqual(positions, sorted(positions))
 
+    def test_helper_owns_fail_closed_optional_settings_removal(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        cleanup = helper[
+            helper.index("function Remove-HerdrUserSettings {") : helper.index(
+                "function Move-HerdrAgentSkillPath {"
+            )
+        ]
+        self.assertIn('Join-Path $profileRoot ".herdr"', cleanup)
+        self.assertIn("Assert-HerdrRegularDirectory -Path $profileRoot", cleanup)
+        self.assertIn("Test-HerdrPathWithin", cleanup)
+        self.assertIn("Assert-HerdrRegularDirectory -Path $settingsRoot", cleanup)
+        self.assertIn(
+            "Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot", cleanup
+        )
+        self.assertNotIn("Remove-Item -LiteralPath $settingsRoot -Recurse", cleanup)
+        self.assertIn("DisplayName = $script:ProductName", helper)
+
     def test_nsis_residual_cleanup_is_exact_idempotent_and_fault_injected(self) -> None:
         nsi = NSI.read_text(encoding="utf-8")
         validator = nsi[
             nsi.index("Function un.ValidateResidualLayout") : nsi.index(
-                'Section "Herdr" SEC_HERDR'
+                'Section "${INFO_PRODUCTNAME}" SEC_APP'
             )
         ]
         for exact_name in (
@@ -260,7 +343,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "before-uninstaller",
         ):
             self.assertEqual(
-                nsi.count(f'!insertmacro HerdrUninstallFault "{stage}" '), 1
+                nsi.count(f'!insertmacro AppUninstallFault "{stage}" '), 1
             )
         fault_test = FAULT_TEST.read_text(encoding="utf-8")
         self.assertIn("Wait-TestCondition", fault_test)
@@ -291,8 +374,22 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("expected exact output", packager)
         self.assertIn("must be <major>.<minor>.<patch>-preview", packager)
         self.assertIn("must match DisplayVersion's major, minor, and patch", packager)
-        self.assertIn("HERDR_DISPLAY_VERSION", packager)
-        self.assertIn("HERDR_NUMERIC_VERSION", packager)
+        self.assertIn(
+            '$installerScript = Join-Path $projectRoot "packaging\\windows\\installer\\project.nsi"',
+            packager,
+        )
+        self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
+        self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
+        self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
+        self.assertIn(
+            '"/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion"', packager
+        )
+        self.assertIn('"/DINFO_PRODUCTVERSION_FIXED=$NumericVersion"', packager)
+        self.assertIn(
+            '"/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable"',
+            packager,
+        )
+        self.assertIn('"/DTEST_UNINSTALL_FAULT=$TestUninstallFault"', packager)
         self.assertNotIn("Microsoft.Windows.Console.ConPTY", packager)
 
     def test_updater_owns_a_bounded_kill_on_close_installer_job(self) -> None:

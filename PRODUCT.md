@@ -25,8 +25,11 @@ tests remain the detailed implementation truth.
 
 - The normal managed installation is per-user under
   `%LOCALAPPDATA%\Programs\Herdr`, exposes the stable `herdr` command on user
-  `PATH`, and registers Herdr in Windows Installed Apps. A portable ZIP remains a
-  supported manual alternative.
+  `PATH`, and registers Herdr in Windows Installed Apps without requiring
+  administrator privileges. The installer interface is English-only. Its
+  keyboard-operable Windows setup uses the Herdr product identity and clearly
+  explains the fixed per-user destination. A portable ZIP remains a supported
+  manual alternative.
 - The managed installer installs the cross-agent Herdr skill at
   `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and replaces the complete prior
   `herdr` skill directory on install/update.
@@ -36,8 +39,11 @@ tests remain the detailed implementation truth.
   switch atomically. Update never terminates active Herdr sessions.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, user `PATH` entry, Installed Apps registration, and
-  an unchanged installer-owned skill while preserving modified skill content and
-  user configuration/session data under `%USERPROFILE%\.herdr`.
+  an unchanged installer-owned skill while preserving modified skill content. The
+  interactive uninstaller defaults to also removing configuration and session data
+  under `%USERPROFILE%\.herdr`; users can clear that checkbox to keep the data for
+  a later installation. Silent uninstall uses the same remove-by-default policy and
+  accepts `/KEEP_SETTINGS` as the explicit preservation choice.
 - The executable and installer are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.

@@ -271,6 +271,43 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     [IO.File]::WriteAllText($crlfSkill, "---`r`nname: herdr`r`ndescription: crlf`r`n---`r`n", $script:Utf8NoBom)
     Assert-Equal (Get-HerdrAgentSkillSha256 -Path $crlfSkill) (Get-HerdrSha256 -Path $crlfSkill) "CRLF Herdr skill was rejected or normalized while hashing."
 
+    # Optional settings cleanup removes only a regular .herdr tree below the
+    # selected profile and refuses ambiguous files or reparse-point content.
+    $settingsProfile = Join-Path $tempRoot "settings-profile"
+    Write-TestFile -Path (Join-Path $settingsProfile ".herdr\sessions\one.json") -Text "session"
+    Write-TestFile -Path (Join-Path $settingsProfile ".herdr\config.toml") -Text "settings"
+    Remove-HerdrUserSettings -UserProfileRoot $settingsProfile
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $settingsProfile ".herdr"))) "Settings cleanup retained a regular .herdr tree."
+    Remove-HerdrUserSettings -UserProfileRoot $settingsProfile
+
+    $settingsFileProfile = Join-Path $tempRoot "settings-file-profile"
+    New-Item -ItemType Directory -Path $settingsFileProfile | Out-Null
+    $settingsFile = Join-Path $settingsFileProfile ".herdr"
+    Write-TestFile -Path $settingsFile -Text "preserve-file"
+    Assert-Throws {
+        Remove-HerdrUserSettings -UserProfileRoot $settingsFileProfile
+    } "regular directory is missing" "Settings cleanup accepted a .herdr file."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $settingsFile) "preserve-file" "Rejected settings file was changed."
+
+    $settingsJunctionProfile = Join-Path $tempRoot "settings-junction-profile"
+    $settingsJunctionRoot = Join-Path $settingsJunctionProfile ".herdr"
+    $settingsExternal = Join-Path $tempRoot "settings-external"
+    Write-TestFile -Path (Join-Path $settingsJunctionRoot "config.toml") -Text "preserve-settings"
+    Write-TestFile -Path (Join-Path $settingsExternal "outside.txt") -Text "preserve-external"
+    $settingsJunction = Join-Path $settingsJunctionRoot "external"
+    New-Item -ItemType Junction -Path $settingsJunction -Target $settingsExternal | Out-Null
+    try {
+        Assert-Throws {
+            Remove-HerdrUserSettings -UserProfileRoot $settingsJunctionProfile
+        } "reparse point" "Settings cleanup followed a nested junction."
+        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $settingsJunctionRoot "config.toml")) "preserve-settings" "Rejected settings tree was partially deleted."
+        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $settingsExternal "outside.txt")) "preserve-external" "Settings cleanup changed junction-target content."
+    } finally {
+        if (Test-Path -LiteralPath $settingsJunction) {
+            [IO.Directory]::Delete($settingsJunction)
+        }
+    }
+
     # Ownership-safe removal never follows a reparse point in an ancestor.
     $externalAgents = Join-Path $tempRoot "external-agents"
     $externalSkill = Join-Path $externalAgents "skills\herdr\SKILL.md"

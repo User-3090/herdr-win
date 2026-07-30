@@ -1,48 +1,73 @@
-!ifndef HERDR_STAGE_DIR
-  !error "HERDR_STAGE_DIR is required"
+; Product identity, payloads, and runtime protocol names are build inputs.
+!ifndef ARG_STAGE_DIR
+  !error "ARG_STAGE_DIR is required"
 !endif
-!ifndef HERDR_LAUNCHER_EXE
-  !error "HERDR_LAUNCHER_EXE is required"
+!ifndef ARG_LAUNCHER_EXE
+  !error "ARG_LAUNCHER_EXE is required"
 !endif
-!ifndef HERDR_HELPER_PS1
-  !error "HERDR_HELPER_PS1 is required"
+!ifndef ARG_HELPER_PS1
+  !error "ARG_HELPER_PS1 is required"
 !endif
-!ifndef HERDR_SKILL_MD
-  !error "HERDR_SKILL_MD is required"
+!ifndef ARG_SKILL_MD
+  !error "ARG_SKILL_MD is required"
 !endif
-!ifndef HERDR_BUILD_ID
-  !error "HERDR_BUILD_ID is required"
+!ifndef APP_BUILD_ID
+  !error "APP_BUILD_ID is required"
 !endif
-!ifndef HERDR_DISPLAY_VERSION
-  !error "HERDR_DISPLAY_VERSION is required"
+!ifndef INFO_PRODUCTVERSION_DISPLAY
+  !error "INFO_PRODUCTVERSION_DISPLAY is required"
 !endif
-!ifndef HERDR_NUMERIC_VERSION
-  !error "HERDR_NUMERIC_VERSION is required"
+!ifndef INFO_PRODUCTVERSION_FIXED
+  !error "INFO_PRODUCTVERSION_FIXED is required"
 !endif
-!ifndef HERDR_OUTPUT_PATH
-  !error "HERDR_OUTPUT_PATH is required"
+!ifndef APP_OUTPUT_PATH
+  !error "APP_OUTPUT_PATH is required"
+!endif
+!ifndef INFO_PRODUCTNAME
+  !error "INFO_PRODUCTNAME is required"
+!endif
+!ifndef INFO_COMPANYNAME
+  !error "INFO_COMPANYNAME is required"
+!endif
+!ifndef INFO_COPYRIGHT
+  !error "INFO_COPYRIGHT is required"
+!endif
+!ifndef APP_START_GATE_ENV
+  !error "APP_START_GATE_ENV is required"
+!endif
+!ifndef APP_TEST_MARKER_PREFIX
+  !error "APP_TEST_MARKER_PREFIX is required"
 !endif
 
 Unicode true
-Name "Herdr"
-Caption "Herdr Setup"
-OutFile "${HERDR_OUTPUT_PATH}"
-InstallDir "$LOCALAPPDATA\Programs\Herdr"
+!define APP_LANG_ENGLISH 1033
+
+Name "${INFO_PRODUCTNAME}"
+Caption "${INFO_PRODUCTNAME} Setup"
+OutFile "${APP_OUTPUT_PATH}"
+InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 RequestExecutionLevel user
-SetCompressor /SOLID lzma
+SetDatablockOptimize on
+SetCompressor /SOLID /FINAL lzma
+SetCompressorDictSize 32
 ShowInstDetails show
 ShowUninstDetails show
-BrandingText "Herdr"
-VIProductVersion "${HERDR_NUMERIC_VERSION}"
-VIAddVersionKey "ProductName" "Herdr"
-VIAddVersionKey "CompanyName" "herdr-win"
-VIAddVersionKey "LegalCopyright" "Herdr contributors"
-VIAddVersionKey "FileDescription" "Herdr per-user installer"
-VIAddVersionKey "FileVersion" "${HERDR_DISPLAY_VERSION}"
-VIAddVersionKey "ProductVersion" "${HERDR_DISPLAY_VERSION}"
+AutoCloseWindow true
+BrandingText "${INFO_PRODUCTNAME}"
+ManifestDPIAware true
+VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
+VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_PRODUCTNAME}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "CompanyName" "${INFO_COMPANYNAME}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "LegalCopyright" "${INFO_COPYRIGHT}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_PRODUCTNAME} per-user installer"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 
+!include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
 !include "x64.nsh"
 
 Var ParentPid
@@ -54,22 +79,40 @@ Var StartGate
 Var ResidualValid
 Var ResidualFindHandle
 Var ResidualFindName
+Var SettingsDisposition
+Var SettingsCheckbox
 
-!macro HerdrUninstallFault Point Label
-  !ifdef HERDR_TEST_UNINSTALL_FAULT
-    StrCmp "${HERDR_TEST_UNINSTALL_FAULT}" "${Point}" 0 fault_done_${Label}
-    IfFileExists "$TEMP\herdr-uninstall-fault-${Point}.once" fault_done_${Label}
-    FileOpen $0 "$TEMP\herdr-uninstall-fault-${Point}.once" w
+!define MUI_ABORTWARNING
+!define MUI_UNABORTWARNING
+
+Page custom WelcomePage
+!insertmacro MUI_PAGE_INSTFILES
+
+UninstPage custom un.SettingsPage un.SettingsPageLeave
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "English"
+
+LangString AppWelcomePageTitle ${LANG_ENGLISH} "Install ${INFO_PRODUCTNAME}"
+LangString AppWelcomePageSubtitle ${LANG_ENGLISH} "Set up ${INFO_PRODUCTNAME} for your Windows user account."
+LangString AppWelcomePageText ${LANG_ENGLISH} "Version ${INFO_PRODUCTVERSION_DISPLAY} will be installed in your local Programs folder. Setup does not require administrator privileges.$\r$\n$\r$\nSelect Install to continue."
+LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
+LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
+LangString AppSettingsPageText ${LANG_ENGLISH} "Keep this selected for a clean removal. Clear it to reuse your configuration and sessions after installing ${INFO_PRODUCTNAME} again."
+LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
+LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
+
+!macro AppUninstallFault Point Label
+  !ifdef TEST_UNINSTALL_FAULT
+    StrCmp "${TEST_UNINSTALL_FAULT}" "${Point}" 0 fault_done_${Label}
+    IfFileExists "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" fault_done_${Label}
+    FileOpen $0 "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" w
     FileClose $0
     SetErrors
     Goto uninstall_cleanup_failed
 fault_done_${Label}:
   !endif
 !macroend
-
-Page instfiles
-UninstPage uninstConfirm
-UninstPage instfiles
 
 Function SetPowerShellPath
   StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
@@ -125,8 +168,8 @@ FunctionEnd
 Function FailInstall
   Exch $0
   DetailPrint "$0"
-  !ifdef HERDR_TEST_UNINSTALL_FAULT
-    FileOpen $1 "$TEMP\herdr-install-failure-${HERDR_TEST_UNINSTALL_FAULT}.txt" w
+  !ifdef TEST_UNINSTALL_FAULT
+    FileOpen $1 "$TEMP\${APP_TEST_MARKER_PREFIX}-install-failure-${TEST_UNINSTALL_FAULT}.txt" w
     FileWrite $1 "$0"
     FileClose $1
   !endif
@@ -148,7 +191,7 @@ uninstall_failure_silent:
 FunctionEnd
 
 Function WaitForUpdaterStartGate
-  ReadEnvStr $StartGate "HERDR_INSTALLER_START_GATE_V1"
+  ReadEnvStr $StartGate "${APP_START_GATE_ENV}"
   StrCmp $StartGate "" updater_start_gate_done
   StrCpy $0 "0"
 updater_start_gate_loop:
@@ -167,10 +210,23 @@ updater_start_gate_timeout:
 updater_start_gate_done:
 FunctionEnd
 
+Function WelcomePage
+  !insertmacro MUI_HEADER_TEXT "$(AppWelcomePageTitle)" "$(AppWelcomePageSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 80u "$(AppWelcomePageText)"
+  Pop $0
+  nsDialogs::Show
+FunctionEnd
+
 Function .onInit
   SetShellVarContext current
   ${IfNot} ${RunningX64}
-    Push "Herdr requires 64-bit Windows."
+    Push "${INFO_PRODUCTNAME} requires 64-bit Windows."
     Call FailInstall
   ${EndIf}
   Call WaitForUpdaterStartGate
@@ -190,18 +246,60 @@ Function .onInit
 parent_pid_ok:
   Call SetPowerShellPath
   IfFileExists "$PowerShellPath" powershell_ok
-  Push "Windows PowerShell is required to install Herdr."
+  Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
   Call FailInstall
 powershell_ok:
 FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
+  StrCpy $SettingsDisposition "Remove"
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} "$0" "/KEEP_SETTINGS" $1
+  ${IfNot} ${Errors}
+    StrCpy $SettingsDisposition "Keep"
+  ${EndIf}
   Call un.SetPowerShellPath
   IfFileExists "$PowerShellPath" un_powershell_ok
-  Push "Windows PowerShell is required to uninstall Herdr."
+  Push "Windows PowerShell is required to uninstall ${INFO_PRODUCTNAME}."
   Call un.FailUninstall
 un_powershell_ok:
+FunctionEnd
+
+Function un.SettingsPage
+  IfSilent settings_page_done 0
+  !insertmacro MUI_HEADER_TEXT "$(AppSettingsPageTitle)" "$(AppSettingsPageSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 52u "$(AppSettingsPageText)"
+  Pop $0
+  ${NSD_CreateCheckbox} 0 62u 100% 18u "$(AppSettingsCheckbox)"
+  Pop $SettingsCheckbox
+  ${If} $SettingsDisposition == "Remove"
+    ${NSD_Check} $SettingsCheckbox
+  ${EndIf}
+  nsDialogs::Show
+settings_page_done:
+FunctionEnd
+
+Function un.SettingsPageLeave
+  IfSilent settings_page_leave_done 0
+  ${If} $SettingsCheckbox == ""
+    Goto settings_page_leave_done
+  ${EndIf}
+
+  ${NSD_GetState} $SettingsCheckbox $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $SettingsDisposition "Remove"
+  ${Else}
+    StrCpy $SettingsDisposition "Keep"
+  ${EndIf}
+settings_page_leave_done:
 FunctionEnd
 
 Function un.ValidateResidualLayout
@@ -294,29 +392,29 @@ un_residual_valid:
 un_residual_validation_done:
 FunctionEnd
 
-Section "Herdr" SEC_HERDR
+Section "${INFO_PRODUCTNAME}" SEC_APP
   SectionIn RO
   InitPluginsDir
   ClearErrors
   SetOutPath "$PLUGINSDIR\payload"
-  File /r "${HERDR_STAGE_DIR}\*"
+  File /r "${ARG_STAGE_DIR}\*"
   SetOutPath "$PLUGINSDIR"
-  File /oname=herdr-launcher.exe "${HERDR_LAUNCHER_EXE}"
-  File /oname=herdr-installer-helper.ps1 "${HERDR_HELPER_PS1}"
+  File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
+  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
   SetOutPath "$PLUGINSDIR\skill"
-  File /oname=SKILL.md "${HERDR_SKILL_MD}"
+  File /oname=SKILL.md "${ARG_SKILL_MD}"
   SetOutPath "$PLUGINSDIR"
   WriteUninstaller "$PLUGINSDIR\uninstall.exe"
   IfErrors 0 installer_inputs_ready
-  Push "Herdr setup could not unpack its embedded, pre-verified files."
+  Push "${INFO_PRODUCTNAME} setup could not unpack its embedded, pre-verified files."
   Call FailInstall
 
 installer_inputs_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\herdr-installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\herdr-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\herdr-installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -BuildId "${HERDR_BUILD_ID}" -DisplayVersion "${HERDR_DISPLAY_VERSION}" -NumericVersion "${HERDR_NUMERIC_VERSION}" -ParentPid "$ParentPid"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -ParentPid "$ParentPid"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete
-  StrCpy $0 "Herdr setup failed ($HelperExitCode). $HelperOutput"
+  StrCpy $0 "${INFO_PRODUCTNAME} setup failed ($HelperExitCode). $HelperOutput"
   Push $0
   Call FailInstall
 
@@ -326,10 +424,11 @@ installer_complete:
 SectionEnd
 
 Section "Uninstall"
+  SetAutoClose true
   Call un.ValidateResidualLayout
   StrCmp $ResidualValid "1" un_residual_exact
   IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "The managed Herdr uninstall helper is missing; the install was preserved."
+  Push "The managed ${INFO_PRODUCTNAME} uninstall helper is missing; the install was preserved."
   Call un.FailUninstall
 
 un_residual_exact:
@@ -340,27 +439,30 @@ un_residual_exact:
 
 un_residual_pending:
   IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "Herdr uninstall is pending but its retry helper is missing; residual files were preserved."
+  Push "${INFO_PRODUCTNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
   Call un.FailUninstall
 
 un_helper_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_PRODUCTNAME}" -SettingsDisposition "$SettingsDisposition"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" un_helper_complete
-  StrCpy $0 "Herdr uninstall failed ($HelperExitCode). $HelperOutput"
+  StrCpy $0 "${INFO_PRODUCTNAME} uninstall failed ($HelperExitCode). $HelperOutput"
   Push $0
   Call un.FailUninstall
 
 un_helper_complete:
   DetailPrint "$HelperOutput"
+  ${If} $SettingsDisposition == "Remove"
+    DetailPrint "$(AppDetailRemoveSettings)"
+  ${EndIf}
   Call un.ValidateResidualLayout
   StrCmp $ResidualValid "1" un_cleanup_start
-  Push "Herdr uninstall did not leave an exact recognized residual layout; cleanup was preserved."
+  Push "${INFO_PRODUCTNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
   Call un.FailUninstall
 
 un_residual_ready:
-  DetailPrint "Resuming exact Herdr residual cleanup."
+  DetailPrint "Resuming exact ${INFO_PRODUCTNAME} residual cleanup."
 
 un_cleanup_start:
   ClearErrors
@@ -369,17 +471,17 @@ un_cleanup_start:
   ; of re-entering a helper whose coordination file may already be gone.
   Delete "$INSTDIR\state\uninstall.pending"
   IfErrors uninstall_cleanup_failed
-  !insertmacro HerdrUninstallFault "after-uninstall-pending" after_uninstall_pending
+  !insertmacro AppUninstallFault "after-uninstall-pending" after_uninstall_pending
   Delete "$INSTDIR\state\launcher.lock"
   IfErrors uninstall_cleanup_failed
-  !insertmacro HerdrUninstallFault "after-launcher-lock" after_launcher_lock
+  !insertmacro AppUninstallFault "after-launcher-lock" after_launcher_lock
   Delete "$INSTDIR\state\installer-helper.ps1"
   IfErrors uninstall_cleanup_failed
-  !insertmacro HerdrUninstallFault "after-installer-helper" after_installer_helper
+  !insertmacro AppUninstallFault "after-installer-helper" after_installer_helper
   RMDir "$INSTDIR\state"
   IfErrors uninstall_cleanup_failed
-  !insertmacro HerdrUninstallFault "after-state-directory" after_state_directory
-  !insertmacro HerdrUninstallFault "before-uninstaller" before_uninstaller
+  !insertmacro AppUninstallFault "after-state-directory" after_state_directory
+  !insertmacro AppUninstallFault "before-uninstaller" before_uninstaller
   Delete "$INSTDIR\uninstall.exe"
   IfErrors uninstall_cleanup_failed
   ; After self-removal only the install root can remain. Preserve any racing
@@ -387,15 +489,15 @@ un_cleanup_start:
   ClearErrors
   RMDir "$INSTDIR"
   IfErrors 0 uninstall_complete
-  DetailPrint "Herdr was removed; a non-empty install directory was preserved."
+  DetailPrint "${INFO_PRODUCTNAME} was removed; a non-empty install directory was preserved."
   ClearErrors
   Goto uninstall_complete
 uninstall_cleanup_failed:
-  Push "Herdr uninstall could not remove its validated residual files. Retry uninstall."
+  Push "${INFO_PRODUCTNAME} uninstall could not remove its validated residual files. Retry uninstall."
   Call un.FailUninstall
 uninstall_complete:
-  !ifdef HERDR_TEST_UNINSTALL_FAULT
-    Delete "$TEMP\herdr-uninstall-fault-${HERDR_TEST_UNINSTALL_FAULT}.once"
+  !ifdef TEST_UNINSTALL_FAULT
+    Delete "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${TEST_UNINSTALL_FAULT}.once"
   !endif
   SetErrorLevel 0
 SectionEnd

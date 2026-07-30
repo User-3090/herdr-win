@@ -9,9 +9,12 @@ param(
     [string]$UninstallerPath,
     [string]$HelperSourcePath,
     [string]$SkillSourcePath,
+    [string]$ProductName = "Herdr",
     [string]$BuildId,
     [string]$DisplayVersion,
     [string]$NumericVersion,
+    [ValidateSet("Keep", "Remove")]
+    [string]$SettingsDisposition = "Keep",
     [long]$ParentPid = 0,
     [switch]$Silent
 )
@@ -19,6 +22,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$script:ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
+if ($ProductName -cnotmatch $script:ProductNamePattern) {
+    throw "Invalid product name '$ProductName'."
+}
+$script:ProductName = $ProductName
 $script:BuildIdPattern = '^[0-9a-f]{12}\.[0-9a-f]{12}$'
 $script:DisplayVersionPattern = '^((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))-preview\.([0-9a-f]{12}\.[0-9a-f]{12})$'
 $script:NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$'
@@ -40,7 +48,7 @@ $script:AgentSkillRemovalCleanupPattern = '^\.herdr-installer-skill-cleanup\.([0
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 $script:UninstallMarkerText = "herdr-uninstall-v1`n"
 $script:TransactionMarkerName = ".herdr-installer-transaction"
-$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
+$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 
 if ($null -eq ("Herdr.Installer.PinnedSkillFile" -as [type])) {
@@ -657,6 +665,25 @@ function Remove-HerdrReplaceableAgentSkillPath {
         Remove-Item -LiteralPath $directory.FullName -Force
     }
     Remove-Item -LiteralPath $Path -Force
+}
+
+function Remove-HerdrUserSettings {
+    param([Parameter(Mandatory = $true)][string]$UserProfileRoot)
+
+    $profileRoot = Get-HerdrFullPath -Path $UserProfileRoot
+    Assert-HerdrRegularDirectory -Path $profileRoot
+    $settingsRoot = [IO.Path]::GetFullPath((Join-Path $profileRoot ".herdr")).TrimEnd('\')
+    if (-not (Test-HerdrPathWithin -Path $settingsRoot -Root $profileRoot)) {
+        throw "Herdr settings directory escaped the current user profile: $settingsRoot"
+    }
+    if (-not (Test-Path -LiteralPath $settingsRoot)) {
+        return
+    }
+    Assert-HerdrRegularDirectory -Path $settingsRoot
+    Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot
+    if (Test-Path -LiteralPath $settingsRoot) {
+        throw "Herdr settings cleanup did not reach terminal state: $settingsRoot"
+    }
 }
 
 function Move-HerdrAgentSkillPath {
@@ -2095,7 +2122,7 @@ function Remove-HerdrTransaction {
     $marker = Join-Path $Path $script:TransactionMarkerName
     Assert-HerdrRegularFile -Path $marker
     $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-        -not $_.PSIsContainer -and $_.FullName -cne $marker
+        -not $_.PSIsContainer -and $_.FullName -ine $marker
     } | Sort-Object { $_.FullName.Length } -Descending)
     foreach ($file in $files) {
         Remove-Item -LiteralPath $file.FullName -Force
@@ -2306,7 +2333,7 @@ function Remove-HerdrUninstallTransactionOwnedFiles {
     $markerPath = Join-Path $Path $script:TransactionMarkerName
     $manifestPath = Join-Path $Path "cleanup.manifest"
     $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-        -not $_.PSIsContainer -and $_.FullName -cne $markerPath -and $_.FullName -cne $manifestPath
+        -not $_.PSIsContainer -and $_.FullName -ine $markerPath -and $_.FullName -ine $manifestPath
     } | Sort-Object { $_.FullName.Length } -Descending)
     foreach ($file in $files) {
         Remove-Item -LiteralPath $file.FullName -Force
@@ -3065,7 +3092,7 @@ function Set-HerdrArpRegistration {
     $launcher = Join-Path $InstallRoot "bin\herdr.exe"
     $numeric = $NumericVersion.Split('.')
     $values = @{
-        DisplayName = "Herdr"
+        DisplayName = $script:ProductName
         DisplayVersion = $DisplayVersion
         Publisher = "herdr-win"
         InstallLocation = $InstallRoot
@@ -3240,6 +3267,8 @@ function Invoke-HerdrUninstallLayout {
 function Invoke-HerdrUninstall {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [ValidateSet("Keep", "Remove")][string]$SettingsDisposition = "Keep",
+        [string]$UserProfileRoot = $env:USERPROFILE,
         [int]$LifecycleLockTimeoutMilliseconds = 30000
     )
 
@@ -3249,6 +3278,9 @@ function Invoke-HerdrUninstall {
         Invoke-HerdrUninstallLayout -InstallRoot $InstallRoot -AgentSkillsRoot (Get-HerdrAgentSkillsRoot)
         Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
+        if ($SettingsDisposition -ceq "Remove") {
+            Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
+        }
     }
 }
 
@@ -3268,14 +3300,14 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -NumericVersion $NumericVersion `
                     -ParentPid $ParentPid
                 if ($result.Status -ceq "Pending") {
-                    [Console]::Out.WriteLine("Herdr $($result.BuildId): Pending; staged until old sessions exit.")
+                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
                 } else {
-                    [Console]::Out.WriteLine("Herdr $($result.BuildId): $($result.Status)")
+                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): $($result.Status)")
                 }
             }
             "Uninstall" {
-                Invoke-HerdrUninstall -InstallRoot $InstallRoot
-                [Console]::Out.WriteLine("Herdr uninstall cleanup is ready.")
+                Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
+                [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
             }
             default {
                 throw "Action must be Install or Uninstall."
@@ -3283,7 +3315,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         exit 0
     } catch {
-        [Console]::Error.WriteLine("Herdr installer error: $($_.Exception.Message)")
+        [Console]::Error.WriteLine("$script:ProductName installer error: $($_.Exception.Message)")
         exit 1
     }
 }

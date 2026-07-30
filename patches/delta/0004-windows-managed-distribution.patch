@@ -8,19 +8,19 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3289 +++++++++++++++++
- packaging/windows/herdr-installer.nsi         |  401 ++
+ packaging/windows/herdr-installer-helper.ps1  | 3321 +++++++++++++++++
+ packaging/windows/installer/project.nsi       |  503 +++
  scripts/package_windows_conpty.py             |   17 +-
- scripts/package_windows_installer.ps1         |  423 +++
+ scripts/package_windows_installer.ps1         |  438 +++
  scripts/preview.py                            |   26 +-
  scripts/test_package_windows_conpty.py        |   16 +-
  scripts/test_preview.py                       |  133 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  368 ++
+ scripts/test_windows_installer.py             |  465 +++
  .../windows_install_conpty_package_test.ps1   |  144 +-
- scripts/windows_installer_fault_test.ps1      |  293 ++
- scripts/windows_installer_test.ps1            |  887 +++++
+ scripts/windows_installer_fault_test.ps1      |  314 ++
+ scripts/windows_installer_test.ps1            |  924 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -42,9 +42,9 @@ Refs ogulcancelik/herdr#1947
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  460 ++-
  website/install.ps1                           |    5 +-
- 37 files changed, 8785 insertions(+), 286 deletions(-)
+ 37 files changed, 9089 insertions(+), 286 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
- create mode 100644 packaging/windows/herdr-installer.nsi
+ create mode 100644 packaging/windows/installer/project.nsi
  create mode 100644 scripts/package_windows_installer.ps1
  create mode 100644 scripts/test_windows_installer.py
  create mode 100644 scripts/windows_installer_fault_test.ps1
@@ -136,10 +136,10 @@ index a3726db05cd7efeb29091aaf68339e68f50c3b62..dfb681f74799c988f744d758aadeedc4
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cfc6515a87
+index 0000000000000000000000000000000000000000..1d2eac172302de4c330c4dc138ef86a267612c76
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3289 @@
+@@ -0,0 +1,3321 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall")]
@@ -151,9 +151,12 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +    [string]$UninstallerPath,
 +    [string]$HelperSourcePath,
 +    [string]$SkillSourcePath,
++    [string]$ProductName = "Herdr",
 +    [string]$BuildId,
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
++    [ValidateSet("Keep", "Remove")]
++    [string]$SettingsDisposition = "Keep",
 +    [long]$ParentPid = 0,
 +    [switch]$Silent
 +)
@@ -161,6 +164,11 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +Set-StrictMode -Version Latest
 +$ErrorActionPreference = "Stop"
 +
++$script:ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
++if ($ProductName -cnotmatch $script:ProductNamePattern) {
++    throw "Invalid product name '$ProductName'."
++}
++$script:ProductName = $ProductName
 +$script:BuildIdPattern = '^[0-9a-f]{12}\.[0-9a-f]{12}$'
 +$script:DisplayVersionPattern = '^((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))-preview\.([0-9a-f]{12}\.[0-9a-f]{12})$'
 +$script:NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$'
@@ -182,7 +190,7 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 +$script:UninstallMarkerText = "herdr-uninstall-v1`n"
 +$script:TransactionMarkerName = ".herdr-installer-transaction"
-+$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
++$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
 +$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 +
 +if ($null -eq ("Herdr.Installer.PinnedSkillFile" -as [type])) {
@@ -799,6 +807,25 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +        Remove-Item -LiteralPath $directory.FullName -Force
 +    }
 +    Remove-Item -LiteralPath $Path -Force
++}
++
++function Remove-HerdrUserSettings {
++    param([Parameter(Mandatory = $true)][string]$UserProfileRoot)
++
++    $profileRoot = Get-HerdrFullPath -Path $UserProfileRoot
++    Assert-HerdrRegularDirectory -Path $profileRoot
++    $settingsRoot = [IO.Path]::GetFullPath((Join-Path $profileRoot ".herdr")).TrimEnd('\')
++    if (-not (Test-HerdrPathWithin -Path $settingsRoot -Root $profileRoot)) {
++        throw "Herdr settings directory escaped the current user profile: $settingsRoot"
++    }
++    if (-not (Test-Path -LiteralPath $settingsRoot)) {
++        return
++    }
++    Assert-HerdrRegularDirectory -Path $settingsRoot
++    Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot
++    if (Test-Path -LiteralPath $settingsRoot) {
++        throw "Herdr settings cleanup did not reach terminal state: $settingsRoot"
++    }
 +}
 +
 +function Move-HerdrAgentSkillPath {
@@ -2237,7 +2264,7 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +    $marker = Join-Path $Path $script:TransactionMarkerName
 +    Assert-HerdrRegularFile -Path $marker
 +    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-+        -not $_.PSIsContainer -and $_.FullName -cne $marker
++        -not $_.PSIsContainer -and $_.FullName -ine $marker
 +    } | Sort-Object { $_.FullName.Length } -Descending)
 +    foreach ($file in $files) {
 +        Remove-Item -LiteralPath $file.FullName -Force
@@ -2448,7 +2475,7 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +    $markerPath = Join-Path $Path $script:TransactionMarkerName
 +    $manifestPath = Join-Path $Path "cleanup.manifest"
 +    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-+        -not $_.PSIsContainer -and $_.FullName -cne $markerPath -and $_.FullName -cne $manifestPath
++        -not $_.PSIsContainer -and $_.FullName -ine $markerPath -and $_.FullName -ine $manifestPath
 +    } | Sort-Object { $_.FullName.Length } -Descending)
 +    foreach ($file in $files) {
 +        Remove-Item -LiteralPath $file.FullName -Force
@@ -3207,7 +3234,7 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
 +    $numeric = $NumericVersion.Split('.')
 +    $values = @{
-+        DisplayName = "Herdr"
++        DisplayName = $script:ProductName
 +        DisplayVersion = $DisplayVersion
 +        Publisher = "herdr-win"
 +        InstallLocation = $InstallRoot
@@ -3382,6 +3409,8 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +function Invoke-HerdrUninstall {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [ValidateSet("Keep", "Remove")][string]$SettingsDisposition = "Keep",
++        [string]$UserProfileRoot = $env:USERPROFILE,
 +        [int]$LifecycleLockTimeoutMilliseconds = 30000
 +    )
 +
@@ -3391,6 +3420,9 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +        Invoke-HerdrUninstallLayout -InstallRoot $InstallRoot -AgentSkillsRoot (Get-HerdrAgentSkillsRoot)
 +        Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
 +        Remove-HerdrArpRegistration -InstallRoot $InstallRoot
++        if ($SettingsDisposition -ceq "Remove") {
++            Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
++        }
 +    }
 +}
 +
@@ -3410,14 +3442,14 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +                    -NumericVersion $NumericVersion `
 +                    -ParentPid $ParentPid
 +                if ($result.Status -ceq "Pending") {
-+                    [Console]::Out.WriteLine("Herdr $($result.BuildId): Pending; staged until old sessions exit.")
++                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
 +                } else {
-+                    [Console]::Out.WriteLine("Herdr $($result.BuildId): $($result.Status)")
++                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): $($result.Status)")
 +                }
 +            }
 +            "Uninstall" {
-+                Invoke-HerdrUninstall -InstallRoot $InstallRoot
-+                [Console]::Out.WriteLine("Herdr uninstall cleanup is ready.")
++                Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
++                [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
 +            }
 +            default {
 +                throw "Action must be Install or Uninstall."
@@ -3425,61 +3457,86 @@ index 0000000000000000000000000000000000000000..a66ae4b567fea5cfd985047afff574cf
 +        }
 +        exit 0
 +    } catch {
-+        [Console]::Error.WriteLine("Herdr installer error: $($_.Exception.Message)")
++        [Console]::Error.WriteLine("$script:ProductName installer error: $($_.Exception.Message)")
 +        exit 1
 +    }
 +}
-diff --git a/packaging/windows/herdr-installer.nsi b/packaging/windows/herdr-installer.nsi
+diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c23266c450e00
+index 0000000000000000000000000000000000000000..64750b9a865b37ba598c67dc318a189ac62ed9ef
 --- /dev/null
-+++ b/packaging/windows/herdr-installer.nsi
-@@ -0,0 +1,401 @@
-+!ifndef HERDR_STAGE_DIR
-+  !error "HERDR_STAGE_DIR is required"
++++ b/packaging/windows/installer/project.nsi
+@@ -0,0 +1,503 @@
++; Product identity, payloads, and runtime protocol names are build inputs.
++!ifndef ARG_STAGE_DIR
++  !error "ARG_STAGE_DIR is required"
 +!endif
-+!ifndef HERDR_LAUNCHER_EXE
-+  !error "HERDR_LAUNCHER_EXE is required"
++!ifndef ARG_LAUNCHER_EXE
++  !error "ARG_LAUNCHER_EXE is required"
 +!endif
-+!ifndef HERDR_HELPER_PS1
-+  !error "HERDR_HELPER_PS1 is required"
++!ifndef ARG_HELPER_PS1
++  !error "ARG_HELPER_PS1 is required"
 +!endif
-+!ifndef HERDR_SKILL_MD
-+  !error "HERDR_SKILL_MD is required"
++!ifndef ARG_SKILL_MD
++  !error "ARG_SKILL_MD is required"
 +!endif
-+!ifndef HERDR_BUILD_ID
-+  !error "HERDR_BUILD_ID is required"
++!ifndef APP_BUILD_ID
++  !error "APP_BUILD_ID is required"
 +!endif
-+!ifndef HERDR_DISPLAY_VERSION
-+  !error "HERDR_DISPLAY_VERSION is required"
++!ifndef INFO_PRODUCTVERSION_DISPLAY
++  !error "INFO_PRODUCTVERSION_DISPLAY is required"
 +!endif
-+!ifndef HERDR_NUMERIC_VERSION
-+  !error "HERDR_NUMERIC_VERSION is required"
++!ifndef INFO_PRODUCTVERSION_FIXED
++  !error "INFO_PRODUCTVERSION_FIXED is required"
 +!endif
-+!ifndef HERDR_OUTPUT_PATH
-+  !error "HERDR_OUTPUT_PATH is required"
++!ifndef APP_OUTPUT_PATH
++  !error "APP_OUTPUT_PATH is required"
++!endif
++!ifndef INFO_PRODUCTNAME
++  !error "INFO_PRODUCTNAME is required"
++!endif
++!ifndef INFO_COMPANYNAME
++  !error "INFO_COMPANYNAME is required"
++!endif
++!ifndef INFO_COPYRIGHT
++  !error "INFO_COPYRIGHT is required"
++!endif
++!ifndef APP_START_GATE_ENV
++  !error "APP_START_GATE_ENV is required"
++!endif
++!ifndef APP_TEST_MARKER_PREFIX
++  !error "APP_TEST_MARKER_PREFIX is required"
 +!endif
 +
 +Unicode true
-+Name "Herdr"
-+Caption "Herdr Setup"
-+OutFile "${HERDR_OUTPUT_PATH}"
-+InstallDir "$LOCALAPPDATA\Programs\Herdr"
++!define APP_LANG_ENGLISH 1033
++
++Name "${INFO_PRODUCTNAME}"
++Caption "${INFO_PRODUCTNAME} Setup"
++OutFile "${APP_OUTPUT_PATH}"
++InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 +RequestExecutionLevel user
-+SetCompressor /SOLID lzma
++SetDatablockOptimize on
++SetCompressor /SOLID /FINAL lzma
++SetCompressorDictSize 32
 +ShowInstDetails show
 +ShowUninstDetails show
-+BrandingText "Herdr"
-+VIProductVersion "${HERDR_NUMERIC_VERSION}"
-+VIAddVersionKey "ProductName" "Herdr"
-+VIAddVersionKey "CompanyName" "herdr-win"
-+VIAddVersionKey "LegalCopyright" "Herdr contributors"
-+VIAddVersionKey "FileDescription" "Herdr per-user installer"
-+VIAddVersionKey "FileVersion" "${HERDR_DISPLAY_VERSION}"
-+VIAddVersionKey "ProductVersion" "${HERDR_DISPLAY_VERSION}"
++AutoCloseWindow true
++BrandingText "${INFO_PRODUCTNAME}"
++ManifestDPIAware true
++VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
++VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_PRODUCTNAME}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "CompanyName" "${INFO_COMPANYNAME}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "LegalCopyright" "${INFO_COPYRIGHT}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_PRODUCTNAME} per-user installer"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 +
++!include "MUI2.nsh"
 +!include "FileFunc.nsh"
 +!include "LogicLib.nsh"
++!include "nsDialogs.nsh"
 +!include "x64.nsh"
 +
 +Var ParentPid
@@ -3491,22 +3548,40 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +Var ResidualValid
 +Var ResidualFindHandle
 +Var ResidualFindName
++Var SettingsDisposition
++Var SettingsCheckbox
 +
-+!macro HerdrUninstallFault Point Label
-+  !ifdef HERDR_TEST_UNINSTALL_FAULT
-+    StrCmp "${HERDR_TEST_UNINSTALL_FAULT}" "${Point}" 0 fault_done_${Label}
-+    IfFileExists "$TEMP\herdr-uninstall-fault-${Point}.once" fault_done_${Label}
-+    FileOpen $0 "$TEMP\herdr-uninstall-fault-${Point}.once" w
++!define MUI_ABORTWARNING
++!define MUI_UNABORTWARNING
++
++Page custom WelcomePage
++!insertmacro MUI_PAGE_INSTFILES
++
++UninstPage custom un.SettingsPage un.SettingsPageLeave
++!insertmacro MUI_UNPAGE_INSTFILES
++
++!insertmacro MUI_LANGUAGE "English"
++
++LangString AppWelcomePageTitle ${LANG_ENGLISH} "Install ${INFO_PRODUCTNAME}"
++LangString AppWelcomePageSubtitle ${LANG_ENGLISH} "Set up ${INFO_PRODUCTNAME} for your Windows user account."
++LangString AppWelcomePageText ${LANG_ENGLISH} "Version ${INFO_PRODUCTVERSION_DISPLAY} will be installed in your local Programs folder. Setup does not require administrator privileges.$\r$\n$\r$\nSelect Install to continue."
++LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
++LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
++LangString AppSettingsPageText ${LANG_ENGLISH} "Keep this selected for a clean removal. Clear it to reuse your configuration and sessions after installing ${INFO_PRODUCTNAME} again."
++LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
++LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
++
++!macro AppUninstallFault Point Label
++  !ifdef TEST_UNINSTALL_FAULT
++    StrCmp "${TEST_UNINSTALL_FAULT}" "${Point}" 0 fault_done_${Label}
++    IfFileExists "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" fault_done_${Label}
++    FileOpen $0 "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" w
 +    FileClose $0
 +    SetErrors
 +    Goto uninstall_cleanup_failed
 +fault_done_${Label}:
 +  !endif
 +!macroend
-+
-+Page instfiles
-+UninstPage uninstConfirm
-+UninstPage instfiles
 +
 +Function SetPowerShellPath
 +  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
@@ -3562,8 +3637,8 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +Function FailInstall
 +  Exch $0
 +  DetailPrint "$0"
-+  !ifdef HERDR_TEST_UNINSTALL_FAULT
-+    FileOpen $1 "$TEMP\herdr-install-failure-${HERDR_TEST_UNINSTALL_FAULT}.txt" w
++  !ifdef TEST_UNINSTALL_FAULT
++    FileOpen $1 "$TEMP\${APP_TEST_MARKER_PREFIX}-install-failure-${TEST_UNINSTALL_FAULT}.txt" w
 +    FileWrite $1 "$0"
 +    FileClose $1
 +  !endif
@@ -3585,7 +3660,7 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +FunctionEnd
 +
 +Function WaitForUpdaterStartGate
-+  ReadEnvStr $StartGate "HERDR_INSTALLER_START_GATE_V1"
++  ReadEnvStr $StartGate "${APP_START_GATE_ENV}"
 +  StrCmp $StartGate "" updater_start_gate_done
 +  StrCpy $0 "0"
 +updater_start_gate_loop:
@@ -3604,10 +3679,23 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +updater_start_gate_done:
 +FunctionEnd
 +
++Function WelcomePage
++  !insertmacro MUI_HEADER_TEXT "$(AppWelcomePageTitle)" "$(AppWelcomePageSubtitle)"
++  nsDialogs::Create 1018
++  Pop $0
++  ${If} $0 == error
++    Abort
++  ${EndIf}
++
++  ${NSD_CreateLabel} 0 0 100% 80u "$(AppWelcomePageText)"
++  Pop $0
++  nsDialogs::Show
++FunctionEnd
++
 +Function .onInit
 +  SetShellVarContext current
 +  ${IfNot} ${RunningX64}
-+    Push "Herdr requires 64-bit Windows."
++    Push "${INFO_PRODUCTNAME} requires 64-bit Windows."
 +    Call FailInstall
 +  ${EndIf}
 +  Call WaitForUpdaterStartGate
@@ -3627,18 +3715,60 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +parent_pid_ok:
 +  Call SetPowerShellPath
 +  IfFileExists "$PowerShellPath" powershell_ok
-+  Push "Windows PowerShell is required to install Herdr."
++  Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
 +  Call FailInstall
 +powershell_ok:
 +FunctionEnd
 +
 +Function un.onInit
 +  SetShellVarContext current
++  StrCpy $SettingsDisposition "Remove"
++  ${GetParameters} $0
++  ClearErrors
++  ${GetOptions} "$0" "/KEEP_SETTINGS" $1
++  ${IfNot} ${Errors}
++    StrCpy $SettingsDisposition "Keep"
++  ${EndIf}
 +  Call un.SetPowerShellPath
 +  IfFileExists "$PowerShellPath" un_powershell_ok
-+  Push "Windows PowerShell is required to uninstall Herdr."
++  Push "Windows PowerShell is required to uninstall ${INFO_PRODUCTNAME}."
 +  Call un.FailUninstall
 +un_powershell_ok:
++FunctionEnd
++
++Function un.SettingsPage
++  IfSilent settings_page_done 0
++  !insertmacro MUI_HEADER_TEXT "$(AppSettingsPageTitle)" "$(AppSettingsPageSubtitle)"
++  nsDialogs::Create 1018
++  Pop $0
++  ${If} $0 == error
++    Abort
++  ${EndIf}
++
++  ${NSD_CreateLabel} 0 0 100% 52u "$(AppSettingsPageText)"
++  Pop $0
++  ${NSD_CreateCheckbox} 0 62u 100% 18u "$(AppSettingsCheckbox)"
++  Pop $SettingsCheckbox
++  ${If} $SettingsDisposition == "Remove"
++    ${NSD_Check} $SettingsCheckbox
++  ${EndIf}
++  nsDialogs::Show
++settings_page_done:
++FunctionEnd
++
++Function un.SettingsPageLeave
++  IfSilent settings_page_leave_done 0
++  ${If} $SettingsCheckbox == ""
++    Goto settings_page_leave_done
++  ${EndIf}
++
++  ${NSD_GetState} $SettingsCheckbox $0
++  ${If} $0 == ${BST_CHECKED}
++    StrCpy $SettingsDisposition "Remove"
++  ${Else}
++    StrCpy $SettingsDisposition "Keep"
++  ${EndIf}
++settings_page_leave_done:
 +FunctionEnd
 +
 +Function un.ValidateResidualLayout
@@ -3731,29 +3861,29 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +un_residual_validation_done:
 +FunctionEnd
 +
-+Section "Herdr" SEC_HERDR
++Section "${INFO_PRODUCTNAME}" SEC_APP
 +  SectionIn RO
 +  InitPluginsDir
 +  ClearErrors
 +  SetOutPath "$PLUGINSDIR\payload"
-+  File /r "${HERDR_STAGE_DIR}\*"
++  File /r "${ARG_STAGE_DIR}\*"
 +  SetOutPath "$PLUGINSDIR"
-+  File /oname=herdr-launcher.exe "${HERDR_LAUNCHER_EXE}"
-+  File /oname=herdr-installer-helper.ps1 "${HERDR_HELPER_PS1}"
++  File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
++  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
 +  SetOutPath "$PLUGINSDIR\skill"
-+  File /oname=SKILL.md "${HERDR_SKILL_MD}"
++  File /oname=SKILL.md "${ARG_SKILL_MD}"
 +  SetOutPath "$PLUGINSDIR"
 +  WriteUninstaller "$PLUGINSDIR\uninstall.exe"
 +  IfErrors 0 installer_inputs_ready
-+  Push "Herdr setup could not unpack its embedded, pre-verified files."
++  Push "${INFO_PRODUCTNAME} setup could not unpack its embedded, pre-verified files."
 +  Call FailInstall
 +
 +installer_inputs_ready:
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\herdr-installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\herdr-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\herdr-installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -BuildId "${HERDR_BUILD_ID}" -DisplayVersion "${HERDR_DISPLAY_VERSION}" -NumericVersion "${HERDR_NUMERIC_VERSION}" -ParentPid "$ParentPid"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -ParentPid "$ParentPid"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
-+  StrCpy $0 "Herdr setup failed ($HelperExitCode). $HelperOutput"
++  StrCpy $0 "${INFO_PRODUCTNAME} setup failed ($HelperExitCode). $HelperOutput"
 +  Push $0
 +  Call FailInstall
 +
@@ -3763,10 +3893,11 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +SectionEnd
 +
 +Section "Uninstall"
++  SetAutoClose true
 +  Call un.ValidateResidualLayout
 +  StrCmp $ResidualValid "1" un_residual_exact
 +  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-+  Push "The managed Herdr uninstall helper is missing; the install was preserved."
++  Push "The managed ${INFO_PRODUCTNAME} uninstall helper is missing; the install was preserved."
 +  Call un.FailUninstall
 +
 +un_residual_exact:
@@ -3777,27 +3908,30 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +
 +un_residual_pending:
 +  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-+  Push "Herdr uninstall is pending but its retry helper is missing; residual files were preserved."
++  Push "${INFO_PRODUCTNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
 +  Call un.FailUninstall
 +
 +un_helper_ready:
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_PRODUCTNAME}" -SettingsDisposition "$SettingsDisposition"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" un_helper_complete
-+  StrCpy $0 "Herdr uninstall failed ($HelperExitCode). $HelperOutput"
++  StrCpy $0 "${INFO_PRODUCTNAME} uninstall failed ($HelperExitCode). $HelperOutput"
 +  Push $0
 +  Call un.FailUninstall
 +
 +un_helper_complete:
 +  DetailPrint "$HelperOutput"
++  ${If} $SettingsDisposition == "Remove"
++    DetailPrint "$(AppDetailRemoveSettings)"
++  ${EndIf}
 +  Call un.ValidateResidualLayout
 +  StrCmp $ResidualValid "1" un_cleanup_start
-+  Push "Herdr uninstall did not leave an exact recognized residual layout; cleanup was preserved."
++  Push "${INFO_PRODUCTNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
 +  Call un.FailUninstall
 +
 +un_residual_ready:
-+  DetailPrint "Resuming exact Herdr residual cleanup."
++  DetailPrint "Resuming exact ${INFO_PRODUCTNAME} residual cleanup."
 +
 +un_cleanup_start:
 +  ClearErrors
@@ -3806,17 +3940,17 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +  ; of re-entering a helper whose coordination file may already be gone.
 +  Delete "$INSTDIR\state\uninstall.pending"
 +  IfErrors uninstall_cleanup_failed
-+  !insertmacro HerdrUninstallFault "after-uninstall-pending" after_uninstall_pending
++  !insertmacro AppUninstallFault "after-uninstall-pending" after_uninstall_pending
 +  Delete "$INSTDIR\state\launcher.lock"
 +  IfErrors uninstall_cleanup_failed
-+  !insertmacro HerdrUninstallFault "after-launcher-lock" after_launcher_lock
++  !insertmacro AppUninstallFault "after-launcher-lock" after_launcher_lock
 +  Delete "$INSTDIR\state\installer-helper.ps1"
 +  IfErrors uninstall_cleanup_failed
-+  !insertmacro HerdrUninstallFault "after-installer-helper" after_installer_helper
++  !insertmacro AppUninstallFault "after-installer-helper" after_installer_helper
 +  RMDir "$INSTDIR\state"
 +  IfErrors uninstall_cleanup_failed
-+  !insertmacro HerdrUninstallFault "after-state-directory" after_state_directory
-+  !insertmacro HerdrUninstallFault "before-uninstaller" before_uninstaller
++  !insertmacro AppUninstallFault "after-state-directory" after_state_directory
++  !insertmacro AppUninstallFault "before-uninstaller" before_uninstaller
 +  Delete "$INSTDIR\uninstall.exe"
 +  IfErrors uninstall_cleanup_failed
 +  ; After self-removal only the install root can remain. Preserve any racing
@@ -3824,15 +3958,15 @@ index 0000000000000000000000000000000000000000..659e104c9f77f6e0c73686594c3c2326
 +  ClearErrors
 +  RMDir "$INSTDIR"
 +  IfErrors 0 uninstall_complete
-+  DetailPrint "Herdr was removed; a non-empty install directory was preserved."
++  DetailPrint "${INFO_PRODUCTNAME} was removed; a non-empty install directory was preserved."
 +  ClearErrors
 +  Goto uninstall_complete
 +uninstall_cleanup_failed:
-+  Push "Herdr uninstall could not remove its validated residual files. Retry uninstall."
++  Push "${INFO_PRODUCTNAME} uninstall could not remove its validated residual files. Retry uninstall."
 +  Call un.FailUninstall
 +uninstall_complete:
-+  !ifdef HERDR_TEST_UNINSTALL_FAULT
-+    Delete "$TEMP\herdr-uninstall-fault-${HERDR_TEST_UNINSTALL_FAULT}.once"
++  !ifdef TEST_UNINSTALL_FAULT
++    Delete "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${TEST_UNINSTALL_FAULT}.once"
 +  !endif
 +  SetErrorLevel 0
 +SectionEnd
@@ -3888,10 +4022,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..a375524e0f1fcfc939c8fcbce3843c9c
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea0d2d3be9
+index 0000000000000000000000000000000000000000..dc146cec18e368cf399c0520a8a0bdf8ac6ea6ea
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,438 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -3911,6 +4045,8 @@ index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea
 +
 +    [Parameter(Mandatory = $true)]
 +    [string]$OutputPath,
++
++    [string]$ProductName = "Herdr",
 +
 +    [string]$NsisArchive,
 +    [string]$NsisCacheDir,
@@ -3933,6 +4069,11 @@ index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea
 +$NsisArchiveName = "nsis-$NsisVersion.zip"
 +$NsisArchiveUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$NsisVersion/$NsisArchiveName"
 +$NsisArchiveSha256 = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
++$CompanyName = "herdr-win"
++$Copyright = "Herdr contributors"
++$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
++$InstallerTestMarkerPrefix = "herdr"
++$ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
 +$BuildIdPattern = '^[0-9a-f]{12}\.[0-9a-f]{12}$'
 +$DisplayVersionPattern = '^((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))\.((?:0|[1-9][0-9]{0,4}))-preview\.([0-9a-f]{12}\.[0-9a-f]{12})$'
 +$NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})$'
@@ -4208,11 +4349,14 @@ index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea
 +if ($BuildId -cnotmatch $BuildIdPattern) {
 +    throw "Invalid build ID '$BuildId'. Expected 12 lowercase hex characters, a dot, and 12 lowercase hex characters."
 +}
++if ($ProductName -cnotmatch $ProductNamePattern) {
++    throw "Invalid product name '$ProductName'."
++}
 +Assert-VersionIdentity
 +
 +$projectRoot = Split-Path -Parent $PSScriptRoot
 +$packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
-+$installerScript = Join-Path $projectRoot "packaging\windows\herdr-installer.nsi"
++$installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 +$helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
 +$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 +$StageDir = (Resolve-Path -LiteralPath $StageDir).Path
@@ -4292,19 +4436,24 @@ index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea
 +        "/V3",
 +        "/WX",
 +        "/INPUTCHARSET", "UTF8",
-+        "/DHERDR_STAGE_DIR=$StageDir",
-+        "/DHERDR_LAUNCHER_EXE=$LauncherExe",
-+        "/DHERDR_HELPER_PS1=$helperScript",
-+        "/DHERDR_SKILL_MD=$skillSource",
-+        "/DHERDR_BUILD_ID=$BuildId",
-+        "/DHERDR_DISPLAY_VERSION=$DisplayVersion",
-+        "/DHERDR_NUMERIC_VERSION=$NumericVersion",
-+        "/DHERDR_OUTPUT_PATH=$temporaryOutput",
++        "/DARG_STAGE_DIR=$StageDir",
++        "/DARG_LAUNCHER_EXE=$LauncherExe",
++        "/DARG_HELPER_PS1=$helperScript",
++        "/DARG_SKILL_MD=$skillSource",
++        "/DINFO_PRODUCTNAME=$ProductName",
++        "/DINFO_COMPANYNAME=$CompanyName",
++        "/DINFO_COPYRIGHT=$Copyright",
++        "/DAPP_BUILD_ID=$BuildId",
++        "/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion",
++        "/DINFO_PRODUCTVERSION_FIXED=$NumericVersion",
++        "/DAPP_OUTPUT_PATH=$temporaryOutput",
++        "/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable",
++        "/DAPP_TEST_MARKER_PREFIX=$InstallerTestMarkerPrefix",
 +        $installerScript
 +    )
 +    if (-not [string]::IsNullOrWhiteSpace($TestUninstallFault)) {
 +        $makensisArguments = @(
-+            "/DHERDR_TEST_UNINSTALL_FAULT=$TestUninstallFault"
++            "/DTEST_UNINSTALL_FAULT=$TestUninstallFault"
 +        ) + $makensisArguments
 +    }
 +    Invoke-NativeChecked $makensis $makensisArguments -TimeoutSeconds 180
@@ -4314,7 +4463,7 @@ index 0000000000000000000000000000000000000000..abbc79871be24a1c1aa6046238a694ea
 +    Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
 +}
 +
-+Write-Host "Created Herdr installer: $OutputPath"
++Write-Host "Created $ProductName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
 index 4c9f01679533ba9c698f59cd0acd33ba207f3336..0509317efc553ca7cdcda035c16490db16a58bba 100644
 --- a/scripts/preview.py
@@ -4624,10 +4773,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712cbbf4967
+index 0000000000000000000000000000000000000000..04a91724fa6e382d3ef26a6cd6a51db25c694fd0
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,465 @@
 +from __future__ import annotations
 +
 +import re
@@ -4638,7 +4787,7 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +
 +
 +PROJECT_ROOT = Path(__file__).resolve().parent.parent
-+NSI = PROJECT_ROOT / "packaging/windows/herdr-installer.nsi"
++NSI = PROJECT_ROOT / "packaging/windows/installer/project.nsi"
 +HELPER = PROJECT_ROOT / "packaging/windows/herdr-installer-helper.ps1"
 +PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
 +POWERSHELL_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
@@ -4651,7 +4800,14 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +
 +class WindowsInstallerStaticTests(unittest.TestCase):
 +    def test_expected_owners_exist_and_are_registered(self) -> None:
-+        for path in (NSI, HELPER, PACKAGER, POWERSHELL_TEST, FAULT_TEST, SKILL):
++        for path in (
++            NSI,
++            HELPER,
++            PACKAGER,
++            POWERSHELL_TEST,
++            FAULT_TEST,
++            SKILL,
++        ):
 +            self.assertTrue(path.is_file(), path)
 +        justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
 +        self.assertIn("scripts.test_windows_installer", justfile)
@@ -4750,14 +4906,14 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +            ),
 +            3,
 +        )
-+        self.assertIn("HERDR_SKILL_MD", nsi)
-+        self.assertIn('/oname=SKILL.md "${HERDR_SKILL_MD}"', nsi)
++        self.assertIn("ARG_SKILL_MD", nsi)
++        self.assertIn('/oname=SKILL.md "${ARG_SKILL_MD}"', nsi)
 +        self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
 +        self.assertIn(
 +            '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
 +            packager,
 +        )
-+        self.assertIn('"/DHERDR_SKILL_MD=$skillSource"', packager)
++        self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
 +        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
 +        self.assertIn("retained files from the previous Herdr skill version", lifecycle)
 +        self.assertIn("Owned skill remained public after atomic detach", lifecycle)
@@ -4776,6 +4932,8 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +        self.assertIn("retained the unchanged owned Herdr skill", fault_test)
 +        self.assertIn("Modified skill tree uninstall passed", fault_test)
 +        self.assertIn("AgentUserProfileRoot", fault_test)
++        self.assertIn('[string]$ProductName = "Herdr"', fault_test)
++        self.assertIn("-ProductName $ProductName", fault_test)
 +        self.assertIn("requires no interrupted Herdr agent skill transaction", fault_test)
 +
 +    def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
@@ -4835,21 +4993,78 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +        ):
 +            self.assertNotIn(forbidden, runtime_sources)
 +
++    def test_nsis_template_is_product_neutral_and_matches_jobs_presentation(self) -> None:
++        nsi = NSI.read_text(encoding="utf-8")
++        for required in (
++            "ARG_STAGE_DIR",
++            "ARG_LAUNCHER_EXE",
++            "ARG_HELPER_PS1",
++            "ARG_SKILL_MD",
++            "APP_BUILD_ID",
++            "APP_OUTPUT_PATH",
++            "APP_START_GATE_ENV",
++            "APP_TEST_MARKER_PREFIX",
++            "INFO_PRODUCTNAME",
++            "INFO_COMPANYNAME",
++            "INFO_COPYRIGHT",
++            "INFO_PRODUCTVERSION_DISPLAY",
++            "INFO_PRODUCTVERSION_FIXED",
++        ):
++            self.assertIn(f"!ifndef {required}", nsi)
++        self.assertNotRegex(nsi, re.compile(r"herdr", re.IGNORECASE))
++        self.assertIn('Name "${INFO_PRODUCTNAME}"', nsi)
++        self.assertIn('Caption "${INFO_PRODUCTNAME} Setup"', nsi)
++        self.assertIn('BrandingText "${INFO_PRODUCTNAME}"', nsi)
++        self.assertIn('!include "MUI2.nsh"', nsi)
++        self.assertIn('!include "nsDialogs.nsh"', nsi)
++        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
++        self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
++        self.assertNotIn("LANG_GERMAN", nsi)
++        self.assertNotIn("APP_SELECT_INSTALLER_LANGUAGE", nsi)
++        self.assertNotIn("MUI_ICON", nsi)
++        self.assertNotIn("MUI_UNICON", nsi)
++        self.assertNotIn("MUI_WELCOMEFINISHPAGE_BITMAP", nsi)
++        self.assertIn("Page custom WelcomePage", nsi)
++        self.assertIn("Function WelcomePage", nsi)
++        self.assertNotIn("MUI_PAGE_WELCOME", nsi)
++        self.assertIn("!insertmacro MUI_PAGE_INSTFILES", nsi)
++        self.assertIn(
++            "UninstPage custom un.SettingsPage un.SettingsPageLeave", nsi
++        )
++        self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
++        self.assertNotIn("UninstPage uninstConfirm", nsi)
++        self.assertIn("SetDatablockOptimize on", nsi)
++        self.assertIn("SetCompressorDictSize 32", nsi)
++        self.assertIn("SetCompressor /SOLID /FINAL lzma", nsi)
++        self.assertIn("ManifestDPIAware true", nsi)
++
 +    def test_nsis_is_per_user_silent_safe_and_truthful(self) -> None:
 +        nsi = NSI.read_text(encoding="utf-8")
++        helper = HELPER.read_text(encoding="utf-8")
 +        self.assertIn("RequestExecutionLevel user", nsi)
-+        self.assertIn('InstallDir "$LOCALAPPDATA\\Programs\\Herdr"', nsi)
++        self.assertIn(
++            'InstallDir "$LOCALAPPDATA\\Programs\\${INFO_PRODUCTNAME}"', nsi
++        )
 +        self.assertIn('WriteUninstaller "$PLUGINSDIR\\uninstall.exe"', nsi)
-+        self.assertIn('VIProductVersion "${HERDR_NUMERIC_VERSION}"', nsi)
-+        self.assertIn('VIAddVersionKey "ProductVersion" "${HERDR_DISPLAY_VERSION}"', nsi)
++        self.assertIn('VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"', nsi)
++        self.assertIn(
++            '"ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"', nsi
++        )
 +        self.assertIn("/PARENT_PID=", nsi)
 +        self.assertIn("/TIMEOUT=120000", nsi)
-+        self.assertIn('ReadEnvStr $StartGate "HERDR_INSTALLER_START_GATE_V1"', nsi)
++        self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
 +        self.assertIn("IntCmp $0 600", nsi)
++        self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
++        self.assertIn('${GetOptions} "$0" "/KEEP_SETTINGS" $1', nsi)
++        self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
++        self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
++        self.assertIn('-SettingsDisposition "$SettingsDisposition"', nsi)
++        self.assertIn('SettingsDisposition = "Keep"', helper)
++        self.assertIn('if ($SettingsDisposition -ceq "Remove")', helper)
 +        self.assertIn("SetErrorLevel 1", nsi)
 +        self.assertIn("SetErrorLevel 0", nsi)
-+        self.assertIn('QuietUninstallString', HELPER.read_text(encoding="utf-8"))
++        self.assertIn("QuietUninstallString", helper)
 +        message_boxes = [match.start() for match in re.finditer(r"\bMessageBox\b", nsi)]
 +        self.assertEqual(len(message_boxes), 2)
 +        for position in message_boxes:
@@ -4866,11 +5081,28 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +        positions = [cleanup.index(instruction) for instruction in ordered_cleanup]
 +        self.assertEqual(positions, sorted(positions))
 +
++    def test_helper_owns_fail_closed_optional_settings_removal(self) -> None:
++        helper = HELPER.read_text(encoding="utf-8")
++        cleanup = helper[
++            helper.index("function Remove-HerdrUserSettings {") : helper.index(
++                "function Move-HerdrAgentSkillPath {"
++            )
++        ]
++        self.assertIn('Join-Path $profileRoot ".herdr"', cleanup)
++        self.assertIn("Assert-HerdrRegularDirectory -Path $profileRoot", cleanup)
++        self.assertIn("Test-HerdrPathWithin", cleanup)
++        self.assertIn("Assert-HerdrRegularDirectory -Path $settingsRoot", cleanup)
++        self.assertIn(
++            "Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot", cleanup
++        )
++        self.assertNotIn("Remove-Item -LiteralPath $settingsRoot -Recurse", cleanup)
++        self.assertIn("DisplayName = $script:ProductName", helper)
++
 +    def test_nsis_residual_cleanup_is_exact_idempotent_and_fault_injected(self) -> None:
 +        nsi = NSI.read_text(encoding="utf-8")
 +        validator = nsi[
 +            nsi.index("Function un.ValidateResidualLayout") : nsi.index(
-+                'Section "Herdr" SEC_HERDR'
++                'Section "${INFO_PRODUCTNAME}" SEC_APP'
 +            )
 +        ]
 +        for exact_name in (
@@ -4893,7 +5125,7 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +            "before-uninstaller",
 +        ):
 +            self.assertEqual(
-+                nsi.count(f'!insertmacro HerdrUninstallFault "{stage}" '), 1
++                nsi.count(f'!insertmacro AppUninstallFault "{stage}" '), 1
 +            )
 +        fault_test = FAULT_TEST.read_text(encoding="utf-8")
 +        self.assertIn("Wait-TestCondition", fault_test)
@@ -4924,8 +5156,22 @@ index 0000000000000000000000000000000000000000..e6a38d5d62a51e14cc7f0e24a11a5712
 +        self.assertIn("expected exact output", packager)
 +        self.assertIn("must be <major>.<minor>.<patch>-preview", packager)
 +        self.assertIn("must match DisplayVersion's major, minor, and patch", packager)
-+        self.assertIn("HERDR_DISPLAY_VERSION", packager)
-+        self.assertIn("HERDR_NUMERIC_VERSION", packager)
++        self.assertIn(
++            '$installerScript = Join-Path $projectRoot "packaging\\windows\\installer\\project.nsi"',
++            packager,
++        )
++        self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
++        self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
++        self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
++        self.assertIn(
++            '"/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion"', packager
++        )
++        self.assertIn('"/DINFO_PRODUCTVERSION_FIXED=$NumericVersion"', packager)
++        self.assertIn(
++            '"/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable"',
++            packager,
++        )
++        self.assertIn('"/DTEST_UNINSTALL_FAULT=$TestUninstallFault"', packager)
 +        self.assertNotIn("Microsoft.Windows.Console.ConPTY", packager)
 +
 +    def test_updater_owns_a_bounded_kill_on_close_installer_job(self) -> None:
@@ -5155,10 +5401,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..d21517169521b05386f21ba2faeb6b45
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e1029d36d
+index 0000000000000000000000000000000000000000..81cc9ec367fd1c919ab403fa9fc3726e35c680c2
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,314 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -5167,6 +5413,7 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +    [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +    [Parameter(Mandatory = $true)][string]$NumericVersion,
 +    [Parameter(Mandatory = $true)][string]$OutputDir,
++    [string]$ProductName = "Herdr",
 +    [string]$AgentUserProfileRoot,
 +    [string[]]$Faults = @(
 +        "after-uninstall-pending",
@@ -5196,11 +5443,12 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
 +    New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
 +}
-+$installRoot = Join-Path $env:LOCALAPPDATA "Programs\Herdr"
-+$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
++$installRoot = Join-Path $env:LOCALAPPDATA "Programs\$ProductName"
++$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
 +$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 +$skillRoot = Join-Path $env:USERPROFILE ".agents\skills\herdr"
 +$skillPath = Join-Path $skillRoot "SKILL.md"
++$settingsRoot = Join-Path $env:USERPROFILE ".herdr"
 +$allowedFaults = @(
 +    "after-uninstall-pending",
 +    "after-launcher-lock",
@@ -5208,6 +5456,9 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +    "after-state-directory",
 +    "before-uninstaller"
 +)
++if ($ProductName -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$') {
++    throw "Invalid product name '$ProductName'."
++}
 +
 +function Wait-TestCondition {
 +    param(
@@ -5340,6 +5591,7 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
++            -ProductName $ProductName `
 +            -OutputPath $installer `
 +            -TestUninstallFault $fault
 +
@@ -5361,6 +5613,8 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +            throw "Fresh install for $fault did not publish expected state at $installRoot (root=$(Test-Path -LiteralPath $installRoot), active=$(Test-Path -LiteralPath (Join-Path $installRoot 'state\active')), arp=$(Test-Path -LiteralPath $arpKey), exit=$installExitCode)."
 +        }
 +        Assert-TestSkillInstalled
++        New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
++        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-by-default")
 +
 +        $uninstaller = Join-Path $installRoot "uninstall.exe"
 +        [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
@@ -5370,6 +5624,9 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +        Wait-TestUninstallerIdle
 +        if (Test-Path -LiteralPath $skillRoot) {
 +            throw "Injected uninstall $fault retained the unchanged owned Herdr skill."
++        }
++        if (Test-Path -LiteralPath $settingsRoot) {
++            throw "Injected uninstall $fault retained settings despite the default removal policy."
 +        }
 +        if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
 +            throw "Injected uninstall $fault removed its retry executable."
@@ -5397,6 +5654,7 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +        -BuildId $BuildId `
 +        -DisplayVersion $DisplayVersion `
 +        -NumericVersion $NumericVersion `
++        -ProductName $ProductName `
 +        -OutputPath $modifiedInstaller
 +    $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
 +    if ($modifiedInstallExit -ne 0) {
@@ -5407,11 +5665,13 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +            (Test-Path -LiteralPath $arpKey)
 +    }
 +    Assert-TestSkillInstalled
++    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
++    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-explicitly")
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
 +    New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
 +    $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S")
++    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/KEEP_SETTINGS")
 +    if ($modifiedUninstallExit -ne 0) {
 +        throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
 +    }
@@ -5428,11 +5688,18 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +    if ([IO.File]::ReadAllText((Join-Path $skillRoot "resources\nested.txt")) -cne "preserve-nested") {
 +        throw "Modified skill tree uninstall removed nested user content."
 +    }
++    if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-explicitly") {
++        throw "Uninstall ignored /KEEP_SETTINGS."
++    }
++    Remove-Item -LiteralPath $settingsRoot -Recurse -Force
 +    Write-Host "Modified skill tree uninstall passed."
 +} finally {
 +    Remove-TestInstallIfPresent
 +    if (Test-Path -LiteralPath $skillRoot) {
 +        Remove-Item -LiteralPath $skillRoot -Recurse -Force -ErrorAction SilentlyContinue
++    }
++    if (Test-Path -LiteralPath $settingsRoot) {
++        Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
 +    }
 +    foreach ($fault in $allowedFaults) {
 +        $faultMarker = Join-Path $env:TEMP "herdr-uninstall-fault-$fault.once"
@@ -5454,10 +5721,10 @@ index 0000000000000000000000000000000000000000..ab8a8c112a7c7fb7ba38b26b3086ee7e
 +Write-Host "Windows installer fault matrix passed."
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7208a8a72fc2bf70f191f7145188a0d04bc396a
+index 0000000000000000000000000000000000000000..d57b1a281ea60a93f65b8f4627a11685e4ad4133
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,887 @@
+@@ -0,0 +1,924 @@
 +[CmdletBinding()]
 +param()
 +
@@ -5730,6 +5997,43 @@ index 0000000000000000000000000000000000000000..d7208a8a72fc2bf70f191f7145188a0d
 +    $crlfSkill = Join-Path $recordRoot "SKILL.md"
 +    [IO.File]::WriteAllText($crlfSkill, "---`r`nname: herdr`r`ndescription: crlf`r`n---`r`n", $script:Utf8NoBom)
 +    Assert-Equal (Get-HerdrAgentSkillSha256 -Path $crlfSkill) (Get-HerdrSha256 -Path $crlfSkill) "CRLF Herdr skill was rejected or normalized while hashing."
++
++    # Optional settings cleanup removes only a regular .herdr tree below the
++    # selected profile and refuses ambiguous files or reparse-point content.
++    $settingsProfile = Join-Path $tempRoot "settings-profile"
++    Write-TestFile -Path (Join-Path $settingsProfile ".herdr\sessions\one.json") -Text "session"
++    Write-TestFile -Path (Join-Path $settingsProfile ".herdr\config.toml") -Text "settings"
++    Remove-HerdrUserSettings -UserProfileRoot $settingsProfile
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $settingsProfile ".herdr"))) "Settings cleanup retained a regular .herdr tree."
++    Remove-HerdrUserSettings -UserProfileRoot $settingsProfile
++
++    $settingsFileProfile = Join-Path $tempRoot "settings-file-profile"
++    New-Item -ItemType Directory -Path $settingsFileProfile | Out-Null
++    $settingsFile = Join-Path $settingsFileProfile ".herdr"
++    Write-TestFile -Path $settingsFile -Text "preserve-file"
++    Assert-Throws {
++        Remove-HerdrUserSettings -UserProfileRoot $settingsFileProfile
++    } "regular directory is missing" "Settings cleanup accepted a .herdr file."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $settingsFile) "preserve-file" "Rejected settings file was changed."
++
++    $settingsJunctionProfile = Join-Path $tempRoot "settings-junction-profile"
++    $settingsJunctionRoot = Join-Path $settingsJunctionProfile ".herdr"
++    $settingsExternal = Join-Path $tempRoot "settings-external"
++    Write-TestFile -Path (Join-Path $settingsJunctionRoot "config.toml") -Text "preserve-settings"
++    Write-TestFile -Path (Join-Path $settingsExternal "outside.txt") -Text "preserve-external"
++    $settingsJunction = Join-Path $settingsJunctionRoot "external"
++    New-Item -ItemType Junction -Path $settingsJunction -Target $settingsExternal | Out-Null
++    try {
++        Assert-Throws {
++            Remove-HerdrUserSettings -UserProfileRoot $settingsJunctionProfile
++        } "reparse point" "Settings cleanup followed a nested junction."
++        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $settingsJunctionRoot "config.toml")) "preserve-settings" "Rejected settings tree was partially deleted."
++        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $settingsExternal "outside.txt")) "preserve-external" "Settings cleanup changed junction-target content."
++    } finally {
++        if (Test-Path -LiteralPath $settingsJunction) {
++            [IO.Directory]::Delete($settingsJunction)
++        }
++    }
 +
 +    # Ownership-safe removal never follows a reparse point in an ancestor.
 +    $externalAgents = Join-Path $tempRoot "external-agents"
@@ -6496,7 +6800,7 @@ index 9d7389b5170af663ea70846e6fde8ab579c0631d..ee812e6bffba5f7face70a0ced2cf336
  
  fn run_config_command(args: &[String]) -> std::io::Result<i32> {
 diff --git a/src/cli/status.rs b/src/cli/status.rs
-index 49b3c129f5ed807ccca6bf4989a44407ef400431..23edaf7af016ecaa67303a7b75b744e929bc60a3 100644
+index d22bd3338f1c50e89cbe3f09d6a2eefded3a2fcc..d2d101abcd2ee34c3e7c9ca5a011036f079246e5 100644
 --- a/src/cli/status.rs
 +++ b/src/cli/status.rs
 @@ -93,10 +93,7 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
@@ -6523,7 +6827,7 @@ index 49b3c129f5ed807ccca6bf4989a44407ef400431..23edaf7af016ecaa67303a7b75b744e9
      println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
      println!("binary: {}", current_exe_label());
      Ok(())
-@@ -252,7 +246,7 @@ struct UpdateStatusJson {
+@@ -253,7 +247,7 @@ struct UpdateStatusJson {
  fn client_status_json() -> ClientStatusJson {
      ClientStatusJson {
          version: crate::build_info::version(),
@@ -10004,4 +10308,3 @@ index e5842dc8f54be11f544d574e438ffc73ce3aaac9..7934eae0427db1a13c24095446006bf3
              Test-FileDigest -Path $downloadPath -ExpectedDigest $asset.Sha256
 -- 
 2.55.0.windows.3
-

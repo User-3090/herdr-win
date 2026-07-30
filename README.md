@@ -39,7 +39,7 @@ if ($actual -cne [string] $asset.sha256) { throw "herdr-win installer checksum m
 & $installer
 ```
 
-The installer uses `%LOCALAPPDATA%\Programs\Herdr`, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. It also installs the current cross-agent skill at `%USERPROFILE%\.agents\skills\herdr\SKILL.md`, replacing the complete previous `herdr` skill directory on every install or update. The executable and command remain `herdr.exe` and `herdr`.
+The English-only, keyboard-operable Windows installer uses `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. It also installs the current cross-agent skill at `%USERPROFILE%\.agents\skills\herdr\SKILL.md`, replacing the complete previous `herdr` skill directory on every install or update. The executable and command remain `herdr.exe` and `herdr`.
 
 For a portable or manual install, download both:
 
@@ -69,7 +69,7 @@ If older managed sessions are still active, the update is reported as staged. Th
 
 ### Uninstall
 
-Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and unchanged installer-owned agent skill while preserving modified skill content plus Herdr configuration and session data under `%USERPROFILE%\.herdr`.
+Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and unchanged installer-owned agent skill while preserving modified skill content. **Remove Herdr settings and session data** is selected by default; clear it to keep `%USERPROFILE%\.herdr` for a later installation. Silent uninstall also removes those settings by default; pass `/KEEP_SETTINGS` to preserve them.
 
 ## Maintained Windows delta
 

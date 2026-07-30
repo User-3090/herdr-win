@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DisplayVersion,
     [Parameter(Mandatory = $true)][string]$NumericVersion,
     [Parameter(Mandatory = $true)][string]$OutputDir,
+    [string]$ProductName = "Herdr",
     [string]$AgentUserProfileRoot,
     [string[]]$Faults = @(
         "after-uninstall-pending",
@@ -35,11 +36,12 @@ $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local"
 if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
     New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
 }
-$installRoot = Join-Path $env:LOCALAPPDATA "Programs\Herdr"
-$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
+$installRoot = Join-Path $env:LOCALAPPDATA "Programs\$ProductName"
+$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
 $skillSource = Join-Path $projectRoot "SKILL.md"
 $skillRoot = Join-Path $env:USERPROFILE ".agents\skills\herdr"
 $skillPath = Join-Path $skillRoot "SKILL.md"
+$settingsRoot = Join-Path $env:USERPROFILE ".herdr"
 $allowedFaults = @(
     "after-uninstall-pending",
     "after-launcher-lock",
@@ -47,6 +49,9 @@ $allowedFaults = @(
     "after-state-directory",
     "before-uninstaller"
 )
+if ($ProductName -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$') {
+    throw "Invalid product name '$ProductName'."
+}
 
 function Wait-TestCondition {
     param(
@@ -179,6 +184,7 @@ try {
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
+            -ProductName $ProductName `
             -OutputPath $installer `
             -TestUninstallFault $fault
 
@@ -200,6 +206,8 @@ try {
             throw "Fresh install for $fault did not publish expected state at $installRoot (root=$(Test-Path -LiteralPath $installRoot), active=$(Test-Path -LiteralPath (Join-Path $installRoot 'state\active')), arp=$(Test-Path -LiteralPath $arpKey), exit=$installExitCode)."
         }
         Assert-TestSkillInstalled
+        New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-by-default")
 
         $uninstaller = Join-Path $installRoot "uninstall.exe"
         [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
@@ -209,6 +217,9 @@ try {
         Wait-TestUninstallerIdle
         if (Test-Path -LiteralPath $skillRoot) {
             throw "Injected uninstall $fault retained the unchanged owned Herdr skill."
+        }
+        if (Test-Path -LiteralPath $settingsRoot) {
+            throw "Injected uninstall $fault retained settings despite the default removal policy."
         }
         if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
             throw "Injected uninstall $fault removed its retry executable."
@@ -236,6 +247,7 @@ try {
         -BuildId $BuildId `
         -DisplayVersion $DisplayVersion `
         -NumericVersion $NumericVersion `
+        -ProductName $ProductName `
         -OutputPath $modifiedInstaller
     $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
     if ($modifiedInstallExit -ne 0) {
@@ -246,11 +258,13 @@ try {
             (Test-Path -LiteralPath $arpKey)
     }
     Assert-TestSkillInstalled
+    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-explicitly")
     [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
     [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
     $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S")
+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/KEEP_SETTINGS")
     if ($modifiedUninstallExit -ne 0) {
         throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
     }
@@ -267,11 +281,18 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $skillRoot "resources\nested.txt")) -cne "preserve-nested") {
         throw "Modified skill tree uninstall removed nested user content."
     }
+    if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-explicitly") {
+        throw "Uninstall ignored /KEEP_SETTINGS."
+    }
+    Remove-Item -LiteralPath $settingsRoot -Recurse -Force
     Write-Host "Modified skill tree uninstall passed."
 } finally {
     Remove-TestInstallIfPresent
     if (Test-Path -LiteralPath $skillRoot) {
         Remove-Item -LiteralPath $skillRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $settingsRoot) {
+        Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     foreach ($fault in $allowedFaults) {
         $faultMarker = Join-Path $env:TEMP "herdr-uninstall-fault-$fault.once"
