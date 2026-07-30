@@ -167,11 +167,12 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("https://herdr.dev/install.ps1", added)
 
     def test_public_readme_mirror_and_nightly_installer_contract(self) -> None:
-        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme_bytes = (PROJECT_ROOT / "README.md").read_bytes()
         self.assertEqual(
-            readme.encode(),
+            readme_bytes,
             (PROJECT_ROOT / "docs" / "next" / "README.md").read_bytes(),
         )
+        readme = readme_bytes.decode("utf-8")
         self.assertIn(
             r"%USERPROFILE%\.agents\skills\herdr\SKILL.md",
             readme,
