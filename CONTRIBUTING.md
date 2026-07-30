@@ -41,7 +41,8 @@ Do not make a product-source edit only in this repository's working tree. The
 nightly builds a fresh upstream checkout, so product changes must be represented
 by the canonical queue.
 
-1. Start a clean temporary branch at current upstream `master`.
+1. Start a clean temporary branch at the exact upstream commit already recorded
+   in `patches/delta/BASE`; ordinary changes never advance that base implicitly.
 2. Apply every entry in `patches/delta/series` with `git am --3way`.
 3. Make and focused-test the change in that replayed tree until its logical
    behavior is frozen.
@@ -49,10 +50,8 @@ by the canonical queue.
    for a genuinely independent responsibility.
 5. Regenerate the mailbox with `git format-patch --full-index --binary`, keeping
    its stable filename and logical position.
-6. Update `patches/delta/BASE` when the complete queue has been refreshed and
-   reviewed on a newer upstream commit.
-7. Replay the checked-in mailboxes again on a fresh upstream checkout. Never
-   rely on conflict resolution that exists only in a local branch.
+6. Replay the checked-in mailboxes again on a fresh checkout of that same recorded
+   base. Never rely on conflict resolution that exists only in a local branch.
 
 Keep the queue small and responsibility-oriented rather than mirroring development
 commit history. Never hand-edit a diff to force application; regenerate the owning
@@ -60,6 +59,17 @@ mailbox from its reviewed logical commit. Do not regenerate the mailbox or run t
 full replay/native matrix after every intermediate edit: use focused checks while
 the logical change is moving, then regenerate once and run broad gates on the
 frozen snapshot. Rerun only after relevant source or inputs change.
+
+### Refreshing from official upstream
+
+Do not fetch, merge, rebase, or advance the queue to newer
+`ogulcancelik/herdr` source as part of an ordinary feature, fix, documentation, or
+maintenance task. Refresh official upstream only when the user explicitly requests
+that separate operation. Then use the exact approved upstream commit, replay and
+review the complete queue, update `BASE` only after that review, and run the full
+refresh gates. The scheduled nightly workflow may independently test current
+upstream; its execution or failure is not permission for an agent to rewrite the
+control checkout, `BASE`, or mailboxes.
 
 Repository branding, GitHub Actions, patch metadata, and release orchestration
 must not be included in product mailboxes.

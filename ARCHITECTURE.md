@@ -13,6 +13,11 @@ behavior; code and tests remain the detailed implementation truth.
   upstream revision plus the ordered `patches/delta/series` queue. `BASE` records
   the reviewed upstream commit; the control branch is not an integration product
   branch.
+- `BASE` is a deliberate user-selected integration boundary, not a moving pointer.
+  Ordinary work and fork-origin synchronization never advance it. Refreshing from
+  official upstream is a separate user-directed maintenance operation; scheduled
+  nightly upstream testing does not mutate the control branch or authorize a queue
+  refresh.
 - Each maintained product responsibility has one logical mailbox. Evolving a
   responsibility refreshes its mailbox rather than appending development history.
   A new mailbox requires an independent owner, verification plan, and upstream
