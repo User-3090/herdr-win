@@ -43,6 +43,7 @@ $NsisArchiveUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$Nsis
 $NsisArchiveSha256 = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f"
 $CompanyName = "herdr-win"
 $Copyright = "Herdr contributors"
+$CommandName = "herdr"
 $InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
 $InstallerTestMarkerPrefix = "herdr"
 $ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
@@ -331,9 +332,18 @@ $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 $helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
 $skillSource = Join-Path $projectRoot "SKILL.md"
+$artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
+$artworkFiles = @(
+    "installer-welcome-finish-164x314.bmp",
+    "installer-welcome-finish-205x393.bmp",
+    "installer-welcome-finish-246x471.bmp",
+    "installer-welcome-finish-287x550.bmp",
+    "installer-welcome-finish-328x628.bmp"
+)
 $StageDir = (Resolve-Path -LiteralPath $StageDir).Path
 $LauncherExe = (Resolve-Path -LiteralPath $LauncherExe).Path
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+$InstallerOriginalFilename = [System.IO.Path]::GetFileName($OutputPath)
 
 if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
     (Get-Item -LiteralPath $StageDir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
@@ -342,7 +352,11 @@ if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
 if (Test-Path -LiteralPath $OutputPath) {
     throw "Refusing to overwrite an existing installer output: $OutputPath"
 }
-foreach ($required in @($packager, $installerScript, $helperScript, $skillSource)) {
+$requiredSources = @($packager, $installerScript, $helperScript, $skillSource)
+foreach ($artworkFile in $artworkFiles) {
+    $requiredSources += Join-Path $artworkDir $artworkFile
+}
+foreach ($required in $requiredSources) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required installer source does not exist: $required"
     }
@@ -412,9 +426,12 @@ try {
         "/DARG_LAUNCHER_EXE=$LauncherExe",
         "/DARG_HELPER_PS1=$helperScript",
         "/DARG_SKILL_MD=$skillSource",
+        "/DARG_ARTWORK_DIR=$artworkDir",
         "/DINFO_PRODUCTNAME=$ProductName",
         "/DINFO_COMPANYNAME=$CompanyName",
         "/DINFO_COPYRIGHT=$Copyright",
+        "/DINFO_COMMANDNAME=$CommandName",
+        "/DINFO_ORIGINALFILENAME=$InstallerOriginalFilename",
         "/DAPP_BUILD_ID=$BuildId",
         "/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion",
         "/DINFO_PRODUCTVERSION_FIXED=$NumericVersion",

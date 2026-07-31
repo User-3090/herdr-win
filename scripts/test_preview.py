@@ -32,7 +32,7 @@ class PreviewNotesTests(unittest.TestCase):
             content = preview.build_manifest(
                 output=output,
                 repo="ogulcancelik/herdr",
-                tag="preview-2026-06-02-abcdef123456",
+                tag="v2026.06.02.1",
                 build_id="abcdef123456.7890abcdef12",
                 commit="abcdef1234567890",
                 built_at="2026-06-02T03:00:00Z",
@@ -45,9 +45,11 @@ class PreviewNotesTests(unittest.TestCase):
                     "windows-x86_64-installer": "b" * 64,
                 },
                 retain=30,
+                release_version="2026.06.02.1",
             )
             data = json.loads(content)
             self.assertEqual(data["channel"], "preview")
+            self.assertEqual(data["release_version"], "2026.06.02.1")
             self.assertEqual(data["build_id"], "abcdef123456.7890abcdef12")
             self.assertEqual(
                 set(data["assets"]),
@@ -63,7 +65,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["sha256"],
@@ -72,7 +74,7 @@ class PreviewNotesTests(unittest.TestCase):
             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
             self.assertEqual(
                 data["assets"]["windows-x86_64-installer"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64-installer.exe",
+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64-installer"]["format"], "nsis"
@@ -82,6 +84,37 @@ class PreviewNotesTests(unittest.TestCase):
                 data["assets"]["windows-x86_64-installer"]["sha256"],
             )
             self.assertIn("abcdef123456.7890abcdef12", data["builds"])
+            self.assertEqual(
+                data["builds"]["abcdef123456.7890abcdef12"]["release_version"],
+                "2026.06.02.1",
+            )
+
+    def test_herdr_win_asset_names_require_real_calver(self):
+        self.assertEqual(
+            preview.herdr_win_asset_names("2026.07.31.1"),
+            {
+                "windows-x86_64": "herdr-win_v2026.07.31.1_windows_amd64.zip",
+                "windows-x86_64-installer": (
+                    "herdr-win_v2026.07.31.1_windows_amd64_setup.exe"
+                ),
+            },
+        )
+        self.assertIn(
+            "4294967296",
+            preview.herdr_win_asset_names("2026.07.31.4294967296")[
+                "windows-x86_64-installer"
+            ],
+        )
+        for invalid in (
+            "v2026.07.31.1",
+            "2026.02.30.1",
+            "2026.07.31.0",
+            "2026.07.31.+1",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "release_version"
+            ):
+                preview.herdr_win_asset_names(invalid)
 
     def test_windows_preview_asset_requires_sha256(self):
         with tempfile.TemporaryDirectory() as tmp:

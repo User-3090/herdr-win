@@ -365,6 +365,53 @@ fn update_asset_key(os: &str, arch: &str) -> String {
 }
 
 #[cfg(windows)]
+fn is_herdr_win_setup_asset_name(name: &str) -> bool {
+    let Some(version) = name
+        .strip_prefix("herdr-win_v")
+        .and_then(|value| value.strip_suffix("_windows_amd64_setup.exe"))
+    else {
+        return false;
+    };
+    let mut fields = version.split('.');
+    let (Some(year), Some(month), Some(day), Some(sequence), None) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return false;
+    };
+    if year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || ![year, month, day, sequence]
+            .into_iter()
+            .all(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()))
+        || !matches!(sequence.as_bytes().first(), Some(b'1'..=b'9'))
+    {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) =
+        (year.parse::<i32>(), month.parse::<u8>(), day.parse::<u8>())
+    else {
+        return false;
+    };
+    if year == 0 {
+        return false;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day != 0 && day <= maximum_day
+}
+
+#[cfg(windows)]
 fn validate_windows_installer_asset(asset_key: &str, asset: &AssetRef) -> Result<(), String> {
     if asset.format.as_deref() != Some("nsis") {
         return Err(format!(
@@ -384,10 +431,11 @@ fn validate_windows_installer_asset(asset_key: &str, asset: &AssetRef) -> Result
             "Windows update asset {asset_key} has an invalid lowercase SHA-256 digest"
         ));
     }
+    let asset_name = asset.url.rsplit('/').next().unwrap_or_default();
     if !asset
         .url
         .starts_with(crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX)
-        || !asset.url.ends_with("/herdr-windows-x86_64-installer.exe")
+        || !is_herdr_win_setup_asset_name(asset_name)
     {
         return Err(format!(
             "Windows update asset {asset_key} must use the immutable herdr-win NSIS release URL"
@@ -775,7 +823,13 @@ fn download_windows_installer(release: &ReleaseInfo) -> Result<DownloadedWindows
         .as_deref()
         .ok_or("selected Windows update asset has no SHA-256 digest")?;
     let root = create_windows_update_temp_root()?;
-    let path = root.join("herdr-windows-x86_64-installer.exe");
+    let asset_name = release
+        .download_url
+        .rsplit('/')
+        .next()
+        .filter(|name| is_herdr_win_setup_asset_name(name))
+        .ok_or("selected Windows update asset has an invalid setup filename")?;
+    let path = root.join(asset_name);
     let download = DownloadedWindowsInstaller { root, path };
 
     let status = crate::noninteractive_process::curl_command()
@@ -2464,7 +2518,7 @@ mod cross_platform_tests {
     #[cfg(windows)]
     #[test]
     fn windows_installer_command_uses_verified_local_asset_parent_and_start_gate() {
-        let installer = Path::new(r"C:\Temp\herdr-windows-x86_64-installer.exe");
+        let installer = Path::new(r"C:\Temp\herdr-win_v2026.07.31.1_windows_amd64_setup.exe");
         let start_gate = Path::new(r"C:\Temp\installer.start");
         let command = windows_installer_command(installer, 4242, start_gate);
         assert_eq!(command.get_program(), installer.as_os_str());
@@ -2485,9 +2539,15 @@ mod cross_platform_tests {
     #[cfg(windows)]
     #[test]
     fn windows_manifest_requires_fork_nsis_asset_and_sha256() {
+        assert!(is_herdr_win_setup_asset_name(
+            "herdr-win_v2026.07.31.4294967296_windows_amd64_setup.exe"
+        ));
+        assert!(!is_herdr_win_setup_asset_name(
+            "herdr-win_v2026.07.31.+1_windows_amd64_setup.exe"
+        ));
         let valid = AssetRef {
             url: format!(
-                "{}preview-test/herdr-windows-x86_64-installer.exe",
+                "{}v2026.07.31.1/herdr-win_v2026.07.31.1_windows_amd64_setup.exe",
                 crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
             ),
             sha256: Some("a".repeat(64)),
@@ -2501,8 +2561,15 @@ mod cross_platform_tests {
         invalid = valid.clone();
         invalid.sha256 = None;
         assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
-        invalid = valid;
-        invalid.url = "https://example.com/herdr-windows-x86_64-installer.exe".to_string();
+        invalid = valid.clone();
+        invalid.url =
+            "https://example.com/herdr-win_v2026.07.31.1_windows_amd64_setup.exe".to_string();
+        assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
+        invalid = valid.clone();
+        invalid.url = format!(
+            "{}v2026.02.30.1/herdr-win_v2026.02.30.1_windows_amd64_setup.exe",
+            crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
+        );
         assert!(validate_windows_installer_asset("windows-x86_64-installer", &invalid).is_err());
     }
 
@@ -2512,7 +2579,7 @@ mod cross_platform_tests {
         let build_id = "bbbbbbbbbbbb.222222222222";
         let installer = AssetRef {
             url: format!(
-                "{}preview-test/herdr-windows-x86_64-installer.exe",
+                "{}v2026.07.31.1/herdr-win_v2026.07.31.1_windows_amd64_setup.exe",
                 crate::distribution::WINDOWS_RELEASE_DOWNLOAD_PREFIX
             ),
             sha256: Some("b".repeat(64)),
@@ -2555,7 +2622,7 @@ mod cross_platform_tests {
             .expect("different preview build");
         assert!(release
             .download_url
-            .ends_with("herdr-windows-x86_64-installer.exe"));
+            .ends_with("herdr-win_v2026.07.31.1_windows_amd64_setup.exe"));
         assert_eq!(release.asset_format.as_deref(), Some("nsis"));
         assert_eq!(
             release.sha256.as_deref(),

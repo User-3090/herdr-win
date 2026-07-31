@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in a herdr-win nightly.
+description: Report a reproducible problem in a herdr-win snapshot.
 title: "[bug] "
 body:
   - type: markdown
@@ -7,7 +7,7 @@ body:
       value: |
         **Before you start:** Read [CONTRIBUTING.md](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md).
 
-        Use this form for a problem observed in a herdr-win Windows nightly. If practical, try the same workflow with upstream Herdr and report the result below. Do not report a fork-only failure to upstream.
+        Use this form for a problem observed in a herdr-win Windows snapshot. If practical, try the same workflow with upstream Herdr and report the result below. Do not report a fork-only failure to upstream.
 
         Keep the report factual and include only the smallest relevant logs. For general Herdr questions and product feature requests, use the upstream project links shown on the new-issue page.
 
@@ -15,7 +15,7 @@ body:
     id: bug-confirmation
     attributes:
       label: Is this a reproducible bug?
-      description: Confirm that the problem occurs in a herdr-win nightly and has exact reproduction steps.
+      description: Confirm that the problem occurs in a herdr-win snapshot and has exact reproduction steps.
       options:
         - label: I confirm this is a reproducible herdr-win bug, not a general Herdr question or feature request.
           required: true

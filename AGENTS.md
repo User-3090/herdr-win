@@ -46,11 +46,9 @@ active memory owner.
 - Never fetch, clone, query, download, check out, replay, test, or otherwise obtain
   anything from official upstream `ogulcancelik/herdr` unless the user explicitly
   requests that exact upstream operation in the current task. This prohibition also
-  covers dispatching or rerunning workflows that select upstream `master`; use only
-  already-local objects and the commit recorded in `BASE`, and report a blocked
-  gate instead of reaching upstream. A repository-owned scheduled Nightly may test
-  current upstream independently, but its existence or result grants an agent no
-  permission to access upstream, change `BASE`, or refresh maintained mailboxes.
+  covers changing `BASE` or refreshing maintained mailboxes; use only already-local
+  objects and the commit recorded in `BASE`, and report a blocked gate instead of
+  reaching upstream.
   Synchronizing this fork's configured `origin` for normal collaboration and
   delivery remains allowed because it is not official upstream. A manual
   `workflow_dispatch` release uses recorded `BASE`.
@@ -59,10 +57,12 @@ active memory owner.
 - `scripts/test_delta_patches.py` and `scripts/test_upstream_patches.py` own queue
   control invariants.
 - `.github/workflows/ci.yml` owns cheap PR/manual replay validation.
-- `.github/workflows/windows-nightly.yml` owns scheduled/manual Windows testing,
-  immutable publication, manifest generation, and feed verification.
-- `website/preview.json` is generated channel state; the nightly workflow is its
-  only writer.
+- `.github/workflows/windows-nightly.yml` is the legacy-named, manually dispatched
+  owner for Windows testing, immutable publication, manifest generation, and feed
+  verification. It has no scheduled trigger, requires an explicit herdr-win CalVer,
+  and always releases recorded `BASE`.
+- `website/preview.json` is generated channel state; the manual release workflow is
+  its only writer.
 - `src/distribution.rs` in replayed source owns the fork channel and source URLs.
 - Root `README.md` and `docs/next/README.md` are one mirrored public-documentation
   projection of relevant `PRODUCT.md` behavior.

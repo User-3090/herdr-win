@@ -14,9 +14,9 @@ tests remain the detailed implementation truth.
 - Fork identity appears in repository, release, and update-channel presentation.
   The package, executable, command, configuration, state, sessions, sockets, and
   protocol remain `herdr` and stay compatible with upstream.
-- Nightlies currently target Windows x86_64. General CLI, TUI, configuration,
-  integration, and issue behavior remains documented and owned upstream unless a
-  maintained Windows delta explicitly changes it.
+- herdr-win snapshots currently target Windows x86_64. General CLI, TUI,
+  configuration, integration, and issue behavior remains documented and owned
+  upstream unless a maintained Windows delta explicitly changes it.
 - The maintained user-visible Windows delta covers terminal fidelity, remote
   attach/image transport, managed Windows distribution, and truthful OpenCode
   retry/error lifecycle reporting.
@@ -26,17 +26,18 @@ tests remain the detailed implementation truth.
 - The normal managed installation is per-user under
   `%LOCALAPPDATA%\Programs\Herdr`, exposes the stable `herdr` command on user
   `PATH`, and registers Herdr in Windows Installed Apps without requiring
-  administrator privileges. The installer interface is English-only. Its
-  keyboard-operable Windows setup uses the Herdr product identity and clearly
-  explains the fixed per-user destination. A portable ZIP remains a supported
-  manual alternative.
+  administrator privileges. The installer interface is English-only. Its branded,
+  keyboard-operable Windows setup uses the Herdr product identity, clearly explains
+  the fixed per-user destination, and ends with the exact first command. A portable
+  ZIP remains a supported manual alternative.
 - The managed installer installs the cross-agent Herdr skill at
   `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and replaces the complete prior
   `herdr` skill directory on install/update.
-- Preview updates use only the fork-owned immutable installer asset and verified
-  digest. Existing managed sessions continue on their current runtime; a newer
-  runtime may remain staged until old sessions exit, after which future launches
-  switch atomically. Update never terminates active Herdr sessions.
+- Snapshot updates use only the fork-owned immutable setup asset and verified
+  digest through the fork-owned update feed. Existing managed sessions continue on
+  their current runtime; a newer runtime may remain staged until old sessions exit,
+  after which future launches switch atomically. Update never terminates active
+  Herdr sessions.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, user `PATH` entry, Installed Apps registration, and
   an unchanged installer-owned skill while preserving modified skill content. The
@@ -44,7 +45,7 @@ tests remain the detailed implementation truth.
   under `%USERPROFILE%\.herdr`; users can clear that checkbox to keep the data for
   a later installation. Silent uninstall uses the same remove-by-default policy and
   accepts `/KEEP_SETTINGS` as the explicit preservation choice.
-- The executable and installer are currently unsigned. Documentation must keep the
+- The executable and setup are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.
 
@@ -59,12 +60,18 @@ tests remain the detailed implementation truth.
 
 ## Release Promise
 
-- Published preview assets derive from one tested replay of the selected upstream
+- Published snapshot assets derive from one tested replay of the selected upstream
   source plus the maintained queue. The portable ZIP, managed installer, and
   manifest digest identify the same source.
-- A manually requested release uses the last reviewed upstream commit recorded in
-  `BASE`. The scheduled Nightly alone tests current upstream and publishes only if
-  the maintained queue still replays and every release gate passes.
+- Each release has a manually selected herdr-win CalVer `YYYY.MM.DD.N`. Assets use
+  `herdr-win_v<CalVer>_<os>_<arch>.<ext>` for portable packages and append
+  `_setup.exe` for Windows setup, so future platforms can join the same release
+  without changing the naming model. The upstream package version and
+  source/control commit hashes are provenance, not a claim that a snapshot equals
+  an upstream stable or preview release.
+- Releases are manual only and use the last reviewed upstream commit recorded in
+  `BASE`. Refreshing that base is a separate manual maintenance operation; no
+  scheduled workflow tests, rebases, or publishes current upstream.
 - Ordinary pushes do not publish binaries. A replay, build, package, immutability,
   digest, or feed-verification failure prevents or visibly fails the corresponding
   release stage rather than silently publishing a different build.

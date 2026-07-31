@@ -1,12 +1,15 @@
-name: herdr-win nightly
+name: herdr-win Windows release
 
 on:
-  schedule:
-    - cron: "23 4 * * *"
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "herdr-win CalVer without v (YYYY.MM.DD.N)"
+        required: true
+        type: string
 
 concurrency:
-  group: herdr-win-nightly
+  group: herdr-win-windows-release
   cancel-in-progress: false
 
 permissions:
@@ -15,8 +18,6 @@ permissions:
 env:
   RUST_TOOLCHAIN_VERSION: 1.96.1
   WINDOWS_TARGET: x86_64-pc-windows-msvc
-  ARTIFACT_NAME: herdr-windows-x86_64
-  INSTALLER_ASSET_NAME: herdr-windows-x86_64-installer.exe
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -30,6 +31,10 @@ jobs:
       build_id: ${{ steps.source.outputs.build_id }}
       base_version: ${{ steps.replay.outputs.base_version }}
       protocol: ${{ steps.replay.outputs.protocol }}
+      release_version: ${{ steps.release_identity.outputs.release_version }}
+      artifact_name: ${{ steps.release_identity.outputs.artifact_name }}
+      archive_asset_name: ${{ steps.release_identity.outputs.archive_asset_name }}
+      installer_asset_name: ${{ steps.release_identity.outputs.installer_asset_name }}
     steps:
       - name: Require immutable release policy
         shell: pwsh
@@ -49,21 +54,43 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Select upstream source
+      - name: Validate release identity
+        id: release_identity
+        shell: pwsh
+        env:
+          RELEASE_VERSION_INPUT: ${{ inputs.release_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseVersion = $env:RELEASE_VERSION_INPUT.Trim()
+          $assetJson = & python control\scripts\preview.py herdr-win-asset-names `
+            --release-version $releaseVersion
+          if ($LASTEXITCODE -ne 0) {
+            throw "invalid herdr-win release version '$releaseVersion'"
+          }
+          $assets = $assetJson | ConvertFrom-Json
+          $archiveAssetName = [string] $assets.'windows-x86_64'
+          $installerAssetName = [string] $assets.'windows-x86_64-installer'
+          $artifactName = [IO.Path]::GetFileNameWithoutExtension($archiveAssetName)
+          if ($archiveAssetName -cne "$artifactName.zip") {
+            throw "portable archive name is not a ZIP: $archiveAssetName"
+          }
+          "release_version=$releaseVersion" >> $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+          "archive_asset_name=$archiveAssetName" >> $env:GITHUB_OUTPUT
+          "installer_asset_name=$installerAssetName" >> $env:GITHUB_OUTPUT
+          "RELEASE_VERSION=$releaseVersion" >> $env:GITHUB_ENV
+          "ARTIFACT_NAME=$artifactName" >> $env:GITHUB_ENV
+          "INSTALLER_ASSET_NAME=$installerAssetName" >> $env:GITHUB_ENV
+
+      - name: Select reviewed upstream source
         id: upstream_source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $basePath = Join-Path $PWD "control\patches\delta\BASE"
-            $upstreamRef = [IO.File]::ReadAllText($basePath).Trim()
-            if ($upstreamRef -cnotmatch '^[0-9a-f]{40}$') {
-              throw "patches/delta/BASE must contain one full lowercase commit"
-            }
-          } elseif ($env:GITHUB_EVENT_NAME -eq "schedule") {
-            $upstreamRef = "master"
-          } else {
-            throw "unsupported release event $env:GITHUB_EVENT_NAME"
+          $basePath = Join-Path $PWD "control\patches\delta\BASE"
+          $upstreamRef = [IO.File]::ReadAllText($basePath).Trim()
+          if ($upstreamRef -cnotmatch '^[0-9a-f]{40}$') {
+            throw "patches/delta/BASE must contain one full lowercase commit"
           }
           "ref=$upstreamRef" >> $env:GITHUB_OUTPUT
 
@@ -82,7 +109,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF -ne "refs/heads/master") {
-            throw "nightly publication must run from master, not $env:GITHUB_REF"
+            throw "Windows publication must run from master, not $env:GITHUB_REF"
           }
           $upstream = (git -C source rev-parse HEAD).Trim()
           Push-Location control
@@ -216,7 +243,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
-          key: herdr-win-nightly
+          key: herdr-win-windows-release
           workspaces: source
 
       - name: Run Windows checks
@@ -263,7 +290,7 @@ jobs:
           $exe = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr.exe"
           .\source\scripts\windows_smoke_conpty_path.ps1 `
             -ExePath $exe `
-            -Session "nightly-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            -Session "release-system-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 
       - name: Package and validate release
         shell: pwsh
@@ -396,7 +423,7 @@ jobs:
           }
           foreach ($url in $requiredUrls) {
             if (-not $binary.Contains($url)) {
-              throw "nightly executable does not contain required fork update URL: $url"
+              throw "release executable does not contain required fork update URL: $url"
             }
           }
           foreach ($url in @(
@@ -405,7 +432,7 @@ jobs:
             "https://herdr.dev/install.ps1"
           )) {
             if ($binary.Contains($url)) {
-              throw "nightly executable contains forbidden upstream update URL: $url"
+              throw "release executable contains forbidden upstream update URL: $url"
             }
           }
 
@@ -416,7 +443,7 @@ jobs:
             -OutputPath $archive
           .\source\scripts\windows_conpty_enhanced_input_probe.ps1 `
             -ExePath (Join-Path $stage "herdr.exe") `
-            -Session "nightly-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -Session "release-bundled-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
             -ExpectedConsoleHostPath (Join-Path $stage "conpty\x64\OpenConsole.exe")
           Invoke-BoundedProcess -FilePath "powershell.exe" -TimeoutMilliseconds 180000 -Arguments @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -475,12 +502,12 @@ jobs:
       - name: Upload tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: herdr-win-nightly-${{ github.run_id }}
+          name: herdr-win-windows-release-${{ github.run_id }}
           path: |
-            artifact/${{ env.ARTIFACT_NAME }}.zip
-            artifact/${{ env.ARTIFACT_NAME }}.zip.sha256
-            artifact/${{ env.INSTALLER_ASSET_NAME }}
-            artifact/${{ env.INSTALLER_ASSET_NAME }}.sha256
+            artifact/${{ steps.release_identity.outputs.archive_asset_name }}
+            artifact/${{ steps.release_identity.outputs.archive_asset_name }}.sha256
+            artifact/${{ steps.release_identity.outputs.installer_asset_name }}
+            artifact/${{ steps.release_identity.outputs.installer_asset_name }}.sha256
             artifact/PATCH_SERIES.txt
           if-no-files-found: error
           retention-days: 2
@@ -500,6 +527,9 @@ jobs:
       BUILD_ID: ${{ needs.build.outputs.build_id }}
       BASE_VERSION: ${{ needs.build.outputs.base_version }}
       PROTOCOL: ${{ needs.build.outputs.protocol }}
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+      INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
     steps:
       - name: Checkout manifest owner
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -512,7 +542,7 @@ jobs:
       - name: Download tested package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: herdr-win-nightly-${{ github.run_id }}
+          name: herdr-win-windows-release-${{ github.run_id }}
           path: release-assets
 
       - name: Verify and publish prerelease
@@ -533,7 +563,7 @@ jobs:
           checksum_digest="sha256:$(sha256sum "$checksum" | awk '{print $1}')"
           installer_digest="sha256:$(sha256sum "$installer" | awk '{print $1}')"
 
-          tag="windows-nightly-${UPSTREAM_SHA:0:12}-${CONTROL_SHA:0:12}"
+          tag="v${RELEASE_VERSION}"
 
           verify_tag_target() {
             local tag_sha
@@ -608,10 +638,10 @@ jobs:
             verify_asset_shape "$release_json" "$installer"
           }
 
-          date_utc="$(date -u +%Y-%m-%d)"
           {
-            echo "Unofficial herdr-win Windows nightly built from upstream Herdr plus the maintained Windows delta."
+            echo "Unofficial herdr-win Windows snapshot built from upstream Herdr plus the maintained delta."
             echo
+            echo "- herdr-win release: \`v${RELEASE_VERSION}\`"
             echo "- Upstream source: \`${UPSTREAM_SHA}\`"
             echo "- herdr-win control revision: \`${CONTROL_SHA}\`"
             echo "- Build identity: \`${BUILD_ID}\`"
@@ -658,7 +688,7 @@ jobs:
               "${INSTALLER_ASSET_NAME}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "herdr-win nightly ${date_utc}" \
+              --title "herdr-win v${RELEASE_VERSION}" \
               --notes-file RELEASE_NOTES.md \
               --prerelease \
               --latest=false
@@ -765,6 +795,7 @@ jobs:
             --protocol "$PROTOCOL" \
             --notes "$notes" \
             --sha-file "$shas" \
+            --release-version "$RELEASE_VERSION" \
             --retain 30
 
           expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}"
@@ -773,6 +804,7 @@ jobs:
             --arg build_id "$BUILD_ID" \
             --arg commit "$UPSTREAM_SHA" \
             --arg base_version "$BASE_VERSION" \
+            --arg release_version "$RELEASE_VERSION" \
             --argjson protocol "$PROTOCOL" \
             --arg sha "$zip_sha" \
             --arg installer_sha "$installer_sha" \
@@ -789,6 +821,7 @@ jobs:
                     or (.["windows-x86_64-installer"].format == "nsis"
                         and (.["windows-x86_64-installer"].sha256 | test("^[0-9a-f]{64}$"))));
              .channel == "preview"
+             and .release_version == $release_version
              and .build_id == $build_id
              and .commit == $commit
              and .base_version == $base_version
@@ -796,6 +829,7 @@ jobs:
              and (.assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
              and (.builds[$build_id].assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
              and .builds[$build_id].assets == .assets
+             and .builds[$build_id].release_version == $release_version
              and .assets["windows-x86_64"].url == $expected_url
              and .assets["windows-x86_64"].sha256 == $sha
              and .assets["windows-x86_64-installer"].url == $expected_installer_url
@@ -823,7 +857,7 @@ jobs:
           unstaged_paths="$(git diff --name-only)"
           untracked_paths="$(git ls-files --others --exclude-standard)"
           if [[ "$staged_paths" != "website/preview.json" || -n "$unstaged_paths" || -n "$untracked_paths" ]]; then
-            echo "Only website/preview.json may be committed by the nightly workflow." >&2
+            echo "Only website/preview.json may be committed by the manual release workflow." >&2
             git status --short >&2
             exit 1
           fi
@@ -870,6 +904,8 @@ jobs:
     env:
       BUILD_ID: ${{ needs.build.outputs.build_id }}
       BASE_VERSION: ${{ needs.build.outputs.base_version }}
+      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+      INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
     steps:
       - name: Confirm updater sees the published build
         shell: pwsh

@@ -15,4 +15,8 @@ product rules belong in `PRODUCT.md`; stable technical design belongs in
 
 ## Items
 
-None.
+- Add tested artifacts for the remaining upstream-supported operating-system and
+  architecture targets. Publish them under the same manually approved CalVer and
+  `herdr-win_v<CalVer>_<os>_<arch>.<ext>` naming contract as Windows, reserving the
+  `_setup.exe` suffix for setup executables; verify each native package boundary
+  and one coherent cross-platform manifest before advertising support.

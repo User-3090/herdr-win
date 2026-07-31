@@ -11,6 +11,9 @@
 !ifndef ARG_SKILL_MD
   !error "ARG_SKILL_MD is required"
 !endif
+!ifndef ARG_ARTWORK_DIR
+  !error "ARG_ARTWORK_DIR is required"
+!endif
 !ifndef APP_BUILD_ID
   !error "APP_BUILD_ID is required"
 !endif
@@ -32,6 +35,12 @@
 !ifndef INFO_COPYRIGHT
   !error "INFO_COPYRIGHT is required"
 !endif
+!ifndef INFO_COMMANDNAME
+  !error "INFO_COMMANDNAME is required"
+!endif
+!ifndef INFO_ORIGINALFILENAME
+  !error "INFO_ORIGINALFILENAME is required"
+!endif
 !ifndef APP_START_GATE_ENV
   !error "APP_START_GATE_ENV is required"
 !endif
@@ -47,9 +56,11 @@ Caption "${INFO_PRODUCTNAME} Setup"
 OutFile "${APP_OUTPUT_PATH}"
 InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 RequestExecutionLevel user
+SetCompressor lzma
 SetDatablockOptimize on
+SetCompressorDictSize 8
 SetCompressor /SOLID /FINAL lzma
-SetCompressorDictSize 32
+AllowSkipFiles off
 ShowInstDetails show
 ShowUninstDetails show
 AutoCloseWindow true
@@ -63,6 +74,7 @@ VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "LegalCopyright" "${INFO_COPYRIGHT}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_PRODUCTNAME} per-user installer"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFILENAME}"
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -82,20 +94,36 @@ Var ResidualFindName
 Var SettingsDisposition
 Var SettingsCheckbox
 
+!define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
+!define INSTALLER_WELCOME_BITMAP_125 "${ARG_ARTWORK_DIR}\installer-welcome-finish-205x393.bmp"
+!define INSTALLER_WELCOME_BITMAP_150 "${ARG_ARTWORK_DIR}\installer-welcome-finish-246x471.bmp"
+!define INSTALLER_WELCOME_BITMAP_175 "${ARG_ARTWORK_DIR}\installer-welcome-finish-287x550.bmp"
+!define INSTALLER_WELCOME_BITMAP_200 "${ARG_ARTWORK_DIR}\installer-welcome-finish-328x628.bmp"
+
 !define MUI_ABORTWARNING
 !define MUI_UNABORTWARNING
+!define MUI_WELCOMEFINISHPAGE_BITMAP "${INSTALLER_WELCOME_BITMAP_100}"
+!define MUI_WELCOMEFINISHPAGE_BITMAP_STRETCH NoStretchNoCropNoAlign
+!define MUI_CUSTOMFUNCTION_GUIINIT SelectInstallerWelcomeBitmap
+!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_125}"
+!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_150}"
+!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
+!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
+!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_PRODUCTNAME}"
+!define MUI_WELCOMEPAGE_TEXT "Setup installs ${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} for your Windows user account in:$\r$\n$\r$\n$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}$\r$\n$\r$\nNo administrator privileges are required. Setup adds ${INFO_COMMANDNAME} to your user PATH; open a new terminal after setup before running it."
+!define MUI_FINISHPAGE_NOREBOOTSUPPORT
+!define MUI_FINISHPAGE_TITLE "${INFO_PRODUCTNAME} is installed"
+!define MUI_FINISHPAGE_TEXT "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed successfully.$\r$\n$\r$\n${INFO_PRODUCTNAME} runs in a terminal, so no application window will open.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n$\r$\n${INFO_COMMANDNAME}"
 
-Page custom WelcomePage
+!insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
 
 UninstPage custom un.SettingsPage un.SettingsPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
 
-LangString AppWelcomePageTitle ${LANG_ENGLISH} "Install ${INFO_PRODUCTNAME}"
-LangString AppWelcomePageSubtitle ${LANG_ENGLISH} "Set up ${INFO_PRODUCTNAME} for your Windows user account."
-LangString AppWelcomePageText ${LANG_ENGLISH} "Version ${INFO_PRODUCTVERSION_DISPLAY} will be installed in your local Programs folder. Setup does not require administrator privileges.$\r$\n$\r$\nSelect Install to continue."
 LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
 LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
 LangString AppSettingsPageText ${LANG_ENGLISH} "Keep this selected for a clean removal. Clear it to reuse your configuration and sessions after installing ${INFO_PRODUCTNAME} again."
@@ -210,17 +238,17 @@ updater_start_gate_timeout:
 updater_start_gate_done:
 FunctionEnd
 
-Function WelcomePage
-  !insertmacro MUI_HEADER_TEXT "$(AppWelcomePageTitle)" "$(AppWelcomePageSubtitle)"
-  nsDialogs::Create 1018
-  Pop $0
-  ${If} $0 == error
-    Abort
+Function SelectInstallerWelcomeBitmap
+  System::Call 'USER32::GetDpiForWindow(p $HWNDPARENT)i.r0'
+  ${If} $0 >= 180
+    File "/oname=$PLUGINSDIR\modern-wizard.bmp" "${INSTALLER_WELCOME_BITMAP_200}"
+  ${ElseIf} $0 >= 156
+    File "/oname=$PLUGINSDIR\modern-wizard.bmp" "${INSTALLER_WELCOME_BITMAP_175}"
+  ${ElseIf} $0 >= 132
+    File "/oname=$PLUGINSDIR\modern-wizard.bmp" "${INSTALLER_WELCOME_BITMAP_150}"
+  ${ElseIf} $0 >= 108
+    File "/oname=$PLUGINSDIR\modern-wizard.bmp" "${INSTALLER_WELCOME_BITMAP_125}"
   ${EndIf}
-
-  ${NSD_CreateLabel} 0 0 100% 80u "$(AppWelcomePageText)"
-  Pop $0
-  nsDialogs::Show
 FunctionEnd
 
 Function .onInit

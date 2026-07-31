@@ -5,7 +5,7 @@ link directly to its mailbox files. Do not remove, rename, or repurpose those
 files. `index.json` and `series` describe the historical fork patch set at the
 time this archive was frozen.
 
-The maintained herdr-win delta now lives in [`../delta/`](../delta/). Nightly
+The maintained herdr-win delta now lives in [`../delta/`](../delta/). Release
 builds do not apply this legacy archive.
 
 ## Stable-link policy

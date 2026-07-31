@@ -1,8 +1,8 @@
 # herdr-win maintained delta
 
-This is the canonical product delta applied by the herdr-win nightly build on
-top of the latest [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr)
-`master` branch.
+This is the canonical product delta applied by the manually dispatched herdr-win
+release workflow on top of the reviewed [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr)
+commit recorded in `BASE`.
 
 The queue intentionally contains a few coarse, logical feature patches rather
 than one monolith or a patch for every development commit:
@@ -20,7 +20,7 @@ turning the queue into task history.
 ## Files
 
 - `BASE` records the upstream commit used for the latest reviewed refresh.
-- `series` is the only nightly application order.
+- `series` is the only release application order.
 - `*.patch` files are full-index, binary-safe `git format-patch` mailboxes.
 
 Repository branding, GitHub Actions, and release orchestration are control-plane
@@ -28,7 +28,7 @@ files and do not belong in this product patch queue.
 
 ## Refreshing the queue
 
-1. Start a clean branch at the latest upstream `master`.
+1. Manually choose and review an upstream commit, then start a clean branch there.
 2. Apply `series` in order with `git am --3way`.
 3. Resolve upstream drift in the patch that owns the behavior.
 4. Keep one reviewed commit per logical patch and regenerate its mailbox with
@@ -42,5 +42,5 @@ Validate the control-plane inventory with:
 python -m unittest scripts.test_delta_patches scripts.test_upstream_patches
 ```
 
-Nightly replay never resolves conflicts automatically. A conflict means the
+Release replay never resolves conflicts automatically. A conflict means the
 owning patch must be refreshed and reviewed.

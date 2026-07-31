@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,9 @@ EXPECTED_ASSET_NAMES = {
     "windows-x86_64": "herdr-windows-x86_64.zip",
     "windows-x86_64-installer": "herdr-windows-x86_64-installer.exe",
 }
+HERDR_WIN_RELEASE_VERSION_RE = re.compile(
+    r"^(?P<year>[0-9]{4})\.(?P<month>[0-9]{2})\.(?P<day>[0-9]{2})\.(?P<sequence>[1-9][0-9]*)$"
+)
 HIDDEN_SUBJECTS = (
     "docs: update website manifest",
     "docs: update preview manifest",
@@ -166,9 +170,34 @@ def build_notes(previous: str, commit: str, build_id: str, base_version: str, re
     return "\n".join(lines).rstrip() + "\n"
 
 
-def default_asset_urls(repo: str, tag: str) -> dict[str, str]:
+def herdr_win_asset_names(release_version: str) -> dict[str, str]:
+    match = HERDR_WIN_RELEASE_VERSION_RE.fullmatch(release_version)
+    if not match:
+        raise ValueError("release_version must use YYYY.MM.DD.N CalVer")
+    try:
+        date(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+    except ValueError as error:
+        raise ValueError("release_version must contain a real UTC calendar date") from error
     return {
-        target: f"https://github.com/{repo}/releases/download/{tag}/{EXPECTED_ASSET_NAMES[target]}"
+        "windows-x86_64": f"herdr-win_v{release_version}_windows_amd64.zip",
+        "windows-x86_64-installer": (
+            f"herdr-win_v{release_version}_windows_amd64_setup.exe"
+        ),
+    }
+
+
+def default_asset_urls(
+    repo: str, tag: str, release_version: str | None = None
+) -> dict[str, str]:
+    names = dict(EXPECTED_ASSET_NAMES)
+    if release_version is not None:
+        names.update(herdr_win_asset_names(release_version))
+    return {
+        target: f"https://github.com/{repo}/releases/download/{tag}/{names[target]}"
         for target in ASSET_TARGETS
     }
 
@@ -214,15 +243,16 @@ def build_manifest(
     notes: str,
     shas: dict[str, str],
     retain: int,
+    release_version: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{12}\.[0-9a-f]{12}", build_id):
         raise ValueError("build_id must be two lowercase 12-hex commit prefixes")
-    urls = default_asset_urls(repo, tag)
+    urls = default_asset_urls(repo, tag, release_version)
     assets = asset_objects(urls, shas)
     current = read_json(output) or {}
     current_builds = current.get("builds")
     builds: dict[str, Any] = dict(current_builds) if isinstance(current_builds, dict) else {}
-    builds[build_id] = {
+    build = {
         "base_version": normalize_version(base_version),
         "commit": commit,
         "built_at": built_at,
@@ -230,6 +260,9 @@ def build_manifest(
         "tag": tag,
         "assets": assets,
     }
+    if release_version is not None:
+        build["release_version"] = release_version
+    builds[build_id] = build
     ordered_builds = {
         key: builds[key]
         for key in sorted(
@@ -250,6 +283,8 @@ def build_manifest(
         "assets": assets,
         "builds": ordered_builds,
     }
+    if release_version is not None:
+        manifest["release_version"] = release_version
     return json.dumps(manifest, indent=2) + "\n"
 
 
@@ -275,6 +310,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         notes=notes,
         shas=shas,
         retain=args.retain,
+        release_version=args.release_version,
     )
     Path(args.output).write_text(content, encoding="utf-8")
     return 0
@@ -294,6 +330,11 @@ def cmd_select_commit(args: argparse.Namespace) -> int:
 
 def cmd_range_base(args: argparse.Namespace) -> int:
     print(preview_range_base(args.previous, args.commit))
+    return 0
+
+
+def cmd_asset_names(args: argparse.Namespace) -> int:
+    print(json.dumps(herdr_win_asset_names(args.release_version), sort_keys=True))
     return 0
 
 
@@ -323,7 +364,12 @@ def main() -> int:
     manifest.add_argument("--notes", required=True)
     manifest.add_argument("--sha-file")
     manifest.add_argument("--retain", type=int, default=30)
+    manifest.add_argument("--release-version")
     manifest.set_defaults(func=cmd_manifest)
+
+    asset_names = sub.add_parser("herdr-win-asset-names")
+    asset_names.add_argument("--release-version", required=True)
+    asset_names.set_defaults(func=cmd_asset_names)
 
     current = sub.add_parser("current-commit")
     current.add_argument("--manifest", default="website/preview.json")

@@ -23,7 +23,9 @@ FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/
 FORK_RAW_PREFIX = "https://raw.githubusercontent.com/User-3090/herdr-win/"
 WINDOWS_ZIP_TARGET = "windows-x86_64"
 WINDOWS_INSTALLER_TARGET = "windows-x86_64-installer"
-WINDOWS_INSTALLER_NAME = "herdr-windows-x86_64-installer.exe"
+WINDOWS_SETUP_NAME = re.compile(
+    r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_windows_amd64_setup\.exe$"
+)
 FORBIDDEN_DISTRIBUTION_ENV = (
     "HERDR_BUILD_CHANNEL",
     "HERDR_PREVIEW_MANIFEST_URL",
@@ -114,10 +116,9 @@ class DeltaPatchTests(unittest.TestCase):
                 self.assertTrue(
                     str(installer.get("url", "")).startswith(FORK_RELEASE_PREFIX)
                 )
-                self.assertTrue(
-                    str(installer.get("url", "")).endswith(
-                        f"/{WINDOWS_INSTALLER_NAME}"
-                    )
+                self.assertRegex(
+                    str(installer.get("url", "")).rsplit("/", 1)[-1],
+                    WINDOWS_SETUP_NAME,
                 )
                 self.assertRegex(
                     str(installer.get("sha256", "")), r"^[0-9a-f]{64}$"
@@ -166,7 +167,7 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("https://herdr.dev/preview.json", added)
         self.assertNotIn("https://herdr.dev/install.ps1", added)
 
-    def test_public_readme_mirror_and_nightly_installer_contract(self) -> None:
+    def test_public_readme_mirror_and_manual_release_installer_contract(self) -> None:
         readme_bytes = (PROJECT_ROOT / "README.md").read_bytes()
         self.assertEqual(
             readme_bytes,
@@ -182,14 +183,28 @@ class DeltaPatchTests(unittest.TestCase):
         workflow = (
             PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
         ).read_text(encoding="utf-8")
-        self.assertIn(WINDOWS_INSTALLER_NAME, workflow)
         self.assertIn(WINDOWS_INSTALLER_TARGET, workflow)
+        self.assertIn("release_version:", workflow)
+        self.assertIn("herdr-win-asset-names", workflow)
+        self.assertIn('tag="v${RELEASE_VERSION}"', workflow)
+        preview_source = (PROJECT_ROOT / "scripts" / "preview.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("herdr-win_v{release_version}_windows_amd64.zip", preview_source)
+        self.assertIn(
+            "herdr-win_v{release_version}_windows_amd64_setup.exe", preview_source
+        )
         self.assertIn('format -cne "nsis"', workflow)
         self.assertIn("installer_sha", workflow)
-        self.assertIn('$env:GITHUB_EVENT_NAME -eq "workflow_dispatch"', workflow)
+        self.assertIn("\n  workflow_dispatch:\n", workflow)
+        self.assertNotIn("\n  schedule:", workflow)
+        self.assertNotIn("cron:", workflow)
         self.assertIn('"control\\patches\\delta\\BASE"', workflow)
-        self.assertIn('$env:GITHUB_EVENT_NAME -eq "schedule"', workflow)
-        self.assertIn('$upstreamRef = "master"', workflow)
+        self.assertIn(
+            "$upstreamRef = [IO.File]::ReadAllText($basePath).Trim()", workflow
+        )
+        self.assertNotIn("GITHUB_EVENT_NAME", workflow)
+        self.assertNotIn('$upstreamRef = "master"', workflow)
         self.assertIn("ref: ${{ steps.upstream_source.outputs.ref }}", workflow)
         self.assertIn("failed to replay $entry on selected upstream source $base", workflow)
         self.assertIn('echo "- Upstream source: \\`${UPSTREAM_SHA}\\`"', workflow)

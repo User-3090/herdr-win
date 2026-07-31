@@ -9,16 +9,15 @@ behavior; code and tests remain the detailed implementation truth.
 
 ## Source and Ownership Model
 
-- Release source is a fresh checkout of the workflow-selected
-  `ogulcancelik/herdr` revision plus the ordered `patches/delta/series` queue.
+- Release source is a fresh checkout of the reviewed `ogulcancelik/herdr` revision
+  recorded in `BASE` plus the ordered `patches/delta/series` queue.
   `BASE` records the reviewed upstream commit; the control branch is not an
   integration product branch.
 - `BASE` is a deliberate user-selected integration boundary, not a moving pointer.
   Ordinary work and fork-origin synchronization never advance it. Refreshing from
-  official upstream is a separate user-directed maintenance operation; scheduled
-  nightly upstream testing does not mutate the control branch or authorize a queue
-  refresh. Manual release dispatch replays the recorded `BASE`; the scheduled
-  Nightly alone selects current official upstream for its drift/release gate.
+  official upstream is a separate, manual user-directed maintenance operation.
+  There is no scheduled upstream replay or release path; manual release dispatch
+  always replays the recorded `BASE`.
 - Each maintained product responsibility has one logical mailbox. Evolving a
   responsibility refreshes its mailbox rather than appending development history.
   A new mailbox requires an independent owner, verification plan, and upstream
@@ -66,12 +65,12 @@ behavior; code and tests remain the detailed implementation truth.
   immutable installer asset.
 - The packager passes one product display name into NSIS and the helper so setup
   copy, install location, executable metadata, and Installed Apps registration do
-  not maintain separate product-name literals. The NSIS presentation reuses the
-  MUI2 welcome/custom-uninstall/instfiles page model used by the local Jobs
-  installer while relying only on NSIS-bundled standard graphics; the repository
-  does not generate or copy a product-specific installer banner/background.
-  Installer size uses the Jobs reference's exact
-  `SetDatablockOptimize on`, 32 MiB LZMA dictionary, and solid final LZMA settings.
+  not maintain separate product-name literals. The NSIS presentation uses standard
+  MUI2 Welcome/Files/Finish pages plus the existing custom uninstall choice. One
+  high-resolution source owns the branded Welcome/Finish artwork; five checked-in
+  BMP3 derivatives provide native 100–200% DPI buckets without runtime resampling.
+  Installer compression uses datablock optimization, an 8 MiB LZMA dictionary, and
+  solid final LZMA settings.
 - Interactive and silent uninstall both default to removing
   `%USERPROFILE%\.herdr`; the interactive checkbox or `/KEEP_SETTINGS` can preserve
   it. Settings cleanup stays in the helper's validated filesystem boundary and
@@ -104,12 +103,23 @@ behavior; code and tests remain the detailed implementation truth.
 ## Release and Generated State
 
 - `.github/workflows/ci.yml` owns cheap replay validation.
-  `.github/workflows/windows-nightly.yml` owns scheduled/manual Windows native
-  tests, immutable asset publication, manifest generation, and public-feed
-  verification.
-- `website/preview.json` is generated channel state and the nightly workflow is its
-  only writer. Release publication uses the exact tested replay and fails closed on
-  source drift, replay conflict, missing/mutable assets, or digest/feed mismatch.
+  `.github/workflows/windows-nightly.yml` is legacy-named but owns only manually
+  dispatched Windows native tests, immutable asset publication, manifest generation,
+  and public-feed verification against recorded `BASE`.
+- Manual dispatch requires a herdr-win CalVer `YYYY.MM.DD.N`; the release tag is
+  `v<CalVer>`. Portable assets follow
+  `herdr-win_v<CalVer>_<os>_<arch>.<ext>` and Windows setup appends `_setup.exe`,
+  currently using `windows_amd64`. The manifest's upstream-compatible target keys
+  remain separate from filenames so additional upstream-supported platforms can
+  use the same release and naming contract later.
+- The runtime build ID remains the upstream/control 12-hex pair because it owns
+  managed-runtime identity and exact source provenance. CalVer owns the human fork
+  release identity; the upstream Cargo version remains compatibility/provenance
+  metadata and does not define the herdr-win release.
+- `website/preview.json` is generated channel state and the manual release workflow
+  is its only writer. Release publication uses the exact tested replay and fails
+  closed on source drift, replay conflict, missing/mutable assets, or digest/feed
+  mismatch.
 - Root `README.md` and `docs/next/README.md` are byte-identical public projections;
   they do not replace `PRODUCT.md` or this architecture owner.
 
