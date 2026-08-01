@@ -50,6 +50,7 @@ function New-TestStage {
     $stage = Join-Path $Root $Name
     $files = @(
         "herdr.exe",
+        "LICENSE.txt",
         "conpty\herdr-conpty.json",
         "conpty\conpty.dll",
         "conpty\x64\OpenConsole.exe",

@@ -40,7 +40,7 @@ if ($actual -cne [string] $asset.sha256) { throw "herdr-win setup checksum misma
 & $setup
 ```
 
-The English-only, keyboard-operable Windows setup uses native-DPI Herdr Win artwork on its Welcome and Finish pages, installs to `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. It also installs the current cross-agent skill at `%USERPROFILE%\.agents\skills\herdr\SKILL.md`, replacing the complete previous `herdr` skill directory on every install or update. The executable and command remain `herdr.exe` and `herdr`.
+The English-only, keyboard-operable Windows setup uses native-DPI Herdr Win artwork on its Welcome and Finish pages, presents the Apache-2.0 license before modifying files, installs to `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. The same license remains available as `LICENSE.txt`. Setup also installs the current cross-agent skill at `%USERPROFILE%\.agents\skills\herdr\SKILL.md`, replacing the complete previous `herdr` skill directory on every install or update. The executable and command remain `herdr.exe` and `herdr`.
 
 For a portable or manual install, download both:
 

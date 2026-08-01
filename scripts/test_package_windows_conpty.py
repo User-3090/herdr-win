@@ -16,6 +16,8 @@ from scripts import package_windows_conpty as package
 class WindowsConptyPackageTests(unittest.TestCase):
     def test_pinned_metadata_and_notices_are_consistent(self) -> None:
         metadata = package.load_metadata(package.DEFAULT_METADATA)
+        self.assertTrue(package.PRODUCT_LICENSE_SOURCE.is_file())
+        self.assertEqual(package.PRODUCT_LICENSE_PATH.as_posix(), "LICENSE.txt")
         self.assertEqual(metadata["package"]["id"], "Microsoft.Windows.Console.ConPTY")
         self.assertEqual(metadata["package"]["version"], "1.24.260710001")
         self.assertEqual(
@@ -109,6 +111,10 @@ class WindowsConptyPackageTests(unittest.TestCase):
             stage = root / "stage"
             package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
             package.validate_stage(metadata_path, "x86_64", stage)
+            self.assertEqual(
+                (stage / "LICENSE.txt").read_bytes(),
+                package.PRODUCT_LICENSE_SOURCE.read_bytes(),
+            )
 
             output = root / "herdr.zip"
             package.archive_bundle(metadata_path, "x86_64", stage, output)

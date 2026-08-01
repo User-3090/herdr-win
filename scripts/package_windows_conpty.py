@@ -16,6 +16,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_METADATA = PROJECT_ROOT / "packaging" / "windows" / "conpty.json"
 MARKER_PATH = PurePosixPath("conpty/herdr-conpty.json")
+PRODUCT_LICENSE_SOURCE = PROJECT_ROOT / "LICENSE"
+PRODUCT_LICENSE_PATH = PurePosixPath("LICENSE.txt")
 DOWNLOAD_TIMEOUT_SECONDS = 60
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -126,6 +128,7 @@ def stage_bundle(
         staging = Path(temporary) / "bundle"
         staging.mkdir()
         shutil.copy2(herdr_exe, staging / "herdr.exe")
+        shutil.copy2(PRODUCT_LICENSE_SOURCE, staging / PRODUCT_LICENSE_PATH)
 
         for item in bundle["files"]:
             try:
@@ -167,7 +170,7 @@ def stage_bundle(
 
 
 def expected_stage_files(metadata: dict[str, Any], architecture: str) -> set[str]:
-    files = {"herdr.exe", MARKER_PATH.as_posix()}
+    files = {"herdr.exe", MARKER_PATH.as_posix(), PRODUCT_LICENSE_PATH.as_posix()}
     files.update(item["destination"] for item in metadata["bundles"][architecture]["files"])
     files.update(item["destination"] for item in metadata["notices"])
     return files
@@ -187,6 +190,8 @@ def validate_stage(metadata_path: Path, architecture: str, stage_dir: Path) -> N
         )
     if (stage_dir / MARKER_PATH).read_bytes() != marker_data(metadata, architecture):
         raise ValueError("bundle marker does not match pinned ConPTY metadata")
+    if (stage_dir / PRODUCT_LICENSE_PATH).read_bytes() != PRODUCT_LICENSE_SOURCE.read_bytes():
+        raise ValueError("staged LICENSE.txt does not match the product license")
     for item in metadata["bundles"][architecture]["files"]:
         path = stage_dir / PurePosixPath(item["destination"])
         actual_hash = sha256_file(path)

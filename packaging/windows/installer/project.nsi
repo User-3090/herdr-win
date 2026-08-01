@@ -110,12 +110,15 @@ Var SettingsCheckbox
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
 !define MUI_WELCOMEPAGE_TITLE "Install ${INFO_PRODUCTNAME}"
-!define MUI_WELCOMEPAGE_TEXT "Setup installs ${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} for your Windows user account in:$\r$\n$\r$\n$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}$\r$\n$\r$\nNo administrator privileges are required. Setup adds ${INFO_COMMANDNAME} to your user PATH; open a new terminal after setup before running it."
+!define MUI_WELCOMEPAGE_TEXT "Setup installs ${INFO_PRODUCTNAME} for your Windows user account in:$\r$\n$\r$\n$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}$\r$\n$\r$\nNo administrator privileges are required. Setup adds ${INFO_COMMANDNAME} to your user PATH; open a new terminal after setup before running it."
+!define MUI_LICENSEPAGE_TEXT_TOP "Review the Apache License 2.0 terms before installing ${INFO_PRODUCTNAME}."
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "Select I Agree to continue."
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 !define MUI_FINISHPAGE_TITLE "${INFO_PRODUCTNAME} is installed"
-!define MUI_FINISHPAGE_TEXT "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed successfully.$\r$\n$\r$\n${INFO_PRODUCTNAME} runs in a terminal, so no application window will open.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n$\r$\n${INFO_COMMANDNAME}"
+!define MUI_FINISHPAGE_TEXT "${INFO_PRODUCTNAME} was installed successfully.$\r$\n$\r$\n${INFO_PRODUCTNAME} runs in a terminal, so no application window will open.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n$\r$\n${INFO_COMMANDNAME}"
 
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "${ARG_STAGE_DIR}\LICENSE.txt"
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 

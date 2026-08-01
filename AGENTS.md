@@ -74,6 +74,10 @@ active memory owner.
 - Preserve recovery stashes and unrelated shared-worktree changes.
 - Never commit `.agent/`, generated replay/build evidence, logs, binaries,
   credentials, private data, or temporary worktrees.
+- Final local ZIP, setup, and checksum artifacts always go under the workspace's
+  ignored `target/<target-triple>/release/` directory. Temporary directories are
+  intermediates only; never report an external temporary path as the primary
+  user-testable artifact.
 - Long or resumable work uses exactly one `.agent/sessions/<session-id>/` unless
   `OPENCODE_SESSION_DIR` or `AGENT_SESSION_DIR` selects another owner. Never create
   repository-root `TASK.md`, `STATE.md`, or `LOG.md`, and never write another

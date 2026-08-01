@@ -285,6 +285,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             self.assertIn(f"$0 >= {threshold}", nsi)
         page_order = (
             "!insertmacro MUI_PAGE_WELCOME",
+            '!insertmacro MUI_PAGE_LICENSE "${ARG_STAGE_DIR}\\LICENSE.txt"',
             "!insertmacro MUI_PAGE_INSTFILES",
             "!insertmacro MUI_PAGE_FINISH",
         )
@@ -294,9 +295,17 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertNotIn("Function WelcomePage", nsi)
         self.assertNotIn("MUI_PAGE_DIRECTORY", nsi)
         self.assertNotIn("MUI_PAGE_COMPONENTS", nsi)
+        self.assertIn("Review the Apache License 2.0 terms", nsi)
         self.assertNotIn("MUI_FINISHPAGE_RUN", nsi)
         self.assertNotIn("MUI_FINISHPAGE_SHOWREADME", nsi)
         self.assertNotIn("MUI_FINISHPAGE_LINK", nsi)
+        self.assertIn(
+            "Setup installs ${INFO_PRODUCTNAME} for your Windows user account", nsi
+        )
+        self.assertIn("${INFO_PRODUCTNAME} was installed successfully", nsi)
+        self.assertNotIn(
+            "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed", nsi
+        )
         self.assertIn(
             "UninstPage custom un.SettingsPage un.SettingsPageLeave", nsi
         )

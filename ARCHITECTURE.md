@@ -66,11 +66,13 @@ behavior; code and tests remain the detailed implementation truth.
 - The packager passes one product display name into NSIS and the helper so setup
   copy, install location, executable metadata, and Installed Apps registration do
   not maintain separate product-name literals. The NSIS presentation uses standard
-  MUI2 Welcome/Files/Finish pages plus the existing custom uninstall choice. One
-  high-resolution source owns the branded Welcome/Finish artwork; five checked-in
-  BMP3 derivatives provide native 100–200% DPI buckets without runtime resampling.
-  Installer compression uses datablock optimization, an 8 MiB LZMA dictionary, and
-  solid final LZMA settings.
+  MUI2 Welcome/License/Files/Finish pages plus the existing custom uninstall choice.
+  Root `LICENSE` is projected once as payload `LICENSE.txt`; that exact file owns
+  both the License page and the copy installed beside the product. One high-resolution
+  source owns the branded Welcome/Finish artwork; five checked-in BMP3 derivatives
+  provide native 100–200% DPI buckets without runtime resampling. Installer
+  compression uses datablock optimization, an 8 MiB LZMA dictionary, and solid
+  final LZMA settings.
 - Interactive and silent uninstall both default to removing
   `%USERPROFILE%\.herdr`; the interactive checkbox or `/KEEP_SETTINGS` can preserve
   it. Settings cleanup stays in the helper's validated filesystem boundary and

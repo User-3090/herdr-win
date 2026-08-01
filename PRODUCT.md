@@ -28,8 +28,10 @@ tests remain the detailed implementation truth.
   `PATH`, and registers Herdr in Windows Installed Apps without requiring
   administrator privileges. The installer interface is English-only. Its branded,
   keyboard-operable Windows setup uses the Herdr product identity, clearly explains
-  the fixed per-user destination, and ends with the exact first command. A portable
-  ZIP remains a supported manual alternative.
+  the fixed per-user destination, presents the Apache-2.0 license before modifying
+  files, and ends with the exact first command. The installed payload and portable
+  ZIP include the same license as `LICENSE.txt`. A portable ZIP remains a supported
+  manual alternative.
 - The managed installer installs the cross-agent Herdr skill at
   `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and replaces the complete prior
   `herdr` skill directory on install/update.
