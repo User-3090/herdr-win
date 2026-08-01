@@ -331,7 +331,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 $helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
-$skillSource = Join-Path $projectRoot "SKILL.md"
+$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 $artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
 $artworkFiles = @(
     "installer-welcome-finish-164x314.bmp",
@@ -369,7 +369,7 @@ $skillValidationText = $skillText.Replace("`r`n", "`n")
 if ($skillValidationText.Contains("`r") -or
     -not $skillValidationText.StartsWith("---`n", [StringComparison]::Ordinal) -or
     $skillValidationText -cnotmatch '(?m)^name: herdr$') {
-    throw "Root SKILL.md is not the canonical Herdr agent skill."
+    throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
 }
 Assert-X64Pe -Path $LauncherExe
 $payloadExe = Join-Path $StageDir "herdr.exe"

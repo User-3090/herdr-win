@@ -18,7 +18,7 @@ FAULT_TEST = PROJECT_ROOT / "scripts/windows_installer_fault_test.ps1"
 MANAGED_INSTALL = PROJECT_ROOT / "src/managed_install.rs"
 WINDOWS_PLATFORM = PROJECT_ROOT / "src/platform/windows.rs"
 UPDATE = PROJECT_ROOT / "src/update.rs"
-SKILL = PROJECT_ROOT / "SKILL.md"
+SKILL = PROJECT_ROOT / "skills" / "herdr" / "SKILL.md"
 ARTWORK = NSI.parent / "artwork"
 ARTWORK_SOURCE = ARTWORK / "installer-welcome-finish-source.png"
 ARTWORK_DERIVATIVES = {
@@ -83,8 +83,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("Get-HerdrLeaseStatus", helper)
         self.assertIn('Status = "Pending"', helper)
         self.assertIn("Pending; staged until old sessions exit.", helper)
-        self.assertIn("herdr-install-manifest-v2", helper)
-        self.assertIn("skill_sha256=", helper)
+        self.assertIn("herdr-install-manifest-v1", helper)
+        self.assertNotIn("skill_sha256=", helper)
 
     def test_installer_owns_the_cross_agent_skill_lifecycle(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -92,66 +92,40 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         packager = PACKAGER.read_text(encoding="utf-8")
         lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
         self.assertIn('Join-Path $userProfile ".agents\\skills"', helper)
-        self.assertIn('Join-Path $AgentSkillsRoot "herdr"', helper)
-        self.assertIn("New-HerdrAgentSkillTransaction", helper)
-        self.assertIn("Publish-HerdrAgentSkillTransaction", helper)
-        self.assertIn("Complete-HerdrAgentSkillTransaction", helper)
-        self.assertIn("Start-HerdrInstalledAgentSkillRemoval", helper)
-        self.assertIn("Complete-HerdrInstalledAgentSkillRemoval", helper)
-        self.assertIn("Remove-HerdrInstalledAgentSkill", helper)
-        self.assertIn("Restore-HerdrAgentSkillTransactions", helper)
-        self.assertIn(".herdr-agent-skill-installer.lock", helper)
-        self.assertIn("Refusing to replace a reparse-point Herdr agent skill", helper)
-        removal_start = helper[
-            helper.index("function Start-HerdrInstalledAgentSkillRemoval {") : helper.index(
-                "function Publish-HerdrAgentSkillRemovalCandidate {"
+        self.assertIn('Join-Path $ClaudeConfigRoot "skills"', helper)
+        self.assertIn('Join-Path $SkillsRoot "herdr"', helper)
+        self.assertIn("Test-HerdrClaudeCodeInstalled", helper)
+        self.assertIn('Get-Command "claude" -CommandType Application', helper)
+        self.assertIn("Test-Path -LiteralPath $defaultConfigRoot -PathType Container", helper)
+        self.assertNotIn('".local\\bin\\claude.exe"', helper)
+        self.assertNotIn('"Microsoft\\WinGet\\Links\\claude.exe"', helper)
+        self.assertIn("Install-HerdrSkillFile", helper)
+        self.assertIn("Install-HerdrSkillCopies", helper)
+        self.assertIn("Remove-HerdrSkillFile", helper)
+        self.assertIn("Remove-HerdrSkillCopies", helper)
+        install_skill = helper[
+            helper.index("function Install-HerdrSkillFile {") : helper.index(
+                "function Assert-HerdrSkillTarget {"
             )
         ]
-        removal_publish = helper[
-            helper.index("function Publish-HerdrAgentSkillRemovalCandidate {") : helper.index(
-                "function Commit-HerdrAgentSkillRemovalCandidate {"
+        remove_skill = helper[
+            helper.index("function Remove-HerdrSkillFile {") : helper.index(
+                "function Remove-HerdrSkillCopies {"
             )
         ]
-        removal_commit = helper[
-            helper.index("function Commit-HerdrAgentSkillRemovalCandidate {") : helper.index(
-                "function Remove-HerdrInstalledAgentSkill {"
-            )
-        ]
-        self.assertIn(
-            'Move-HerdrAgentSkillPath -Source $target -Destination (Join-Path $transactionPath "previous")',
-            removal_start,
-        )
-        self.assertIn(
-            "[Herdr.Installer.PinnedSkillFile]::Open($entries[0].FullName)",
-            removal_publish,
-        )
-        self.assertIn("$pinned.MoveTo($candidate)", removal_publish)
-        self.assertLess(
-            removal_commit.index("[IO.Directory]::Delete($previous)"),
-            removal_commit.index("$pinned.DeleteByHandle()"),
-        )
-        self.assertIn("SetFileInformationByHandle", helper)
-        self.assertIn("FileFlagOpenReparsePoint", helper)
-        self.assertIn(
-            "-ReferencedAssemblies @([ComponentModel.Win32Exception].Assembly.Location)",
-            helper,
-        )
-        self.assertIn('$script:AgentSkillRemovalOwnerName = ".herdr-agent-skill-removal"', helper)
-        self.assertIn("AgentSkillRemovalCleanupPattern", helper)
-        self.assertIn("[IO.Directory]::Move($state.Path, $cleanup)", helper)
-        cleanup_restore = helper[
-            helper.index("function Restore-HerdrAgentSkillTransactions {") : helper.index(
-                "$transactions = @(",
-                helper.index("function Restore-HerdrAgentSkillTransactions {"),
-            )
-        ]
-        self.assertIn("Get-ChildItem -LiteralPath $AgentSkillsRoot -Force |", cleanup_restore)
-        self.assertNotIn("-Force -Directory", cleanup_restore)
-        self.assertIn("A Herdr agent skill removal transaction cannot use install rollback", helper)
-        self.assertNotIn(
-            "Move-HerdrAgentSkillPath -Source $target -Destination $discard",
-            removal_commit,
-        )
+        self.assertIn("[IO.File]::Copy($SourcePath, $destination, $true)", install_skill)
+        self.assertIn("Assert-HerdrRegularFile -Path $destination", install_skill)
+        self.assertIn("Remove-Item -LiteralPath $skill -Force", remove_skill)
+        self.assertIn("Get-ChildItem -LiteralPath $target -Force", remove_skill)
+        self.assertNotIn("-Recurse", install_skill + remove_skill)
+        for removed in (
+            "AgentSkillTransaction",
+            "PinnedSkillFile",
+            ".herdr-agent-skill-installer.lock",
+            "SetFileInformationByHandle",
+            "Add-Type",
+        ):
+            self.assertNotIn(removed, helper)
         self.assertEqual(
             helper.count(
                 'Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest")'
@@ -161,29 +135,28 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("ARG_SKILL_MD", nsi)
         self.assertIn('/oname=SKILL.md "${ARG_SKILL_MD}"', nsi)
         self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
-        self.assertIn('$skillSource = Join-Path $projectRoot "SKILL.md"', packager)
+        self.assertIn(
+            '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
+            packager,
+        )
         self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
         self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
-        self.assertIn("retained files from the previous Herdr skill version", lifecycle)
-        self.assertIn("Owned skill remained public after atomic detach", lifecycle)
-        self.assertIn("Concurrent skill replacement was deleted", lifecycle)
-        self.assertIn("Exact concurrent replacement was deleted", lifecycle)
-        self.assertIn("Late detached content was deleted", lifecycle)
-        self.assertIn("Committed removal recovery restored a public target", lifecycle)
-        self.assertIn("Extra-tree uninstall removed nested user content", lifecycle)
-        self.assertIn("Removal cleanup crash subset", lifecycle)
-        self.assertIn("Strict-name removal cleanup file bypassed validation", lifecycle)
-        self.assertIn("Strict-name removal cleanup junction bypassed validation", lifecycle)
-        self.assertIn("shadowed System.dll", lifecycle)
-        self.assertIn("Uninstall removed a modified Herdr skill", lifecycle)
+        self.assertIn("Universal skill install removed a foreign sibling", lifecycle)
+        self.assertIn("Claude skill install removed a foreign sibling", lifecycle)
+        self.assertIn("Uninstall preserved an edited universal SKILL.md", lifecycle)
+        self.assertIn("Uninstall retained an empty Herdr skill directory", lifecycle)
+        self.assertIn("Claude uninstall did not inspect configured and default roots", lifecycle)
+        self.assertIn("Managed update removed a foreign skill sibling", lifecycle)
+        self.assertIn("Extra-tree uninstall preserved SKILL.md", lifecycle)
+        self.assertIn("Uninstall preserved a modified Herdr skill", lifecycle)
         fault_test = FAULT_TEST.read_text(encoding="utf-8")
         self.assertIn("Assert-TestSkillInstalled", fault_test)
-        self.assertIn("retained the unchanged owned Herdr skill", fault_test)
-        self.assertIn("Modified skill tree uninstall passed", fault_test)
+        self.assertIn("retained universal SKILL.md", fault_test)
+        self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
         self.assertIn("AgentUserProfileRoot", fault_test)
         self.assertIn('[string]$ProductName = "Herdr"', fault_test)
         self.assertIn("-ProductName $ProductName", fault_test)
-        self.assertIn("requires no interrupted Herdr agent skill transaction", fault_test)
+        self.assertIn("CLAUDE_CONFIG_DIR", fault_test)
 
     def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -418,7 +391,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         helper = HELPER.read_text(encoding="utf-8")
         cleanup = helper[
             helper.index("function Remove-HerdrUserSettings {") : helper.index(
-                "function Move-HerdrAgentSkillPath {"
+                "function Install-HerdrSkillFile {"
             )
         ]
         self.assertIn('Join-Path $profileRoot ".herdr"', cleanup)

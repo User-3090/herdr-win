@@ -40,7 +40,7 @@ if ($actual -cne [string] $asset.sha256) { throw "herdr-win setup checksum misma
 & $setup
 ```
 
-The English-only, keyboard-operable Windows setup uses native-DPI Herdr Win artwork on its Welcome and Finish pages, presents the Apache-2.0 license before modifying files, installs to `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. The same license remains available as `LICENSE.txt`. Setup also installs the current cross-agent skill at `%USERPROFILE%\.agents\skills\herdr\SKILL.md`, replacing the complete previous `herdr` skill directory on every install or update. The executable and command remain `herdr.exe` and `herdr`.
+The English-only, keyboard-operable Windows setup uses native-DPI Herdr Win artwork on its Welcome and Finish pages, presents the Apache-2.0 license before modifying files, installs to `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. The same license remains available as `LICENSE.txt`. Setup copies upstream's canonical agent skill to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and, when Claude Code is detected, to its configured or default `.claude\skills\herdr\SKILL.md`. Install and update overwrite only `SKILL.md`; every sibling file and directory remains untouched. The executable and command remain `herdr.exe` and `herdr`.
 
 For a portable or manual install, download both:
 
@@ -70,7 +70,7 @@ If older managed sessions are still active, the update is reported as staged. Th
 
 ### Uninstall
 
-Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and unchanged installer-owned agent skill while preserving modified skill content. **Remove Herdr settings and session data** is selected by default; clear it to keep `%USERPROFILE%\.herdr` for a later installation. Silent uninstall also removes those settings by default; pass `/KEEP_SETTINGS` to preserve them.
+Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and `SKILL.md` from the managed universal and Claude skill locations even if that file was edited. Every sibling remains untouched, and the `herdr` skill directory is removed only when empty. **Remove Herdr settings and session data** is selected by default; clear it to keep `%USERPROFILE%\.herdr` for a later installation. Silent uninstall also removes those settings by default; pass `/KEEP_SETTINGS` to preserve them.
 
 ## Maintained Windows delta
 

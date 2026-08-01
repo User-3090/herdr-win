@@ -178,8 +178,10 @@ class DeltaPatchTests(unittest.TestCase):
             r"%USERPROFILE%\.agents\skills\herdr\SKILL.md",
             readme,
         )
-        self.assertIn("replacing the complete previous `herdr` skill directory", readme)
-        self.assertIn("preserving modified skill content", readme)
+        self.assertIn("configured or default `.claude\\skills\\herdr\\SKILL.md`", readme)
+        self.assertIn("overwrite only `SKILL.md`", readme)
+        self.assertIn("even if that file was edited", readme)
+        self.assertIn("removed only when empty", readme)
         workflow = (
             PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
         ).read_text(encoding="utf-8")

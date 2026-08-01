@@ -75,6 +75,7 @@ function Invoke-TestInstall {
         [string]$NumericVersion,
         [string]$SkillSource = $script:TestSkillSource,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
+        [string]$ClaudeSkillsRoot,
         [string]$LegacyReleases,
         [string]$LegacyLock,
         [scriptblock]$ProcessProvider = { @() },
@@ -90,6 +91,7 @@ function Invoke-TestInstall {
             -HelperSourcePath $helperPath `
             -SkillSourcePath $SkillSource `
             -AgentSkillsRoot $AgentSkillsRoot `
+            -ClaudeSkillsRoot $ClaudeSkillsRoot `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
@@ -105,6 +107,7 @@ function Invoke-TestUninstall {
     param(
         [string]$Root,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
+        [string[]]$ClaudeSkillsRoots = @(),
         [scriptblock]$ProcessProvider = { @() },
         [int]$LockTimeoutMilliseconds = 3000
     )
@@ -112,6 +115,7 @@ function Invoke-TestUninstall {
         Invoke-HerdrUninstallLayout `
             -InstallRoot $Root `
             -AgentSkillsRoot $AgentSkillsRoot `
+            -ClaudeSkillsRoots $ClaudeSkillsRoots `
             -ProcessProvider $ProcessProvider `
             -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     }
@@ -196,35 +200,12 @@ try {
     $script:TestSkillSource = Join-Path $tempRoot "skill-one\SKILL.md"
     $skillSource2 = Join-Path $tempRoot "skill-two\SKILL.md"
     $script:TestAgentSkillsRoot = Join-Path $tempRoot ".agents\skills"
+    $script:TestClaudeSkillsRoot = Join-Path $tempRoot ".claude\skills"
     Write-TestFile -Path $script:TestSkillSource -Text "---`nname: herdr`ndescription: first`n---`n`n# Herdr one`n"
     Write-TestFile -Path $skillSource2 -Text "---`nname: herdr`ndescription: second`n---`n`n# Herdr two`n"
     $legacyReleases = Join-Path $tempRoot "legacy-home\releases"
     $legacyLock = Join-Path $tempRoot "legacy-home\install.lock"
     New-Item -ItemType Directory -Path $legacyReleases -Force | Out-Null
-
-    # NSIS extracts its x86 System.dll plugin beside the helper. Windows
-    # PowerShell must compile against the loaded GAC assembly, not that shadow.
-    $shadowRoot = Join-Path $tempRoot "add-type-shadow"
-    New-Item -ItemType Directory -Path $shadowRoot | Out-Null
-    Write-TestFile -Path (Join-Path $shadowRoot "System.dll") -Text "not a managed reference"
-    $escapedShadowRoot = $shadowRoot.Replace("'", "''")
-    $escapedHelperPath = $helperPath.Replace("'", "''")
-    $shadowCommand = @"
-Set-Location -LiteralPath '$escapedShadowRoot'
-. '$escapedHelperPath'
-if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned skill type was not loaded.' }
-"@
-    $shadowEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($shadowCommand))
-    $shadowProcess = Start-Process powershell.exe -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $shadowEncoded) -WorkingDirectory $shadowRoot -PassThru -WindowStyle Hidden
-    $childProcesses.Add($shadowProcess)
-    if (-not $shadowProcess.WaitForExit(30000)) {
-        $shadowProcess.Kill()
-        [void]$shadowProcess.WaitForExit(5000)
-        throw "Windows PowerShell exceeded its shadowed System.dll compile deadline."
-    }
-    if ($shadowProcess.ExitCode -ne 0) {
-        throw "Windows PowerShell resolved the shadowed System.dll instead of the loaded GAC reference."
-    }
 
     # A persistent sibling lifecycle lock protects a live transaction from a
     # second real PowerShell process before any recovery/classification runs.
@@ -267,7 +248,8 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     } "does not match display version" "Mismatched numeric identity was accepted."
     $v1Manifest = Join-Path $recordRoot "install-v1.manifest"
     Write-HerdrDurableText -Path $v1Manifest -Text ("herdr-install-manifest-v1`nbootstrap_sha256=" + (("0" * 64) -join "") + "`ndisplay_version=$display1`nnumeric_version=$numeric1`n")
-    Assert-Equal (Read-HerdrInstallManifestFile -Path $v1Manifest).SkillSha256 $null "V1 managed install manifest did not remain readable."
+    $parsedInstallManifest = Read-HerdrInstallManifestFile -Path $v1Manifest
+    Assert-True ($null -eq $parsedInstallManifest.PSObject.Properties["SkillSha256"]) "Install manifest retained obsolete skill ownership."
     $crlfSkill = Join-Path $recordRoot "SKILL.md"
     [IO.File]::WriteAllText($crlfSkill, "---`r`nname: herdr`r`ndescription: crlf`r`n---`r`n", $script:Utf8NoBom)
     Assert-Equal (Get-HerdrAgentSkillSha256 -Path $crlfSkill) (Get-HerdrSha256 -Path $crlfSkill) "CRLF Herdr skill was rejected or normalized while hashing."
@@ -309,7 +291,49 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
         }
     }
 
-    # Ownership-safe removal never follows a reparse point in an ancestor.
+    # Skill install/update overwrites only SKILL.md in universal and Claude
+    # locations. Uninstall always removes that file and preserves all siblings.
+    $agentForeign = Join-Path $script:TestAgentSkillsRoot "herdr\user.txt"
+    $claudeForeign = Join-Path $script:TestClaudeSkillsRoot "herdr\resources\nested.txt"
+    Write-TestFile -Path $agentForeign -Text "preserve-agent"
+    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "old-agent-skill"
+    Write-TestFile -Path $claudeForeign -Text "preserve-claude"
+    Install-HerdrSkillCopies -SourcePath $script:TestSkillSource -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoot $script:TestClaudeSkillsRoot
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Universal skill copy differs from its source."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Claude skill copy differs from its source."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill install removed a foreign sibling."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill install removed a foreign sibling."
+    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "edited-agent-skill"
+    Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved an edited universal SKILL.md."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved Claude SKILL.md."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill uninstall removed a foreign sibling."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill uninstall removed a foreign sibling."
+
+    $emptySkillsRoot = Join-Path $tempRoot "empty-skill-root\skills"
+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $emptySkillsRoot
+    Remove-HerdrSkillFile -SkillsRoot $emptySkillsRoot
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $emptySkillsRoot "herdr"))) "Uninstall retained an empty Herdr skill directory."
+
+    $savedClaudeConfig = $env:CLAUDE_CONFIG_DIR
+    try {
+        $profileRoot = Join-Path $tempRoot "claude-profile"
+        $configuredClaudeRoot = Join-Path $tempRoot "configured-claude"
+        New-Item -ItemType Directory -Path $profileRoot | Out-Null
+        New-Item -ItemType Directory -Path $configuredClaudeRoot | Out-Null
+        $env:CLAUDE_CONFIG_DIR = $configuredClaudeRoot
+        Assert-True (Test-HerdrClaudeCodeInstalled) "CLAUDE_CONFIG_DIR did not detect Claude Code."
+        $claudeRemovalRoots = @(Get-HerdrClaudeSkillsRootsForRemoval -UserProfileRoot $profileRoot)
+        Assert-Equal $claudeRemovalRoots.Count 2 "Claude uninstall did not inspect configured and default roots."
+        Assert-Equal (Get-HerdrClaudeSkillsRoot -UserProfileRoot $profileRoot -ClaudeConfigRoot "~\custom-claude") (Join-Path $profileRoot "custom-claude\skills") "Claude config tilde did not resolve through the upstream home semantics."
+        $env:CLAUDE_CONFIG_DIR = ""
+        New-Item -ItemType Directory -Path (Join-Path $profileRoot ".claude") | Out-Null
+        Assert-True (Test-HerdrClaudeCodeInstalled -UserProfileRoot $profileRoot) "Existing default Claude config did not detect Claude Code."
+    } finally {
+        $env:CLAUDE_CONFIG_DIR = $savedClaudeConfig
+    }
+
+    # Removal never follows a reparse point in an ancestor.
     $externalAgents = Join-Path $tempRoot "external-agents"
     $externalSkill = Join-Path $externalAgents "skills\herdr\SKILL.md"
     Write-TestFile -Path $externalSkill -Text "---`nname: herdr`n---`nexternal`n"
@@ -318,87 +342,11 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     $ancestorJunction = Join-Path $junctionHome ".agents"
     New-Item -ItemType Junction -Path $ancestorJunction -Target $externalAgents | Out-Null
     try {
-        Remove-HerdrInstalledAgentSkill `
-            -AgentSkillsRoot (Join-Path $ancestorJunction "skills") `
-            -InstallRoot $concurrencyRoot `
-            -DisplayVersion $display1 `
-            -ExpectedSha256 (Get-HerdrSha256 -Path $externalSkill)
+        Remove-HerdrSkillFile -SkillsRoot (Join-Path $ancestorJunction "skills")
         Assert-True (Test-Path -LiteralPath $externalSkill) "Agent skill cleanup traversed an ancestor junction."
     } finally {
         if (Test-Path -LiteralPath $ancestorJunction) {
             [IO.Directory]::Delete($ancestorJunction)
-        }
-    }
-
-    $transactionSkillsRoot = Join-Path $tempRoot "transaction-skills"
-    New-Item -ItemType Directory -Path $transactionSkillsRoot | Out-Null
-    $transactionExternal = Join-Path $tempRoot "transaction-external"
-    New-Item -ItemType Directory -Path $transactionExternal | Out-Null
-    Write-TestFile -Path (Join-Path $transactionExternal $script:AgentSkillTransactionMarkerNewName) -Text "external"
-    $transactionJunction = Join-Path $transactionSkillsRoot (".herdr-installer-skill." + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Junction -Path $transactionJunction -Target $transactionExternal | Out-Null
-    try {
-        Assert-Throws {
-            Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $transactionSkillsRoot -InstallRoot (Join-Path $tempRoot "transaction-install")
-        } "reparse-point directory" "Transaction junction was accepted during markerless recovery."
-        Assert-True (Test-Path -LiteralPath (Join-Path $transactionExternal $script:AgentSkillTransactionMarkerNewName)) "Transaction recovery deleted content through a junction."
-    } finally {
-        if (Test-Path -LiteralPath $transactionJunction) {
-            [IO.Directory]::Delete($transactionJunction)
-        }
-    }
-
-    # Terminal removal cleanup first renames the complete owner atomically.
-    # Every subset left by interrupted file cleanup is safe on the next run.
-    $removalCleanupSkillsRoot = Join-Path $tempRoot "removal-cleanup-skills"
-    New-Item -ItemType Directory -Path $removalCleanupSkillsRoot | Out-Null
-    $removalCleanupHash = Get-HerdrAgentSkillSha256 -Path $script:TestSkillSource
-    for ($mask = 0; $mask -lt 8; $mask++) {
-        $cleanupPath = Join-Path $removalCleanupSkillsRoot (".herdr-installer-skill-cleanup." + [Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Path $cleanupPath | Out-Null
-        Write-HerdrDurableText -Path (Join-Path $cleanupPath $script:AgentSkillTransactionMarkerName) -Text (
-            Get-HerdrAgentSkillTransactionMarkerText `
-                -InstallRoot $concurrencyRoot `
-                -DisplayVersion $display1 `
-                -SkillSha256 $removalCleanupHash `
-                -HadPrevious $true
-        )
-        Write-HerdrDurableBytes -Path (Join-Path $cleanupPath $script:AgentSkillRemovalOwnerName) -Bytes ([byte[]]@())
-        Write-HerdrDurableBytes -Path (Join-Path $cleanupPath $script:AgentSkillPhaseCompleting) -Bytes ([byte[]]@())
-        $cleanupOwners = @(
-            $script:AgentSkillTransactionMarkerName,
-            $script:AgentSkillRemovalOwnerName,
-            $script:AgentSkillPhaseCompleting
-        )
-        for ($bit = 0; $bit -lt $cleanupOwners.Count; $bit++) {
-            if ($mask -band (1 -shl $bit)) {
-                Remove-Item -LiteralPath (Join-Path $cleanupPath $cleanupOwners[$bit]) -Force
-            }
-        }
-        Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $removalCleanupSkillsRoot -InstallRoot $concurrencyRoot
-        Assert-True (-not (Test-Path -LiteralPath $cleanupPath)) "Removal cleanup crash subset $mask was not recovered."
-    }
-    $malformedCleanupFile = Join-Path $removalCleanupSkillsRoot (".herdr-installer-skill-cleanup." + [Guid]::NewGuid().ToString("N"))
-    Write-TestFile -Path $malformedCleanupFile -Text "preserve-file"
-    Assert-Throws {
-        Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $removalCleanupSkillsRoot -InstallRoot $concurrencyRoot
-    } "regular directory is missing" "Strict-name removal cleanup file bypassed validation."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path $malformedCleanupFile) "preserve-file" "Malformed cleanup file was deleted."
-    Remove-Item -LiteralPath $malformedCleanupFile -Force
-
-    $cleanupJunctionTarget = Join-Path $tempRoot "removal-cleanup-junction-target"
-    New-Item -ItemType Directory -Path $cleanupJunctionTarget | Out-Null
-    Write-TestFile -Path (Join-Path $cleanupJunctionTarget "sentinel.txt") -Text "preserve-junction-target"
-    $cleanupJunction = Join-Path $removalCleanupSkillsRoot (".herdr-installer-skill-cleanup." + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Junction -Path $cleanupJunction -Target $cleanupJunctionTarget | Out-Null
-    try {
-        Assert-Throws {
-            Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $removalCleanupSkillsRoot -InstallRoot $concurrencyRoot
-        } "reparse-point directory" "Strict-name removal cleanup junction bypassed validation."
-        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $cleanupJunctionTarget "sentinel.txt")) "preserve-junction-target" "Cleanup validation traversed a junction."
-    } finally {
-        if (Test-Path -LiteralPath $cleanupJunction) {
-            [IO.Directory]::Delete($cleanupJunction)
         }
     }
 
@@ -414,7 +362,7 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     try {
         Assert-Throws {
             Invoke-TestInstall -Root $rejectedRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $reparseSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-        } "reparse-point Herdr agent skill" "Reparse-point skill rejection did not fail closed."
+        } "reparse-point directory" "Reparse-point skill rejection did not fail closed."
         Assert-True (-not (Test-Path -LiteralPath $rejectedRoot)) "Rejected skill path changed the managed install root."
         Assert-True (Test-Path -LiteralPath (Join-Path $reparseTarget "SKILL.md")) "Rejected skill path changed its junction target."
     } finally {
@@ -440,7 +388,6 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
         -LauncherPath $launcher1 `
         -UninstallerPath $uninstaller `
         -HelperSourcePath $helperPath `
-        -SkillSha256 (Get-HerdrAgentSkillSha256 -Path $script:TestSkillSource) `
         -BuildId $id1 `
         -DisplayVersion $display1 `
         -NumericVersion $numeric1
@@ -458,105 +405,10 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
 
-    # One fixed skill-root lock serializes alternate managed roots.
-    $heldSkillLock = Open-HerdrShareModeLock -Path (Get-HerdrAgentSkillLockPath -AgentSkillsRoot $script:TestAgentSkillsRoot) -TimeoutMilliseconds 3000
-    try {
-        $alternateRoot = Join-Path $tempRoot "alternate-install"
-        Assert-Throws {
-            Invoke-TestInstall -Root $alternateRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock -LockTimeoutMilliseconds 250
-        } "Timed out after 250 ms" "Alternate install root bypassed the shared agent skill lock."
-        Assert-True (-not (Test-Path -LiteralPath $alternateRoot)) "Skill-lock refusal changed an alternate install root."
-    } finally {
-        $heldSkillLock.Dispose()
-    }
-
-    # A crash after provisional skill publication but before app commit rolls
-    # back to the prior skill because the managed manifest still owns build A.
-    $stagedOnlySkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Staged-only skill recovery changed the prior skill."
-    Assert-True (-not (Test-Path -LiteralPath $stagedOnlySkill.Path)) "Staged-only skill transaction was retained."
-
-    $publishingSkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    [IO.File]::Move(
-        (Join-Path $publishingSkill.Path $script:AgentSkillPhaseStaged),
-        (Join-Path $publishingSkill.Path $script:AgentSkillPhasePublishing)
-    )
-    Move-HerdrAgentSkillPath `
-        -Source (Join-Path $script:TestAgentSkillsRoot "herdr") `
-        -Destination (Join-Path $publishingSkill.Path "previous")
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Publishing-phase recovery did not restore the prior skill."
-
-    $partialCleanupSkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    [IO.File]::Move(
-        (Join-Path $partialCleanupSkill.Path $script:AgentSkillPhaseStaged),
-        (Join-Path $partialCleanupSkill.Path $script:AgentSkillPhaseRollingBack)
-    )
-    Remove-Item -LiteralPath (Join-Path $partialCleanupSkill.Path "new\SKILL.md") -Force
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-True (-not (Test-Path -LiteralPath $partialCleanupSkill.Path)) "Partial staged-skill rollback did not resume."
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Partial staged-skill rollback changed the prior skill."
-
-    $provisionalSkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    Publish-HerdrAgentSkillTransaction `
-        -Transaction $provisionalSkill `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Provisional skill publication failed."
-    Assert-Throws {
-        Complete-HerdrAgentSkillTransaction -Path $provisionalSkill.Path -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    } "before its install manifest commit" "Skill transaction completed without its manifest commit record."
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Uncommitted skill publication did not roll back."
-    Assert-True (-not (Test-Path -LiteralPath $provisionalSkill.Path)) "Rolled-back skill transaction was retained."
-
-    $rollbackCrash = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    Publish-HerdrAgentSkillTransaction -Transaction $rollbackCrash -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    [IO.File]::Move(
-        (Join-Path $rollbackCrash.Path $script:AgentSkillPhasePublished),
-        (Join-Path $rollbackCrash.Path $script:AgentSkillPhaseRollingBack)
-    )
-    Move-HerdrAgentSkillPath `
-        -Source (Join-Path $script:TestAgentSkillsRoot "herdr") `
-        -Destination (Join-Path $rollbackCrash.Path "discard")
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Interrupted rollback did not atomically restore the prior skill."
-
-    $emptySkillTransaction = Join-Path $script:TestAgentSkillsRoot (".herdr-installer-skill." + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $emptySkillTransaction | Out-Null
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-True (-not (Test-Path -LiteralPath $emptySkillTransaction)) "Markerless empty skill transaction was not recovered."
-
-    # Every managed update replaces the complete previous Herdr skill directory.
+    # Every managed update overwrites SKILL.md while preserving foreign siblings.
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
     New-Item -ItemType Directory -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources") | Out-Null
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt") -Text "old-resource"
-    $interruptedSkill = Join-Path $script:TestAgentSkillsRoot (".herdr-installer-skill." + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path (Join-Path $interruptedSkill "new") -Force | Out-Null
-    Write-TestFile -Path (Join-Path $interruptedSkill "new\SKILL.md") -Text "partial"
-    Write-HerdrDurableBytes -Path (Join-Path $interruptedSkill $script:AgentSkillPhaseStaged) -Bytes ([byte[]]@())
-    Write-TestFile -Path (Join-Path $interruptedSkill $script:AgentSkillTransactionMarkerNewName) -Text "partial-marker"
     $script:TestSkillSource = $skillSource2
 
     # Runtime and pointer crash artifacts are external and recoverable. A real
@@ -580,29 +432,10 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\pending")) $id2 "Busy upgrade did not publish pending."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Upgrade replaced immutable bootstrap."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id2\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher2) "Upgrade did not carry the new dispatcher."
-    $skillEntries = @(Get-HerdrSafeTreeEntries -Root (Join-Path $script:TestAgentSkillsRoot "herdr"))
-    Assert-Equal $skillEntries.Count 1 "Managed update retained files from the previous Herdr skill version."
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed update did not replace the Herdr skill."
-    Assert-True (-not (Test-Path -LiteralPath $interruptedSkill)) "Managed update retained an interrupted skill transaction."
-    $committedSkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    Publish-HerdrAgentSkillTransaction -Transaction $committedSkill -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-True (-not (Test-Path -LiteralPath $committedSkill.Path)) "Committed skill transaction was not finalized from the install manifest."
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Committed skill transaction recovery changed the published skill."
-    $modifiedCommittedSkill = New-HerdrAgentSkillTransaction `
-        -SourcePath $skillSource2 `
-        -AgentSkillsRoot $script:TestAgentSkillsRoot `
-        -InstallRoot $installRoot `
-        -DisplayVersion $display2
-    Publish-HerdrAgentSkillTransaction -Transaction $modifiedCommittedSkill -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Write-TestFile -Path $installedSkill -Text "modified-after-commit"
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $script:TestAgentSkillsRoot -InstallRoot $installRoot
-    Assert-True (-not (Test-Path -LiteralPath $modifiedCommittedSkill.Path)) "Committed modified skill transaction retained hidden prior content."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "modified-after-commit" "Committed transaction recovery overwrote a modified current skill."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt")) "old-version" "Managed update removed a foreign skill sibling."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
+    Write-TestFile -Path $installedSkill -Text "modified-after-update"
     $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
     Assert-Equal $repairedSkill.Status "Pending" "Skill repair changed the busy managed update outcome."
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed reinstall did not overwrite a modified prior skill."
@@ -703,121 +536,18 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     Assert-HerdrManagedRoot -InstallRoot $processRoot
     if (-not $busyProcess.WaitForExit(10000)) { throw "Managed process did not exit within 10 seconds." }
 
-    # Skill removal first detaches the owned directory. Interrupted removal
-    # restores it, while a concurrent replacement at the public path is never
-    # mistaken for the detached owned copy.
-    $processInstallManifest = Read-HerdrInstallManifestFile -Path (Join-Path $processRoot "state\install.manifest")
+    # Direct removal deletes SKILL.md even after edits, preserves siblings, and
+    # leaves no transaction or marker state to recover.
     $processSkillRoot = Join-Path $processAgentSkillsRoot "herdr"
     $processSkill = Join-Path $processSkillRoot "SKILL.md"
-    $interruptedRemoval = Start-HerdrInstalledAgentSkillRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -DisplayVersion $processInstallManifest.DisplayVersion `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    Assert-True ($null -ne $interruptedRemoval) "Owned skill removal did not create a detached transaction."
-    Assert-True (-not (Test-Path -LiteralPath $processSkillRoot)) "Owned skill remained public after atomic detach."
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $processAgentSkillsRoot -InstallRoot $processRoot
-    Assert-Equal (Get-HerdrSha256 -Path $processSkill) $processInstallManifest.SkillSha256 "Interrupted detached skill removal was not restored."
-    Assert-True (-not (Test-Path -LiteralPath $interruptedRemoval)) "Recovered skill removal retained its transaction."
-
-    $replacementRemoval = Start-HerdrInstalledAgentSkillRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -DisplayVersion $processInstallManifest.DisplayVersion `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    Assert-True ($null -ne $replacementRemoval) "Concurrent replacement test did not detach the owned skill."
-    New-Item -ItemType Directory -Path $processSkillRoot | Out-Null
-    Write-TestFile -Path $processSkill -Text "concurrent-user-skill"
-    Write-TestFile -Path (Join-Path $processSkillRoot "user.txt") -Text "preserve"
-    Assert-True (Complete-HerdrInstalledAgentSkillRemoval `
-        -TransactionPath $replacementRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -ExpectedSha256 $processInstallManifest.SkillSha256) "Detached exact owned skill was not removed."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path $processSkill) "concurrent-user-skill" "Concurrent skill replacement was deleted."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $processSkillRoot "user.txt")) "preserve" "Concurrent skill replacement content was deleted."
-    Assert-True (-not (Test-Path -LiteralPath $replacementRemoval)) "Completed skill removal retained its transaction."
-
-    # A modified detached copy and an exact concurrent public replacement are
-    # both preserved. Removal recovery never routes through install rollback.
-    Remove-Item -LiteralPath $processSkillRoot -Recurse -Force
-    New-Item -ItemType Directory -Path $processSkillRoot | Out-Null
-    Copy-HerdrDurableFile -Source $script:TestSkillSource -Destination $processSkill
-    $modifiedRemoval = Start-HerdrInstalledAgentSkillRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -DisplayVersion $processInstallManifest.DisplayVersion `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    Write-TestFile -Path (Join-Path $modifiedRemoval "previous\SKILL.md") -Text "modified-detached-skill"
-    New-Item -ItemType Directory -Path $processSkillRoot | Out-Null
-    Copy-HerdrDurableFile -Source $script:TestSkillSource -Destination $processSkill
-    Assert-Throws {
-        Complete-HerdrInstalledAgentSkillRemoval `
-            -TransactionPath $modifiedRemoval `
-            -AgentSkillsRoot $processAgentSkillsRoot `
-            -InstallRoot $processRoot `
-            -ExpectedSha256 $processInstallManifest.SkillSha256
-    } "concurrent Herdr agent skill replacement blocks restoration" "Modified detached content did not preserve both owners."
-    Assert-Equal (Get-HerdrSha256 -Path $processSkill) $processInstallManifest.SkillSha256 "Exact concurrent replacement was deleted."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $modifiedRemoval "previous\SKILL.md")) "modified-detached-skill" "Modified detached skill was deleted."
-    Remove-Item -LiteralPath $processSkillRoot -Recurse -Force
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $processAgentSkillsRoot -InstallRoot $processRoot
-    Assert-Equal (Read-HerdrStrictUtf8 -Path $processSkill) "modified-detached-skill" "Modified detached skill was not restored after collision release."
-
-    # The candidate file is pinned against writes. A late extra entry makes the
-    # empty-directory commit gate fail before the pinned file can be deleted.
-    Remove-Item -LiteralPath $processSkillRoot -Recurse -Force
-    New-Item -ItemType Directory -Path $processSkillRoot | Out-Null
-    Copy-HerdrDurableFile -Source $script:TestSkillSource -Destination $processSkill
-    $lateContentRemoval = Start-HerdrInstalledAgentSkillRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -DisplayVersion $processInstallManifest.DisplayVersion `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    $lateCandidateState = Publish-HerdrAgentSkillRemovalCandidate `
-        -TransactionPath $lateContentRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    Assert-True ($null -ne $lateCandidateState) "Owned skill candidate was not isolated."
-    $lateCandidate = Join-Path $lateContentRemoval $script:AgentSkillRemovalCandidateName
-    Assert-Throws {
-        [IO.File]::WriteAllText($lateCandidate, "replace", $script:Utf8NoBom)
-    } "being used|cannot access|access to the path" "Pinned removal candidate allowed a concurrent write."
-    Write-TestFile -Path (Join-Path $lateContentRemoval "previous\late.txt") -Text "late-content"
-    Assert-True (-not (Commit-HerdrAgentSkillRemovalCandidate `
-        -Candidate $lateCandidateState `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -ExpectedSha256 $processInstallManifest.SkillSha256)) "Late detached content did not block candidate commit."
-    Assert-Equal (Get-HerdrSha256 -Path $processSkill) $processInstallManifest.SkillSha256 "Owned skill was lost when late content blocked deletion."
-    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $processSkillRoot "late.txt")) "late-content" "Late detached content was deleted."
-    Assert-True (-not (Test-Path -LiteralPath $lateContentRemoval)) "Rejected late-content removal retained its transaction."
-    Remove-Item -LiteralPath (Join-Path $processSkillRoot "late.txt") -Force
-
-    # Completing removal is a durable commit. Recovery reopens and deletes the
-    # exact isolated candidate by handle without consulting the public target.
-    $committedRemoval = Start-HerdrInstalledAgentSkillRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -DisplayVersion $processInstallManifest.DisplayVersion `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    $committedCandidate = Publish-HerdrAgentSkillRemovalCandidate `
-        -TransactionPath $committedRemoval `
-        -AgentSkillsRoot $processAgentSkillsRoot `
-        -InstallRoot $processRoot `
-        -ExpectedSha256 $processInstallManifest.SkillSha256
-    [IO.Directory]::Delete((Join-Path $committedRemoval "previous"))
-    [IO.File]::Move(
-        (Join-Path $committedRemoval $script:AgentSkillPhasePublishing),
-        (Join-Path $committedRemoval $script:AgentSkillPhaseCompleting)
-    )
-    $committedCandidate.Pinned.Dispose()
-    Restore-HerdrAgentSkillTransactions -AgentSkillsRoot $processAgentSkillsRoot -InstallRoot $processRoot
-    Assert-True (-not (Test-Path -LiteralPath $processSkillRoot)) "Committed removal recovery restored a public target."
-    Assert-True (-not (Test-Path -LiteralPath $committedRemoval)) "Committed removal recovery retained its transaction."
-    New-Item -ItemType Directory -Path $processSkillRoot | Out-Null
-    Copy-HerdrDurableFile -Source $script:TestSkillSource -Destination $processSkill
+    Write-TestFile -Path $processSkill -Text "user-edited-skill"
+    $processSkillSibling = Join-Path $processSkillRoot "user.txt"
+    Write-TestFile -Path $processSkillSibling -Text "preserve"
+    Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot
+    Assert-True (-not (Test-Path -LiteralPath $processSkill)) "Direct removal preserved an edited SKILL.md."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $processSkillSibling) "preserve" "Direct removal deleted a foreign sibling."
+    Remove-Item -LiteralPath $processSkillSibling -Force
+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot
 
     # An unchanged but temporarily locked owned skill keeps uninstall retryable
     # and preserves the install manifest until cleanup can succeed.
@@ -863,8 +593,7 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\installer-helper.ps1")) "Retry helper was removed before NSIS cleanup."
     Complete-TestNsisCleanup -Root $processRoot
 
-    # Extra files and nested directories make the skill user-modified. The
-    # complete program uninstall still succeeds while preserving that tree.
+    # Extra files and nested directories survive while SKILL.md is removed.
     $extraTreeRoot = Join-Path $tempRoot "extra-tree-install"
     $extraTreeSkillsRoot = Join-Path $tempRoot "extra-tree-agent-skills"
     [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock)
@@ -874,13 +603,9 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     Write-TestFile -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt") -Text "preserve-nested"
     Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -ProcessProvider { @() }
     Assert-HerdrUninstallResidual -InstallRoot $extraTreeRoot
-    Assert-Equal (Get-HerdrSha256 -Path $extraTreeSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Extra-tree uninstall changed SKILL.md."
+    Assert-True (-not (Test-Path -LiteralPath $extraTreeSkill)) "Extra-tree uninstall preserved SKILL.md."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "user.txt")) "preserve-file" "Extra-tree uninstall removed a user file."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt")) "preserve-nested" "Extra-tree uninstall removed nested user content."
-    $extraTreeTransactions = @(Get-ChildItem -LiteralPath $extraTreeSkillsRoot -Force -Directory | Where-Object {
-        $_.Name -cmatch '^\.herdr-installer-skill\.[0-9a-f]{32}$'
-    })
-    Assert-Equal $extraTreeTransactions.Count 0 "Extra-tree uninstall retained a removal transaction."
     Complete-TestNsisCleanup -Root $extraTreeRoot
 
     # Active lease refusal preserves the complete primary install.
@@ -899,7 +624,8 @@ if (`$null -eq ('Herdr.Installer.PinnedSkillFile' -as [type])) { throw 'Pinned s
     Write-TestFile -Path $installedSkill -Text "user-modified-skill"
     Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() }
     Assert-HerdrUninstallResidual -InstallRoot $installRoot
-    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "user-modified-skill" "Uninstall removed a modified Herdr skill."
+    Assert-True (-not (Test-Path -LiteralPath $installedSkill)) "Uninstall preserved a modified Herdr skill."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Uninstall removed a foreign skill sibling."
     Complete-TestNsisCleanup -Root $installRoot
 
     Write-Host "Windows installer PowerShell tests passed."

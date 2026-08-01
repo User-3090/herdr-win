@@ -32,9 +32,11 @@ tests remain the detailed implementation truth.
   files, and ends with the exact first command. The installed payload and portable
   ZIP include the same license as `LICENSE.txt`. A portable ZIP remains a supported
   manual alternative.
-- The managed installer installs the cross-agent Herdr skill at
-  `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and replaces the complete prior
-  `herdr` skill directory on install/update.
+- The managed installer copies upstream's canonical Herdr skill to
+  `%USERPROFILE%\.agents\skills\herdr\SKILL.md`. When Claude Code is detected,
+  it also copies the skill below `CLAUDE_CONFIG_DIR` or
+  `%USERPROFILE%\.claude`. Install/update overwrites only `SKILL.md` and
+  preserves every sibling file and directory.
 - Snapshot updates use only the fork-owned immutable setup asset and verified
   digest through the fork-owned update feed. Existing managed sessions continue on
   their current runtime; a newer runtime may remain staged until old sessions exit,
@@ -42,7 +44,9 @@ tests remain the detailed implementation truth.
   Herdr sessions.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, user `PATH` entry, Installed Apps registration, and
-  an unchanged installer-owned skill while preserving modified skill content. The
+  `SKILL.md` at its managed universal and Claude locations even when that file was
+  edited after installation. Other skill-directory content is preserved, and an
+  empty `herdr` skill directory is removed. The
   interactive uninstaller defaults to also removing configuration and session data
   under `%USERPROFILE%\.herdr`; users can clear that checkbox to keep the data for
   a later installation. Silent uninstall uses the same remove-by-default policy and

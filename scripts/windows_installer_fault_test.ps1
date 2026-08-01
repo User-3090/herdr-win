@@ -24,6 +24,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_installer.ps1"
 $originalUserProfile = $env:USERPROFILE
 $originalLocalAppData = $env:LOCALAPPDATA
+$originalClaudeConfigDir = $env:CLAUDE_CONFIG_DIR
 $ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
 if ($ownsAgentUserProfile) {
     $AgentUserProfileRoot = Join-Path ([IO.Path]::GetTempPath()) ("hs-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -33,14 +34,17 @@ if ($ownsAgentUserProfile) {
 }
 $env:USERPROFILE = [IO.Path]::GetFullPath($AgentUserProfileRoot)
 $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local"
+$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ".claude"
 if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
     New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
 }
 $installRoot = Join-Path $env:LOCALAPPDATA "Programs\$ProductName"
 $arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
-$skillSource = Join-Path $projectRoot "SKILL.md"
+$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 $skillRoot = Join-Path $env:USERPROFILE ".agents\skills\herdr"
 $skillPath = Join-Path $skillRoot "SKILL.md"
+$claudeSkillRoot = Join-Path $env:CLAUDE_CONFIG_DIR "skills\herdr"
+$claudeSkillPath = Join-Path $claudeSkillRoot "SKILL.md"
 $settingsRoot = Join-Path $env:USERPROFILE ".herdr"
 $allowedFaults = @(
     "after-uninstall-pending",
@@ -119,14 +123,23 @@ function Remove-TestInstallIfPresent {
 }
 
 function Assert-TestSkillInstalled {
-    $entries = @(Get-ChildItem -LiteralPath $skillRoot -Force)
-    if ($entries.Count -ne 1 -or $entries[0].Name -cne "SKILL.md" -or $entries[0].PSIsContainer) {
-        throw "Managed installer did not replace the complete previous Herdr skill directory."
-    }
     $expected = [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillSource))
-    $actual = [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillPath))
-    if ($actual -cne $expected) {
-        throw "Managed installer did not publish the canonical root SKILL.md."
+    foreach ($candidate in @($skillPath, $claudeSkillPath)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            throw "Managed installer did not publish SKILL.md: $candidate"
+        }
+        $actual = [Convert]::ToBase64String([IO.File]::ReadAllBytes($candidate))
+        if ($actual -cne $expected) {
+            throw "Managed installer did not publish the canonical SKILL.md: $candidate"
+        }
+    }
+    foreach ($sibling in @(
+        (Join-Path $skillRoot "previous-resources\old.txt"),
+        (Join-Path $claudeSkillRoot "previous-resources\old.txt")
+    )) {
+        if ([IO.File]::ReadAllText($sibling) -cne "previous resource") {
+            throw "Managed installer removed or changed a foreign skill sibling: $sibling"
+        }
     }
 }
 
@@ -147,14 +160,8 @@ if (Test-Path -LiteralPath $arpKey) {
 if (Test-Path -LiteralPath $skillRoot) {
     throw "Fault test requires no existing cross-agent Herdr skill: $skillRoot"
 }
-$skillsRoot = Split-Path -Parent $skillRoot
-if (Test-Path -LiteralPath $skillsRoot -PathType Container) {
-    $interruptedSkills = @(Get-ChildItem -LiteralPath $skillsRoot -Force -Directory | Where-Object {
-        $_.Name -cmatch '^\.herdr-installer-skill\.[0-9a-f]{32}$'
-    })
-    if ($interruptedSkills.Count -ne 0) {
-        throw "Fault test requires no interrupted Herdr agent skill transaction."
-    }
+if (Test-Path -LiteralPath $claudeSkillRoot) {
+    throw "Fault test requires no existing Claude Herdr skill: $claudeSkillRoot"
 }
 if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
@@ -177,6 +184,9 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
         [IO.File]::WriteAllText($skillPath, "previous skill")
         [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
+        New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
+        [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
+        [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
 
         & $packager `
             -StageDir $StageDir `
@@ -215,8 +225,15 @@ try {
             Test-Path -LiteralPath $faultMarker
         }
         Wait-TestUninstallerIdle
-        if (Test-Path -LiteralPath $skillRoot) {
-            throw "Injected uninstall $fault retained the unchanged owned Herdr skill."
+        if (Test-Path -LiteralPath $skillPath) {
+            throw "Injected uninstall $fault retained universal SKILL.md."
+        }
+        if (Test-Path -LiteralPath $claudeSkillPath) {
+            throw "Injected uninstall $fault retained Claude SKILL.md."
+        }
+        if ([IO.File]::ReadAllText((Join-Path $skillRoot "previous-resources\old.txt")) -cne "previous resource" -or
+            [IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
+            throw "Injected uninstall $fault removed a foreign skill sibling."
         }
         if (Test-Path -LiteralPath $settingsRoot) {
             throw "Injected uninstall $fault retained settings despite the default removal policy."
@@ -241,6 +258,9 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
     [IO.File]::WriteAllText($skillPath, "previous skill")
     [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
+    New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
+    [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
+    [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
     & $packager `
         -StageDir $StageDir `
         -LauncherExe $LauncherExe `
@@ -272,8 +292,11 @@ try {
         -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
     }
     Wait-TestUninstallerIdle
-    if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf)) {
-        throw "Modified skill tree uninstall removed SKILL.md."
+    if (Test-Path -LiteralPath $skillPath) {
+        throw "Sibling-preserving uninstall retained universal SKILL.md."
+    }
+    if (Test-Path -LiteralPath $claudeSkillPath) {
+        throw "Sibling-preserving uninstall retained Claude SKILL.md."
     }
     if ([IO.File]::ReadAllText((Join-Path $skillRoot "user.txt")) -cne "preserve-file") {
         throw "Modified skill tree uninstall removed a user file."
@@ -281,15 +304,21 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $skillRoot "resources\nested.txt")) -cne "preserve-nested") {
         throw "Modified skill tree uninstall removed nested user content."
     }
+    if ([IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
+        throw "Sibling-preserving uninstall removed Claude skill content."
+    }
     if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-explicitly") {
         throw "Uninstall ignored /KEEP_SETTINGS."
     }
     Remove-Item -LiteralPath $settingsRoot -Recurse -Force
-    Write-Host "Modified skill tree uninstall passed."
+    Write-Host "Sibling-preserving skill uninstall passed."
 } finally {
     Remove-TestInstallIfPresent
     if (Test-Path -LiteralPath $skillRoot) {
         Remove-Item -LiteralPath $skillRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $claudeSkillRoot) {
+        Remove-Item -LiteralPath $claudeSkillRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path -LiteralPath $settingsRoot) {
         Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -306,6 +335,7 @@ try {
     }
     $env:USERPROFILE = $originalUserProfile
     $env:LOCALAPPDATA = $originalLocalAppData
+    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
     if ($ownsAgentUserProfile -and (Test-Path -LiteralPath $AgentUserProfileRoot)) {
         Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
     }

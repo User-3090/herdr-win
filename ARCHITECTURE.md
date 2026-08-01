@@ -84,10 +84,17 @@ behavior; code and tests remain the detailed implementation truth.
 - `website/install.ps1` is a legacy-layout bridge, not the active updater for new
   managed builds. Keep exactly one bounded standalone/junction migration and add no
   speculative migration variants.
-- The installer packages the canonical Herdr agent skill to
-  `%USERPROFILE%\.agents\skills\herdr`. Install/update replaces that one complete
-  directory. Uninstall removes only an exact unchanged installer-owned copy and
-  preserves ambiguous or user-modified content.
+- NSIS embeds upstream's canonical `skills/herdr/SKILL.md` and delegates skill
+  filesystem work to the existing PowerShell installation boundary. The helper
+  always copies it to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and also to
+  `CLAUDE_CONFIG_DIR\skills\herdr\SKILL.md` or the default `.claude` equivalent
+  when Claude Code is detected from that upstream-owned configuration shape or
+  `claude` on `PATH`.
+- Skill installation and removal are direct and stateless: install/update
+  overwrites only regular `SKILL.md` files; uninstall removes those files even
+  after edits and removes `herdr` only when empty. Foreign siblings are never
+  recursively deleted. Reparse points and ambiguous file/directory collisions
+  fail closed, without skill transactions, ownership hashes, markers, or locks.
 - Future installer work uses the global ordinary-local-application threat model
   unless the user explicitly chooses stronger guarantees. Prefer failing closed
   and preserving benign residue over adding custom recovery/deletion state.

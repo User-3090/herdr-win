@@ -41,6 +41,10 @@ active memory owner.
   sockets, and protocol. Fork identity belongs only in repository/release/update
   presentation.
 - Keep the delta small, explicit, replayable, and upstreamable.
+- Treat existing fork implementation as migration cost, not architectural
+  precedent. Choose changed behavior against recorded upstream and the simplest
+  long-lived design; retain old fork structure only for a current compatibility
+  contract.
 - `patches/delta/` owns maintained product behavior; `series` owns order and
   `BASE` records the reviewed upstream commit.
 - Never fetch, clone, query, download, check out, replay, test, or otherwise obtain
