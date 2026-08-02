@@ -208,7 +208,15 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("GITHUB_EVENT_NAME", workflow)
         self.assertNotIn('$upstreamRef = "master"', workflow)
         self.assertIn("ref: ${{ steps.upstream_source.outputs.ref }}", workflow)
+        self.assertIn("fetch-tags: true", workflow)
+        self.assertIn('$stableTag = "v$baseVersion"', workflow)
+        self.assertIn("is not upstream stable release $stableTag", workflow)
         self.assertIn("failed to replay $entry on selected upstream source $base", workflow)
+        self.assertIn(
+            '--title "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})"',
+            workflow,
+        )
+        self.assertIn('echo "- Upstream release: \\`Herdr v${BASE_VERSION}\\`"', workflow)
         self.assertIn('echo "- Upstream source: \\`${UPSTREAM_SHA}\\`"', workflow)
         self.assertNotIn("SOURCE_MODE", workflow)
         self.assertNotIn("PREVIEW_GENERATOR.py", workflow)

@@ -1,20 +1,20 @@
-From feb8babf05519924f8b433fe72ec81821471f8e6 Mon Sep 17 00:00:00 2001
+From 2f5e5f9bf67409c83b686bd207deee8f7dfc5226 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 19:41:54 +0200
 Subject: [PATCH 4/4] fix(opencode): correlate retry error lifecycle
 
 Defer root-session errors until idle or a bounded fallback, cancel them when explicit continuing status follows, and prevent terminal blocked state from being overwritten by legacy idle events.
 ---
- .../assets/opencode/herdr-agent-state.js      | 480 ++++++++++++----
- .../assets/opencode/herdr-agent-state.test.ts | 516 +++++++++++++++++-
+ .../assets/opencode/herdr-agent-state.js      | 513 ++++++++++++----
+ .../assets/opencode/herdr-agent-state.test.ts | 561 +++++++++++++++++-
  src/integration/mod.rs                        |   2 +-
- 3 files changed, 889 insertions(+), 109 deletions(-)
+ 3 files changed, 949 insertions(+), 127 deletions(-)
 
 diff --git a/src/integration/assets/opencode/herdr-agent-state.js b/src/integration/assets/opencode/herdr-agent-state.js
-index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce75b6be22 100644
+index 27ea7ee55b2d7fa5a20a73928aa7c93f0e86d7af..6a97b5f62a2c35aa69fb59fad9733cce75b6be22 100644
 --- a/src/integration/assets/opencode/herdr-agent-state.js
 +++ b/src/integration/assets/opencode/herdr-agent-state.js
-@@ -2,19 +2,18 @@
+@@ -2,20 +2,36 @@
  // managed by herdr; reinstalling or updating the integration overwrites this file.
  // add custom hooks/plugins beside this file instead of editing it.
  // HERDR_INTEGRATION_ID=opencode
@@ -29,20 +29,22 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 -let requestChain = Promise.resolve();
 -let reportedRootSessionID;
  
--// Track child sessions so their events cannot replace the pane's root session.
--// Their user prompts still project state without attaching the child session id.
+-// Subagent (task tool) sessions carry a parentID; the main agent session does
+-// not. Their lifecycle events would otherwise clobber the pane's real state, so
+-// learn child session ids from session.created/updated and drop their reports.
 -const childSessions = new Set();
 +const ERROR_FALLBACK_MS = 5_000;
 +const ERROR_RETRY_GRACE_MS = 1_000;
 +const ERROR_MAX_FALLBACK_MS = 2_147_483_647;
 +
- const CHILD_EVENT_STATES = new Map([
-   ["permission.asked", "blocked"],
-   ["question.asked", "blocked"],
-@@ -23,6 +22,17 @@ const CHILD_EVENT_STATES = new Map([
-   ["question.rejected", "working"],
- ]);
- 
++const CHILD_EVENT_STATES = new Map([
++  ["permission.asked", "blocked"],
++  ["question.asked", "blocked"],
++  ["permission.replied", "working"],
++  ["question.replied", "working"],
++  ["question.rejected", "working"],
++]);
++
 +const SESSION_STATE_BY_STATUS = new Map([
 +  ["idle", "idle"],
 +  ["active", "working"],
@@ -53,50 +55,45 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +  ["streaming", "working"],
 +  ["working", "working"],
 +]);
-+
+ 
  function nextReportSeq() {
    reportSeq += 1;
-   return reportSeq;
-@@ -34,143 +44,401 @@ function sessionIDFromProperties(properties) {
+@@ -28,158 +44,401 @@ function sessionIDFromProperties(properties) {
      : undefined;
  }
  
--const SESSION_STATE_BY_STATUS = new Map([
--  ["idle", "idle"],
--  ["active", "working"],
--  ["busy", "working"],
--  ["pending", "working"],
--  ["retry", "working"],
--  ["running", "working"],
--  ["streaming", "working"],
--  ["working", "working"],
--]);
+-function stateFromSessionStatus(status) {
+-  // session.status carries { type: "idle" | "busy" | "retry" }; older builds used a bare string.
+-  const kind = typeof status === "string" ? status : status?.type;
+-  if (typeof kind !== "string") return undefined;
+-  switch (kind.toLowerCase()) {
+-    case "idle":
+-      return "idle";
+-    case "active":
+-    case "busy":
+-    case "pending":
+-    case "running":
+-    case "streaming":
+-    case "working":
+-    case "retry":
+-      return "working";
+-    default:
+-      return undefined;
+-  }
 +function sessionStatusKind(status) {
 +  return typeof status === "string" ? status.toLowerCase() : status?.type?.toLowerCase();
-+}
- 
- function stateFromSessionStatus(status) {
--  const kind = typeof status === "string" ? status : status?.type;
-+  const kind = sessionStatusKind(status);
-   return typeof kind === "string"
--    ? SESSION_STATE_BY_STATUS.get(kind.toLowerCase())
-+    ? SESSION_STATE_BY_STATUS.get(kind)
-     : undefined;
  }
  
 -function request(method, params) {
 -  const pending = requestChain.then(() => requestOnce(method, params));
 -  requestChain = pending.catch(() => {});
 -  return pending;
--}
-+export const HerdrAgentStatePlugin = async () => {
-+  if (
-+    process.env.HERDR_ENV !== "1" ||
-+    !process.env.HERDR_SOCKET_PATH ||
-+    !process.env.HERDR_PANE_ID
-+  ) {
-+    return {};
-+  }
++function stateFromSessionStatus(status) {
++  const kind = sessionStatusKind(status);
++  return typeof kind === "string"
++    ? SESSION_STATE_BY_STATUS.get(kind)
++    : undefined;
+ }
  
 -function requestOnce(method, params) {
 -  const paneId = process.env.HERDR_PANE_ID;
@@ -123,6 +120,19 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 -      ...params,
 -    },
 -  };
++export const HerdrAgentStatePlugin = async () => {
++  if (
++    process.env.HERDR_ENV !== "1" ||
++    !process.env.HERDR_SOCKET_PATH ||
++    !process.env.HERDR_PANE_ID
++  ) {
++    return {};
++  }
+ 
+-  return new Promise((resolve) => {
+-    const client = net.createConnection(socketEndpoint, () => {
+-      client.write(`${JSON.stringify(request)}\n`);
+-    });
 +  let requestChain = Promise.resolve();
 +  let currentRootSessionID;
 +  let unscopedErrorBlocked = false;
@@ -132,10 +142,9 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +  const retiredChildren = new Set();
 +  const activeClients = new Map();
  
--  return new Promise((resolve) => {
--    const client = net.createConnection(socketEndpoint, () => {
--      client.write(`${JSON.stringify(request)}\n`);
--    });
+-    const finish = () => {
+-      client.destroy();
+-      resolve();
 +  function requestOnce(method, params) {
 +    if (disposed) {
 +      return Promise.resolve();
@@ -145,10 +154,7 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +    if (!paneId || !socketPath) {
 +      return Promise.resolve();
 +    }
- 
--    const finish = () => {
--      client.destroy();
--      resolve();
++
 +    const socketEndpoint =
 +      process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 +    const request = {
@@ -177,10 +183,7 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +        resolve();
 +        return;
 +      }
- 
--function reportSession(sessionID, sessionStartSource) {
--  if (!sessionID) {
--    return Promise.resolve();
++
 +      let client;
 +      let finished = false;
 +      const finish = () => {
@@ -213,11 +216,11 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +      client.on("end", finish);
 +      client.on("close", finish);
 +    });
-   }
--  const params = { agent_session_id: sessionID };
--  if (sessionStartSource) {
--    params.session_start_source = sessionStartSource;
-+
++  }
+ 
+-function reportSession(sessionID, sessionStartSource) {
+-  if (!sessionID) {
+-    return Promise.resolve();
 +  function request(method, params) {
 +    const pending = requestChain.then(() => {
 +      if (disposed) {
@@ -228,14 +231,10 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +    requestChain = pending.catch(() => {});
 +    return pending;
    }
--  return request("pane.report_agent_session", params);
--}
- 
--function reportState(state, sessionID) {
--  const params = { state };
--  if (sessionID) {
--    reportedRootSessionID = sessionID;
--    params.agent_session_id = sessionID;
+-  const params = { agent_session_id: sessionID };
+-  if (sessionStartSource) {
+-    params.session_start_source = sessionStartSource;
++
 +  function reportSession(sessionID, sessionStartSource) {
 +    if (disposed || !sessionID) {
 +      return Promise.resolve();
@@ -245,6 +244,24 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +      params.session_start_source = sessionStartSource;
 +    }
 +    return request("pane.report_agent_session", params);
+   }
+-  return request("pane.report_agent_session", params);
+-}
+ 
+-function reportState(state, sessionID) {
+-  const params = { state };
+-  if (sessionID) {
+-    reportedRootSessionID = sessionID;
+-    params.agent_session_id = sessionID;
++  function reportState(state, sessionID) {
++    if (disposed) {
++      return Promise.resolve();
++    }
++    const params = { state };
++    if (sessionID) {
++      params.agent_session_id = sessionID;
++    }
++    return request("pane.report_agent", params);
    }
 -  return request("pane.report_agent", params);
 -}
@@ -256,17 +273,6 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 -    !process.env.HERDR_PANE_ID
 -  ) {
 -    return {};
-+  function reportState(state, sessionID) {
-+    if (disposed) {
-+      return Promise.resolve();
-+    }
-+    const params = { state };
-+    if (sessionID) {
-+      params.agent_session_id = sessionID;
-+    }
-+    return request("pane.report_agent", params);
-+  }
-+
 +  function lifecycleFor(sessionID) {
 +    let lifecycle = sessionLifecycle.get(sessionID);
 +    if (!lifecycle) {
@@ -500,16 +506,31 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
 +        return;
        }
 -      if (sessionID && childSessions.has(sessionID)) {
+-        // Child session events are dropped so they cannot clobber the pane's
+-        // root-agent state, but a subagent waiting on the user must still
+-        // surface as blocked (and clear once answered). Report state only,
+-        // without an agent_session_id, so the pane keeps the root session.
+-        switch (type) {
+-          case "permission.asked":
+-          case "question.asked":
+-            await reportState("blocked");
+-            break;
+-          case "permission.replied":
+-          case "question.replied":
+-          case "question.rejected":
+-            await reportState("working");
+-            break;
+-          default:
+-            break;
 +
 +      if (sessionID && childParents.has(sessionID)) {
 +        if (type === "session.deleted") {
 +          retireChild(sessionID);
 +          return;
 +        }
-         const state = CHILD_EVENT_STATES.get(type);
--        if (state) {
++        const state = CHILD_EVENT_STATES.get(type);
 +        if (state && !unscopedErrorBlocked) {
-           await reportState(state);
++          await reportState(state);
          }
          return;
        }
@@ -549,7 +570,7 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
            } else {
              await reportSession(sessionID);
            }
-@@ -182,21 +450,35 @@ export const HerdrAgentStatePlugin = async () => {
+@@ -191,21 +450,35 @@ export const HerdrAgentStatePlugin = async () => {
          case "question.replied":
          case "question.rejected":
          case "session.compacted":
@@ -589,7 +610,7 @@ index 7626505045e0ada70d5735e5c2debd1122f21b77..6a97b5f62a2c35aa69fb59fad9733cce
    };
  };
 diff --git a/src/integration/assets/opencode/herdr-agent-state.test.ts b/src/integration/assets/opencode/herdr-agent-state.test.ts
-index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6428cce6e 100644
+index d8d6d14d7aad958e4f303600c65861ca305fac35..d674ac5bc167fd41ee4df399d67271f6428cce6e 100644
 --- a/src/integration/assets/opencode/herdr-agent-state.test.ts
 +++ b/src/integration/assets/opencode/herdr-agent-state.test.ts
 @@ -1,4 +1,4 @@
@@ -685,7 +706,7 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
    const plugin = await loadPlugin();
  
    await plugin.event({
-@@ -107,24 +143,486 @@ test("suppresses redundant same-session updates", async () => {
+@@ -107,11 +143,524 @@ test("suppresses redundant same-session updates", async () => {
      event: { type: "session.updated", properties: { sessionID: "replacement-session" } },
    });
  
@@ -952,12 +973,10 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
      "pane.report_agent_session",
 +    "pane.report_agent",
 +    "pane.report_agent",
-   ]);
--  expect(requests.map(requestSessionID)).toEqual(["root-session", "replacement-session"]);
++  ]);
 +  expect(requests.map(requestSessionID)).toEqual(["root-a", "root-b", "root-b"]);
- });
- 
--test("reports retry status as working", async () => {
++});
++
 +test("same-root chat cannot clear an unscoped error block", async () => {
 +  const plugin = await loadPlugin();
 +  await plugin.event({
@@ -976,7 +995,7 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
 +});
 +
 +test("old child reply is dropped after root replacement", async () => {
-   const plugin = await loadPlugin();
++  const plugin = await loadPlugin();
 +  await plugin.event({
 +    event: {
 +      type: "session.created",
@@ -1004,7 +1023,7 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
 +      properties: { sessionID: "old-child" },
 +    },
 +  });
- 
++
 +  expect(requests.map(requestMethod)).toEqual([
 +    "pane.report_agent_session",
 +    "pane.report_agent_session",
@@ -1014,14 +1033,12 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
 +
 +test("canonical child deletion removes ownership before trailing reply", async () => {
 +  const plugin = await loadPlugin();
-   await plugin.event({
-     event: {
--      type: "session.status",
--      properties: { sessionID: "root-session", status: { type: "retry" } },
++  await plugin.event({
++    event: {
 +      type: "session.created",
 +      properties: { sessionID: "root-session" },
-     },
-   });
++    },
++  });
 +  await plugin.event({
 +    event: {
 +      type: "session.created",
@@ -1130,8 +1147,8 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
 +    },
 +  });
 +  await plugin["chat.message"]({ sessionID: "old-child" });
- 
-   expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
++
++  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
 +  expect(requests.map(requestState)).toEqual(["working"]);
 +  expect(requests.map(requestSessionID)).toEqual(["new-root"]);
 +});
@@ -1173,11 +1190,50 @@ index be21fd714b06b1f292b115481e0b4c12ab1e522c..d674ac5bc167fd41ee4df399d67271f6
 +  const second = await factory();
 +  await second.event(sessionStatusEvent("root-session", { type: "busy" }));
 +
-   expect(requests.map(requestState)).toEqual(["working"]);
-   expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++  expect(requests.map(requestState)).toEqual(["working"]);
++  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
++});
++
++test("reports child prompts without replacing the root session", async () => {
++  const plugin = await loadPlugin();
++
++  await plugin.event({
++    event: {
++      type: "session.created",
++      properties: {
++        sessionID: "child-session",
++        info: { id: "child-session", parentID: "root-session" },
++      },
++    },
++  });
++
++  for (const type of ["permission.asked", "question.asked"]) {
++    await plugin.event({ event: { type, properties: { sessionID: "child-session" } } });
++  }
++  for (const type of ["permission.replied", "question.replied", "question.rejected"]) {
++    await plugin.event({ event: { type, properties: { sessionID: "child-session" } } });
++  }
++
++  expect(requests.map(requestState)).toEqual([
++    "blocked",
++    "blocked",
++    "working",
++    "working",
++    "working",
++  ]);
++  expect(requests.map(requestSessionID)).toEqual([
++    undefined,
++    undefined,
++    undefined,
++    undefined,
++    undefined,
+   ]);
+-  expect(requests.map(requestSessionID)).toEqual(["root-session", "replacement-session"]);
  });
+ 
+ function requestMethod(request: unknown): unknown {
 diff --git a/src/integration/mod.rs b/src/integration/mod.rs
-index 77d8ddda4da93388618f790909f5c23cc5b781a0..657ba5e1934a60c1223f78d27fdf3afece6123e1 100644
+index 73c23fc6220aa96ee1032d5fb7bf2e8005821889..e020408dd1e3d0a949eddee6d88f36fc0f773c17 100644
 --- a/src/integration/mod.rs
 +++ b/src/integration/mod.rs
 @@ -157,7 +157,7 @@ const DROID_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 9] = [
@@ -1188,7 +1244,6 @@ index 77d8ddda4da93388618f790909f5c23cc5b781a0..657ba5e1934a60c1223f78d27fdf3afe
 +const OPENCODE_INTEGRATION_VERSION: u32 = 10;
  const KILO_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
  const KILO_PLUGIN_ASSET: &str = include_str!("assets/kilo/herdr-agent-state.js");
- const KILO_INTEGRATION_VERSION: u32 = 4;
+ const KILO_INTEGRATION_VERSION: u32 = 3;
 -- 
 2.55.0.windows.3
-

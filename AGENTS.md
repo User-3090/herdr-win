@@ -46,13 +46,17 @@ active memory owner.
   long-lived design; retain old fork structure only for a current compatibility
   contract.
 - `patches/delta/` owns maintained product behavior; `series` owns order and
-  `BASE` records the reviewed upstream commit.
+  `BASE` records the exact commit behind the latest non-draft, non-prerelease
+  upstream stable release selected during the last explicit manual refresh. It
+  never tracks upstream `master` or a preview tag.
 - Never fetch, clone, query, download, check out, replay, test, or otherwise obtain
   anything from official upstream `ogulcancelik/herdr` unless the user explicitly
   requests that exact upstream operation in the current task. This prohibition also
   covers changing `BASE` or refreshing maintained mailboxes; use only already-local
   objects and the commit recorded in `BASE`, and report a blocked gate instead of
-  reaching upstream.
+  reaching upstream. When the user explicitly requests an upstream refresh, query
+  and fetch the latest stable release, peel its exact commit, and update `BASE` only
+  after the complete queue is replayed, reviewed, and verified there.
   Synchronizing this fork's configured `origin` for normal collaboration and
   delivery remains allowed because it is not official upstream. A manual
   `workflow_dispatch` release uses recorded `BASE`.

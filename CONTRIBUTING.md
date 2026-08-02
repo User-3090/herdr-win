@@ -65,11 +65,22 @@ frozen snapshot. Rerun only after relevant source or inputs change.
 Do not fetch, merge, rebase, or advance the queue to newer
 `ogulcancelik/herdr` source as part of an ordinary feature, fix, documentation, or
 maintenance task. Refresh official upstream only when the user explicitly requests
-that separate operation. Then use the exact approved upstream commit, replay and
-review the complete queue, update `BASE` only after that review, and run the full
-refresh gates. There is no scheduled upstream replay or release. Manual
+that separate operation. For every approved refresh:
+
+1. Query the official latest GitHub release and require it to be neither draft nor
+   prerelease.
+2. Fetch its exact `v<version>` tag, peel the release commit, and verify the tag
+   version matches replayed Cargo package version.
+3. Replay and review the complete queue on that commit, dropping upstreamed or
+   obsolete hunks from their existing logical owners.
+4. Update `BASE` only after the reviewed replay succeeds, regenerate every changed
+   mailbox, replay the checked-in queue again from a fresh checkout, and run all
+   refresh gates.
+
+Between explicit refreshes, `BASE` remains pinned to that reviewed stable release;
+there is no scheduled upstream query, replay, or release. Manual
 `workflow_dispatch` publication is not an upstream refresh and must build from the
-commit already recorded in `BASE`.
+stable commit already recorded in `BASE`.
 
 Repository branding, GitHub Actions, patch metadata, and release orchestration
 must not be included in product mailboxes.
@@ -92,7 +103,9 @@ format. Use the UTC release date and increment `N` for another release that day.
 Do not reuse one CalVer for different source. Platform assets share
 `herdr-win_v<CalVer>_<os>_<arch>.<ext>` for portable packages and append
 `_setup.exe` for Windows setup; upstream package versions and source/control
-hashes remain separate provenance.
+hashes remain separate provenance. Preserve these machine-consumed names; show the
+stable Herdr version beside the CalVer in the GitHub release title, notes, and
+installer metadata instead of changing updater-facing filenames.
 
 Publication also fails closed on replay conflict, source drift, missing or mutable
 assets, digest mismatch, wrong installer pin, or feed content that was not fetched

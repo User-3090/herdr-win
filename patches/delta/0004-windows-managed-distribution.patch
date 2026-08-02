@@ -1,13 +1,16 @@
-From 7273f16a734043ca8c8e4fbd4ee8937903afce6e Mon Sep 17 00:00:00 2001
+From e9d20d66b0a0f680ad8dc55e335aeffdfe2af048 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
 
 Refs ogulcancelik/herdr#1947
 ---
+ .gitattributes                                |    1 +
+ Cargo.lock                                    |   12 +-
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
+ packaging/windows/conpty.json                 |   48 +
  packaging/windows/herdr-installer-helper.ps1  | 1984 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
@@ -17,17 +20,22 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
  packaging/windows/installer/project.nsi       |  482 ++++
- scripts/package_windows_conpty.py             |   24 +-
+ ...crosoft.Windows.Console.ConPTY-LICENSE.txt |  Bin 0 -> 1116 bytes
+ ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
+ scripts/package_windows_conpty.py             |  263 +++
  scripts/package_windows_installer.ps1         |  455 ++++
  scripts/preview.py                            |   80 +-
- scripts/test_package_windows_conpty.py        |   22 +-
- scripts/test_preview.py                       |  170 +-
+ scripts/test_package_windows_conpty.py        |  170 ++
+ scripts/test_preview.py                       |  195 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
- scripts/test_vendor_portable_pty.py           |    4 +-
+ scripts/test_vendor_portable_pty.py           |   17 +-
  scripts/test_windows_installer.py             |  557 +++++
- .../windows_install_conpty_package_test.ps1   |  144 +-
+ .../windows_conpty_enhanced_input_probe.ps1   |  418 ++++
+ .../windows_install_conpty_package_test.ps1   |   26 +
  scripts/windows_installer_fault_test.ps1      |  347 +++
  scripts/windows_installer_test.ps1            |  614 +++++
+ scripts/windows_smoke_conpty_path.ps1         |   36 +-
+ skills/herdr/SKILL.md                         |  195 ++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -47,8 +55,16 @@ Refs ogulcancelik/herdr#1947
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  526 ++++-
- 43 files changed, 7750 insertions(+), 292 deletions(-)
+ src/update.rs                                 |  518 ++++-
+ .../0001-control-conpty-loading.patch         |  357 +++
+ .../0001-force-system-conpty.patch            |   37 -
+ vendor/portable-pty.patches.md                |   37 +-
+ vendor/portable-pty/Cargo.toml                |    5 +-
+ vendor/portable-pty/Cargo.toml.orig           |    3 +-
+ vendor/portable-pty/src/win/psuedocon.rs      |  272 ++-
+ 57 files changed, 9530 insertions(+), 232 deletions(-)
+ create mode 100644 .gitattributes
+ create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -58,18 +74,64 @@ Refs ogulcancelik/herdr#1947
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-328x628.bmp
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-source.png
  create mode 100644 packaging/windows/installer/project.nsi
+ create mode 100644 packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-LICENSE.txt
+ create mode 100644 packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-NOTICE.md
+ create mode 100644 scripts/package_windows_conpty.py
  create mode 100644 scripts/package_windows_installer.ps1
+ create mode 100644 scripts/test_package_windows_conpty.py
  create mode 100644 scripts/test_windows_installer.py
+ create mode 100644 scripts/windows_conpty_enhanced_input_probe.ps1
+ create mode 100644 scripts/windows_install_conpty_package_test.ps1
  create mode 100644 scripts/windows_installer_fault_test.ps1
  create mode 100644 scripts/windows_installer_test.ps1
+ create mode 100644 skills/herdr/SKILL.md
  create mode 100644 src/bin/herdr-launcher.rs
  create mode 100644 src/distribution.rs
  create mode 100644 src/managed_install.rs
  create mode 100644 src/platform/windows/launcher.rs
  create mode 100644 src/platform/windows/managed_install.rs
+ create mode 100644 vendor/patches/portable-pty/0001-control-conpty-loading.patch
+ delete mode 100644 vendor/patches/portable-pty/0001-force-system-conpty.patch
 
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000000000000000000000000000000000000..64835a8d7de291038ec6add5fd4ce129ee59d486
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1 @@
++packaging/windows/licenses/* binary
+diff --git a/Cargo.lock b/Cargo.lock
+index 9268d0b3c9ddf89ca3ba3a929b0209e77e14f59f..2f8c68265e3063516e33f4f5077530b7453b74c5 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1127,7 +1127,7 @@ dependencies = [
+  "log",
+  "nix 0.28.0",
+  "serial2",
+- "shared_library",
++ "sha2",
+  "shell-words",
+  "winapi",
+  "winreg",
+@@ -1518,16 +1518,6 @@ dependencies = [
+  "lazy_static",
+ ]
+ 
+-[[package]]
+-name = "shared_library"
+-version = "0.1.9"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5a9e7e0f2bfae24d8a5b5a66c5b257a83c7412304311512a0c054cd5e619da11"
+-dependencies = [
+- "lazy_static",
+- "libc",
+-]
+-
+ [[package]]
+ name = "shell-words"
+ version = "1.1.1"
 diff --git a/Cargo.toml b/Cargo.toml
-index cd61cbe17e31e7278a72b7489d93675b3290ef7d..56b5ecedc2958dbc971b631af3399fe32f1a01ac 100644
+index e6fa57c1e94d72c962294731f9a793da41f40828..83e6547edcb270f16bc2a0e541ff039a00bd4723 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -3,6 +3,7 @@ name = "herdr"
@@ -78,9 +140,9 @@ index cd61cbe17e31e7278a72b7489d93675b3290ef7d..56b5ecedc2958dbc971b631af3399fe3
  build = "build.rs"
 +default-run = "herdr"
  description = "terminal workspace manager for AI coding agents"
- license = "Apache-2.0"
+ license = "AGPL-3.0-or-later"
  repository = "https://github.com/ogulcancelik/herdr"
-@@ -19,6 +20,10 @@ include = [
+@@ -18,6 +19,10 @@ include = [
      "Cargo.toml",
  ]
  
@@ -91,7 +153,7 @@ index cd61cbe17e31e7278a72b7489d93675b3290ef7d..56b5ecedc2958dbc971b631af3399fe3
  [dependencies]
  base64 = "0.22.1"
  bincode = { version = "2", features = ["serde"] }
-@@ -52,6 +57,7 @@ widestring = "1.2.1"
+@@ -51,6 +56,7 @@ widestring = "1.2.1"
  windows-sys = { version = "0.61.2", features = [
      "Wdk_System_Threading",
      "Win32_Foundation",
@@ -99,14 +161,14 @@ index cd61cbe17e31e7278a72b7489d93675b3290ef7d..56b5ecedc2958dbc971b631af3399fe3
      "Win32_System_DataExchange",
      "Win32_System_Diagnostics_Debug",
      "Win32_System_Diagnostics_ToolHelp",
-@@ -61,6 +67,7 @@ windows-sys = { version = "0.61.2", features = [
+@@ -60,6 +66,7 @@ windows-sys = { version = "0.61.2", features = [
      "Win32_System_Memory",
      "Win32_System_Ole",
      "Win32_System_Pipes",
 +    "Win32_Security",
      "Win32_System_Threading",
-     "Win32_UI_Input_Ime",
-     "Win32_UI_Input_KeyboardAndMouse",
+     "Win32_UI_Shell",
+     "Win32_UI_WindowsAndMessaging",
 diff --git a/build.rs b/build.rs
 index 66ed262012bbc648b98adf9e5489a8c85dda6353..b09fd7c814f71b72a49ba1ce6b949ea492373c6f 100644
 --- a/build.rs
@@ -120,33 +182,86 @@ index 66ed262012bbc648b98adf9e5489a8c85dda6353..b09fd7c814f71b72a49ba1ce6b949ea4
      println!("cargo:rerun-if-env-changed=HERDR_BUILD_COMMIT");
      println!("cargo:rerun-if-env-changed=ZIG");
 diff --git a/justfile b/justfile
-index a3726db05cd7efeb29091aaf68339e68f50c3b62..dfb681f74799c988f744d758aadeedc4039287dd 100644
+index ae1dc7faaf2650d41fbeb625c4b80a44048a3b01..c32eb3046467d3455169be1bb0cf2304296b291e 100644
 --- a/justfile
 +++ b/justfile
 @@ -3,7 +3,7 @@
  # Run tests
  test:
      cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
--    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
-+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_installer
+-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
++    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_installer
      just integration-assets-test
      just plugin-marketplace-test
  
-@@ -33,12 +33,12 @@ ci filter='all()': lint
- [unix]
+@@ -25,11 +25,11 @@ ci filter='all()': lint
+ # Run Windows target lint from Unix/macOS to catch cfg(windows) compile and clippy failures before CI
  windows-lint:
      rustup target add x86_64-pc-windows-msvc
 -    LIBGHOSTTY_VT_SIMD=false cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
 +    LIBGHOSTTY_VT_SIMD=false cargo clippy --bins --locked --target x86_64-pc-windows-msvc -- -D warnings
  
  # Check formatting + run unit tests + Windows target lint + maintenance script tests
- [unix]
  check: ci windows-lint
--    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
-+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_installer
+-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
++    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_package_windows_conpty scripts.test_preview scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_installer
      @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
  
- [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
+ # Install repo-local git hooks
+diff --git a/packaging/windows/conpty.json b/packaging/windows/conpty.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bb7747373f66b92060b19357602abebb4434bb6
+--- /dev/null
++++ b/packaging/windows/conpty.json
+@@ -0,0 +1,48 @@
++{
++  "schema_version": 1,
++  "package": {
++    "id": "Microsoft.Windows.Console.ConPTY",
++    "version": "1.24.260710001",
++    "release_tag": "v1.24.11911.0",
++    "url": "https://github.com/microsoft/terminal/releases/download/v1.24.11911.0/Microsoft.Windows.Console.ConPTY.1.24.260710001.nupkg",
++    "sha256": "9382ad7becb7e4d84e300578d8e4f4df28f43d979d9055d978c42913c47e0e9d",
++    "license": "MIT"
++  },
++  "bundles": {
++    "x86_64": {
++      "target_triple": "x86_64-pc-windows-msvc",
++      "files": [
++        {
++          "source": "runtimes/win-x64/native/conpty.dll",
++          "destination": "conpty/conpty.dll",
++          "sha256": "39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8",
++          "pe_machine": "0x8664"
++        },
++        {
++          "source": "build/native/runtimes/x64/OpenConsole.exe",
++          "destination": "conpty/x64/OpenConsole.exe",
++          "sha256": "b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160",
++          "pe_machine": "0x8664"
++        },
++        {
++          "source": "build/native/runtimes/arm64/OpenConsole.exe",
++          "destination": "conpty/arm64/OpenConsole.exe",
++          "sha256": "ed7622fd0d3bedc9ab9f122f5e58edf0def9e7999224f52dd395ba9f54edbe09",
++          "pe_machine": "0xaa64"
++        }
++      ]
++    }
++  },
++  "notices": [
++    {
++      "source": "packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-LICENSE.txt",
++      "destination": "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-LICENSE.txt",
++      "sha256": "5d177f23ecfeb0ea8e050b6a5a16355e1ae9a0b286436ca8f83ed08b3795be6b"
++    },
++    {
++      "source": "packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-NOTICE.md",
++      "destination": "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-NOTICE.md",
++      "sha256": "e7fbaadee6ab20c28b87730a510ee5f5815d8fb4bd88d1d54d282dc2a74c0726"
++    }
++  ]
++}
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
 index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94e8db5ecb
@@ -54080,52 +54195,345 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +  !endif
 +  SetErrorLevel 0
 +SectionEnd
+diff --git a/packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-LICENSE.txt b/packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-LICENSE.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..017b9885a46ad4c7f4367ad2949fb66fb56f977f
+GIT binary patch
+literal 1116
+zcmZ8fOK+nv5WXYvA4Wa373$vi=77^!%S*;-Hb(+Z@QUEbHjVo4cZQ^`b|oa_@yz$~
+zr1tXR%xMVl*gZjEI%mB-21u>DSl0$)rx#%32uqU(r@eOXx_^nII4XpK+;n>KnvS)0
+zXX8DNfblSBrw<=+a_tm!pTN;+4fY7#(7KaOAXsRp54dROaljrzYbG<DpoI=K#SylK
+z0dYvqwRIZ1duYA4ooNvedfUxsJ%vRh9L=abJcdETLvx>acv@I`-Hvf&CWO=Qc?VY$
+z20I5b6rAbEXaZ*H#<?dIpVy-~n>z)K-%^Mp6hC`3K~fVq+uj`MuNP;R`7jzkB+whe
+zKFk3-Jr$Rz5_0mxI`Dc#VF+PR`eOH6-_k@GVLqtf9+Riab+G4uy%--y$JtFtiosw@
+zZ!xxo^N;QVRY?5Nj-$PjyUtF%A<O<JJ)FYJ_F&)j;^(#wlMN_$34M8nMaS)N?^k|k
+zaW4+~o*FV^##s8cgcj$654ZrP9Rc@gq5R+KvPx>hp{dqt$0P^QKrO2`k?{<kS%c^2
+z1a?Ags;vU-kgQaDsMf&BJ^T`7mH_`<OWrh4$v6^4oePddQKtDe6Xh$caIma!TLtbc
+zqN)mr@s1@p4z8i#GTk6FTZvq#eG*4&p-MtsR}vW1Oe&FXb0(qQ%DQSe3dj(*6y;hX
+z4KH}9UXT`Rz~Ary&4%SUam5kaq5(+~A+74Y6t5cvn<~#Z7FQg#u~p7*T<9y!nJ5y-
+zSixRNpM(lw&>r>O1j25^sYZ+pzf_5;BqwQADv8GgjY{=3yAushfJxC%CTm$0=#etT
+p5yVFn94z?_hVouQ`g#^@q0qMI`%?{MoaG3HZ&cn~es<%l{sjx;U`YS~
+
+literal 0
+HcmV?d00001
+
+diff --git a/packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-NOTICE.md b/packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-NOTICE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..efe962bc0d0c60f8a8f024c648f4d5b0ec9c321d
+GIT binary patch
+literal 23176
+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
+
+literal 0
+HcmV?d00001
+
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
-index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b04df1106 100644
---- a/scripts/package_windows_conpty.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b04df1106
+--- /dev/null
 +++ b/scripts/package_windows_conpty.py
-@@ -16,7 +16,10 @@ from typing import Any
- PROJECT_ROOT = Path(__file__).resolve().parent.parent
- DEFAULT_METADATA = PROJECT_ROOT / "packaging" / "windows" / "conpty.json"
- MARKER_PATH = PurePosixPath("conpty/herdr-conpty.json")
+@@ -0,0 +1,263 @@
++#!/usr/bin/env python3
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import shutil
++import struct
++import tempfile
++import urllib.request
++import xml.etree.ElementTree as ET
++import zipfile
++from pathlib import Path, PurePosixPath
++from typing import Any
++
++PROJECT_ROOT = Path(__file__).resolve().parent.parent
++DEFAULT_METADATA = PROJECT_ROOT / "packaging" / "windows" / "conpty.json"
++MARKER_PATH = PurePosixPath("conpty/herdr-conpty.json")
 +PRODUCT_LICENSE_SOURCE = PROJECT_ROOT / "LICENSE"
 +PRODUCT_LICENSE_PATH = PurePosixPath("LICENSE.txt")
- DOWNLOAD_TIMEOUT_SECONDS = 60
++DOWNLOAD_TIMEOUT_SECONDS = 60
 +ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
- 
- 
- def sha256_bytes(data: bytes) -> str:
-@@ -125,6 +128,7 @@ def stage_bundle(
-         staging = Path(temporary) / "bundle"
-         staging.mkdir()
-         shutil.copy2(herdr_exe, staging / "herdr.exe")
++
++
++def sha256_bytes(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as source:
++        for chunk in iter(lambda: source.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def load_metadata(path: Path) -> dict[str, Any]:
++    data = json.loads(path.read_text(encoding="utf-8"))
++    if data.get("schema_version") != 1:
++        raise ValueError("unsupported ConPTY metadata schema")
++    return data
++
++
++def pe_machine(data: bytes) -> int:
++    if len(data) < 0x40 or data[:2] != b"MZ":
++        raise ValueError("file is not a PE image")
++    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
++    if pe_offset + 6 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
++        raise ValueError("file has an invalid PE header")
++    return struct.unpack_from("<H", data, pe_offset + 4)[0]
++
++
++def validate_nuspec(archive: zipfile.ZipFile, package: dict[str, Any]) -> None:
++    nuspec_name = f"{package['id']}.nuspec"
++    try:
++        root = ET.fromstring(archive.read(nuspec_name).decode("utf-8-sig"))
++    except KeyError as error:
++        raise ValueError(f"package is missing {nuspec_name}") from error
++    namespace = {"n": "http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd"}
++    metadata = root.find("n:metadata", namespace)
++    if metadata is None:
++        raise ValueError("package NuSpec is missing metadata")
++    expected = {
++        "id": package["id"],
++        "version": package["version"],
++        "license": package["license"],
++    }
++    for field, expected_value in expected.items():
++        element = metadata.find(f"n:{field}", namespace)
++        actual = element.text.strip() if element is not None and element.text else None
++        if actual != expected_value:
++            raise ValueError(
++                f"package NuSpec {field} mismatch: expected {expected_value!r}, got {actual!r}"
++            )
++
++
++def acquire_package(package: dict[str, Any], package_path: Path) -> None:
++    package_path.parent.mkdir(parents=True, exist_ok=True)
++    if not package_path.exists():
++        with urllib.request.urlopen(
++            package["url"], timeout=DOWNLOAD_TIMEOUT_SECONDS
++        ) as response, package_path.open("wb") as output:
++            shutil.copyfileobj(response, output)
++    actual = sha256_file(package_path)
++    if actual != package["sha256"]:
++        raise ValueError(
++            f"ConPTY package hash mismatch: expected {package['sha256']}, got {actual}"
++        )
++
++
++def marker_data(metadata: dict[str, Any], architecture: str) -> bytes:
++    bundle = metadata["bundles"][architecture]
++    marker = {
++        "schema_version": 1,
++        "package": metadata["package"]["id"],
++        "version": metadata["package"]["version"],
++        "architecture": architecture,
++        "files": {
++            item["destination"]: item["sha256"] for item in bundle["files"]
++        },
++    }
++    return (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode()
++
++
++def stage_bundle(
++    metadata_path: Path,
++    architecture: str,
++    package_path: Path,
++    herdr_exe: Path,
++    output_dir: Path,
++) -> None:
++    metadata = load_metadata(metadata_path)
++    if architecture not in metadata["bundles"]:
++        raise ValueError(f"unsupported Windows architecture: {architecture}")
++    if output_dir.exists():
++        raise ValueError(f"output directory already exists: {output_dir}")
++    if not herdr_exe.is_file():
++        raise ValueError(f"Herdr executable does not exist: {herdr_exe}")
++
++    acquire_package(metadata["package"], package_path)
++    bundle = metadata["bundles"][architecture]
++    metadata_root = metadata_path.resolve().parent
++
++    with zipfile.ZipFile(package_path) as archive, tempfile.TemporaryDirectory(
++        prefix="herdr-conpty-stage-", dir=output_dir.parent
++    ) as temporary:
++        validate_nuspec(archive, metadata["package"])
++        staging = Path(temporary) / "bundle"
++        staging.mkdir()
++        shutil.copy2(herdr_exe, staging / "herdr.exe")
 +        shutil.copy2(PRODUCT_LICENSE_SOURCE, staging / PRODUCT_LICENSE_PATH)
- 
-         for item in bundle["files"]:
-             try:
-@@ -166,7 +170,7 @@ def stage_bundle(
- 
- 
- def expected_stage_files(metadata: dict[str, Any], architecture: str) -> set[str]:
--    files = {"herdr.exe", MARKER_PATH.as_posix()}
++
++        for item in bundle["files"]:
++            try:
++                payload = archive.read(item["source"])
++            except KeyError as error:
++                raise ValueError(f"package is missing {item['source']}") from error
++            actual_hash = sha256_bytes(payload)
++            if actual_hash != item["sha256"]:
++                raise ValueError(
++                    f"hash mismatch for {item['source']}: expected {item['sha256']}, got {actual_hash}"
++                )
++            actual_machine = pe_machine(payload)
++            expected_machine = int(item["pe_machine"], 16)
++            if actual_machine != expected_machine:
++                raise ValueError(
++                    f"PE machine mismatch for {item['source']}: "
++                    f"expected {item['pe_machine']}, got 0x{actual_machine:04x}"
++                )
++            destination = staging / PurePosixPath(item["destination"])
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            destination.write_bytes(payload)
++
++        marker = staging / MARKER_PATH
++        marker.parent.mkdir(parents=True, exist_ok=True)
++        marker.write_bytes(marker_data(metadata, architecture))
++
++        for notice in metadata["notices"]:
++            source = (metadata_root.parent.parent / notice["source"]).resolve()
++            actual_hash = sha256_file(source)
++            if actual_hash != notice["sha256"]:
++                raise ValueError(
++                    f"notice hash mismatch for {source}: expected {notice['sha256']}, got {actual_hash}"
++                )
++            destination = staging / PurePosixPath(notice["destination"])
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(source, destination)
++
++        staging.rename(output_dir)
++
++
++def expected_stage_files(metadata: dict[str, Any], architecture: str) -> set[str]:
 +    files = {"herdr.exe", MARKER_PATH.as_posix(), PRODUCT_LICENSE_PATH.as_posix()}
-     files.update(item["destination"] for item in metadata["bundles"][architecture]["files"])
-     files.update(item["destination"] for item in metadata["notices"])
-     return files
-@@ -186,6 +190,8 @@ def validate_stage(metadata_path: Path, architecture: str, stage_dir: Path) -> N
-         )
-     if (stage_dir / MARKER_PATH).read_bytes() != marker_data(metadata, architecture):
-         raise ValueError("bundle marker does not match pinned ConPTY metadata")
++    files.update(item["destination"] for item in metadata["bundles"][architecture]["files"])
++    files.update(item["destination"] for item in metadata["notices"])
++    return files
++
++
++def validate_stage(metadata_path: Path, architecture: str, stage_dir: Path) -> None:
++    metadata = load_metadata(metadata_path)
++    actual = {
++        path.relative_to(stage_dir).as_posix()
++        for path in stage_dir.rglob("*")
++        if path.is_file()
++    }
++    expected = expected_stage_files(metadata, architecture)
++    if actual != expected:
++        raise ValueError(
++            f"bundle layout mismatch; missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
++        )
++    if (stage_dir / MARKER_PATH).read_bytes() != marker_data(metadata, architecture):
++        raise ValueError("bundle marker does not match pinned ConPTY metadata")
 +    if (stage_dir / PRODUCT_LICENSE_PATH).read_bytes() != PRODUCT_LICENSE_SOURCE.read_bytes():
 +        raise ValueError("staged LICENSE.txt does not match the product license")
-     for item in metadata["bundles"][architecture]["files"]:
-         path = stage_dir / PurePosixPath(item["destination"])
-         actual_hash = sha256_file(path)
-@@ -206,7 +212,13 @@ def archive_bundle(
-     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-         for path in sorted(stage_dir.rglob("*")):
-             if path.is_file():
--                archive.write(path, path.relative_to(stage_dir).as_posix())
++    for item in metadata["bundles"][architecture]["files"]:
++        path = stage_dir / PurePosixPath(item["destination"])
++        actual_hash = sha256_file(path)
++        if actual_hash != item["sha256"]:
++            raise ValueError(f"staged file hash mismatch for {path}")
++    for notice in metadata["notices"]:
++        path = stage_dir / PurePosixPath(notice["destination"])
++        actual_hash = sha256_file(path)
++        if actual_hash != notice["sha256"]:
++            raise ValueError(f"staged notice hash mismatch for {path}")
++
++
++def archive_bundle(
++    metadata_path: Path, architecture: str, stage_dir: Path, output_path: Path
++) -> None:
++    validate_stage(metadata_path, architecture, stage_dir)
++    output_path.parent.mkdir(parents=True, exist_ok=True)
++    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
++        for path in sorted(stage_dir.rglob("*")):
++            if path.is_file():
 +                relative = path.relative_to(stage_dir).as_posix()
 +                info = zipfile.ZipInfo(relative, date_time=ZIP_TIMESTAMP)
 +                info.compress_type = zipfile.ZIP_DEFLATED
@@ -54133,32 +54541,48 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b
 +                mode = 0o100755 if path.suffix.lower() == ".exe" else 0o100644
 +                info.external_attr = mode << 16
 +                archive.writestr(info, path.read_bytes(), compresslevel=9)
- 
- 
- def parse_args() -> argparse.Namespace:
-@@ -224,6 +236,10 @@ def parse_args() -> argparse.Namespace:
-     archive.add_argument("--architecture", choices=("x86_64",), default="x86_64")
-     archive.add_argument("--stage-dir", type=Path, required=True)
-     archive.add_argument("--output", type=Path, required=True)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Package Herdr with Microsoft's pinned ConPTY runtime")
++    parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
++    subparsers = parser.add_subparsers(dest="command", required=True)
++
++    stage = subparsers.add_parser("stage")
++    stage.add_argument("--architecture", choices=("x86_64",), default="x86_64")
++    stage.add_argument("--package", type=Path, required=True)
++    stage.add_argument("--herdr-exe", type=Path, required=True)
++    stage.add_argument("--output-dir", type=Path, required=True)
++
++    archive = subparsers.add_parser("archive")
++    archive.add_argument("--architecture", choices=("x86_64",), default="x86_64")
++    archive.add_argument("--stage-dir", type=Path, required=True)
++    archive.add_argument("--output", type=Path, required=True)
 +
 +    validate = subparsers.add_parser("validate")
 +    validate.add_argument("--architecture", choices=("x86_64",), default="x86_64")
 +    validate.add_argument("--stage-dir", type=Path, required=True)
-     return parser.parse_args()
- 
- 
-@@ -237,8 +253,10 @@ def main() -> None:
-             args.herdr_exe,
-             args.output_dir,
-         )
--    else:
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    if args.command == "stage":
++        stage_bundle(
++            args.metadata,
++            args.architecture,
++            args.package,
++            args.herdr_exe,
++            args.output_dir,
++        )
 +    elif args.command == "archive":
-         archive_bundle(args.metadata, args.architecture, args.stage_dir, args.output)
++        archive_bundle(args.metadata, args.architecture, args.stage_dir, args.output)
 +    else:
 +        validate_stage(args.metadata, args.architecture, args.stage_dir)
- 
- 
- if __name__ == "__main__":
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
 index 0000000000000000000000000000000000000000..d3d01ee9850ee8d7db4b9ed2fbd42a6b64050a9a
@@ -54621,7 +55045,7 @@ index 0000000000000000000000000000000000000000..d3d01ee9850ee8d7db4b9ed2fbd42a6b
 +
 +Write-Host "Created $ProductName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
-index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a94302868db33846 100644
+index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a94302868db33846 100644
 --- a/scripts/preview.py
 +++ b/scripts/preview.py
 @@ -5,6 +5,7 @@ import argparse
@@ -54640,7 +55064,8 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
  )
  EXPECTED_ASSET_NAMES = {
      **{target: f"herdr-{target}" for target in ASSET_TARGETS},
-     "windows-x86_64": "herdr-windows-x86_64.zip",
+-    "windows-x86_64": "herdr-windows-x86_64.exe",
++    "windows-x86_64": "herdr-windows-x86_64.zip",
 +    "windows-x86_64-installer": "herdr-windows-x86_64-installer.exe",
  }
 +HERDR_WIN_RELEASE_VERSION_RE = re.compile(
@@ -54686,7 +55111,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
          for target in ASSET_TARGETS
      }
  
-@@ -181,17 +212,21 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
+@@ -181,13 +212,21 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
  
  
  def asset_objects(urls: dict[str, str], shas: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -54702,20 +55127,17 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
          sha = shas.get(target)
 -        if sha:
 -            entry["sha256"] = sha
--        if target.startswith("windows-"):
--            if not sha or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
--                raise ValueError(f"{target} requires a SHA-256 digest")
 +        if not sha:
 +            continue
 +        entry = {"url": urls[target], "sha256": sha}
 +        if target == "windows-x86_64":
-             entry["format"] = "zip"
++            entry["format"] = "zip"
 +        elif target == "windows-x86_64-installer":
 +            entry["format"] = "nsis"
          assets[target] = entry
      return assets
  
-@@ -208,13 +243,16 @@ def build_manifest(
+@@ -204,13 +243,16 @@ def build_manifest(
      notes: str,
      shas: dict[str, str],
      retain: int,
@@ -54736,7 +55158,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
          "base_version": normalize_version(base_version),
          "commit": commit,
          "built_at": built_at,
-@@ -222,6 +260,9 @@ def build_manifest(
+@@ -218,6 +260,9 @@ def build_manifest(
          "tag": tag,
          "assets": assets,
      }
@@ -54746,7 +55168,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
      ordered_builds = {
          key: builds[key]
          for key in sorted(
-@@ -242,6 +283,8 @@ def build_manifest(
+@@ -238,6 +283,8 @@ def build_manifest(
          "assets": assets,
          "builds": ordered_builds,
      }
@@ -54755,7 +55177,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
      return json.dumps(manifest, indent=2) + "\n"
  
  
-@@ -267,6 +310,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
+@@ -263,6 +310,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
          notes=notes,
          shas=shas,
          retain=args.retain,
@@ -54763,7 +55185,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
      )
      Path(args.output).write_text(content, encoding="utf-8")
      return 0
-@@ -289,6 +333,11 @@ def cmd_range_base(args: argparse.Namespace) -> int:
+@@ -285,6 +333,11 @@ def cmd_range_base(args: argparse.Namespace) -> int:
      return 0
  
  
@@ -54775,7 +55197,7 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
  def main() -> int:
      parser = argparse.ArgumentParser(description="Preview channel release helpers")
      sub = parser.add_subparsers(required=True)
-@@ -315,8 +364,13 @@ def main() -> int:
+@@ -311,8 +364,13 @@ def main() -> int:
      manifest.add_argument("--notes", required=True)
      manifest.add_argument("--sha-file")
      manifest.add_argument("--retain", type=int, default=30)
@@ -54790,48 +55212,127 @@ index 4c9f01679533ba9c698f59cd0acd33ba207f3336..bd1a66c42703a1d4001ebe01a9430286
      current.add_argument("--manifest", default="website/preview.json")
      current.set_defaults(func=cmd_current_commit)
 diff --git a/scripts/test_package_windows_conpty.py b/scripts/test_package_windows_conpty.py
-index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..bf6be37eef8b0918a7513ea5a56cf8d167428428 100644
---- a/scripts/test_package_windows_conpty.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dee7737199f7b2fc6117163ae5562af8e925dac
+--- /dev/null
 +++ b/scripts/test_package_windows_conpty.py
-@@ -16,6 +16,8 @@ from scripts import package_windows_conpty as package
- class WindowsConptyPackageTests(unittest.TestCase):
-     def test_pinned_metadata_and_notices_are_consistent(self) -> None:
-         metadata = package.load_metadata(package.DEFAULT_METADATA)
+@@ -0,0 +1,170 @@
++from __future__ import annotations
++
++import hashlib
++import io
++import json
++import struct
++import tempfile
++import unittest
++import zipfile
++from pathlib import Path
++from unittest import mock
++
++from scripts import package_windows_conpty as package
++
++
++class WindowsConptyPackageTests(unittest.TestCase):
++    def test_pinned_metadata_and_notices_are_consistent(self) -> None:
++        metadata = package.load_metadata(package.DEFAULT_METADATA)
 +        self.assertTrue(package.PRODUCT_LICENSE_SOURCE.is_file())
 +        self.assertEqual(package.PRODUCT_LICENSE_PATH.as_posix(), "LICENSE.txt")
-         self.assertEqual(metadata["package"]["id"], "Microsoft.Windows.Console.ConPTY")
-         self.assertEqual(metadata["package"]["version"], "1.24.260710001")
-         self.assertEqual(
-@@ -29,14 +31,8 @@ class WindowsConptyPackageTests(unittest.TestCase):
-         loader = (
-             package.PROJECT_ROOT / "vendor/portable-pty/src/win/psuedocon.rs"
-         ).read_text(encoding="utf-8")
--        installer = (package.PROJECT_ROOT / "website/install.ps1").read_text(
--            encoding="utf-8"
--        )
-         for item in metadata["bundles"]["x86_64"]["files"]:
-             self.assertIn(item["sha256"], loader)
--            self.assertNotIn(item["sha256"], installer)
--        self.assertIn('Get-Content -LiteralPath $markerPath -Raw', installer)
--        self.assertIn('$filesProperty.Value.PSObject.Properties[$relative]', installer)
-         for notice in metadata["notices"]:
-             source = package.PROJECT_ROOT / notice["source"]
-             self.assertEqual(package.sha256_file(source), notice["sha256"])
-@@ -115,6 +111,10 @@ class WindowsConptyPackageTests(unittest.TestCase):
-             stage = root / "stage"
-             package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
-             package.validate_stage(metadata_path, "x86_64", stage)
++        self.assertEqual(metadata["package"]["id"], "Microsoft.Windows.Console.ConPTY")
++        self.assertEqual(metadata["package"]["version"], "1.24.260710001")
++        self.assertEqual(
++            {item["destination"] for item in metadata["bundles"]["x86_64"]["files"]},
++            {
++                "conpty/conpty.dll",
++                "conpty/x64/OpenConsole.exe",
++                "conpty/arm64/OpenConsole.exe",
++            },
++        )
++        loader = (
++            package.PROJECT_ROOT / "vendor/portable-pty/src/win/psuedocon.rs"
++        ).read_text(encoding="utf-8")
++        for item in metadata["bundles"]["x86_64"]["files"]:
++            self.assertIn(item["sha256"], loader)
++        for notice in metadata["notices"]:
++            source = package.PROJECT_ROOT / notice["source"]
++            self.assertEqual(package.sha256_file(source), notice["sha256"])
++
++    def test_package_download_has_a_finite_timeout(self) -> None:
++        payload = b"package"
++        with tempfile.TemporaryDirectory() as temporary:
++            destination = Path(temporary) / "conpty.nupkg"
++            metadata = {
++                "url": "https://example.invalid/conpty.nupkg",
++                "sha256": hashlib.sha256(payload).hexdigest(),
++            }
++            with mock.patch.object(
++                package.urllib.request, "urlopen", return_value=io.BytesIO(payload)
++            ) as urlopen:
++                package.acquire_package(metadata, destination)
++
++            urlopen.assert_called_once_with(
++                metadata["url"], timeout=package.DOWNLOAD_TIMEOUT_SECONDS
++            )
++
++    def test_stage_and_archive_validate_exact_package(self) -> None:
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            dll = self._pe(0x8664, b"dll")
++            x64_host = self._pe(0x8664, b"x64")
++            arm64_host = self._pe(0xAA64, b"arm64")
++            files = [
++                self._file("runtimes/win-x64/native/conpty.dll", "conpty/conpty.dll", dll, "0x8664"),
++                self._file(
++                    "build/native/runtimes/x64/OpenConsole.exe",
++                    "conpty/x64/OpenConsole.exe",
++                    x64_host,
++                    "0x8664",
++                ),
++                self._file(
++                    "build/native/runtimes/arm64/OpenConsole.exe",
++                    "conpty/arm64/OpenConsole.exe",
++                    arm64_host,
++                    "0xaa64",
++                ),
++            ]
++            nupkg = root / "conpty.nupkg"
++            self._write_package(nupkg, files, {item["source"]: data for item, data in zip(files, (dll, x64_host, arm64_host))})
++            metadata_path = root / "conpty.json"
++            metadata_path.write_text(
++                json.dumps(
++                    {
++                        "schema_version": 1,
++                        "package": {
++                            "id": "Microsoft.Windows.Console.ConPTY",
++                            "version": "1.24.260710001",
++                            "url": nupkg.as_uri(),
++                            "sha256": package.sha256_file(nupkg),
++                            "license": "MIT",
++                        },
++                        "bundles": {"x86_64": {"files": files}},
++                        "notices": [],
++                    }
++                ),
++                encoding="utf-8",
++            )
++            herdr = root / "input-herdr.exe"
++            herdr.write_bytes(b"herdr")
++            stage = root / "stage"
++            package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
++            package.validate_stage(metadata_path, "x86_64", stage)
 +            self.assertEqual(
 +                (stage / "LICENSE.txt").read_bytes(),
 +                package.PRODUCT_LICENSE_SOURCE.read_bytes(),
 +            )
- 
-             output = root / "herdr.zip"
-             package.archive_bundle(metadata_path, "x86_64", stage, output)
-@@ -125,6 +125,16 @@ class WindowsConptyPackageTests(unittest.TestCase):
-                         package.load_metadata(metadata_path), "x86_64"
-                     ),
-                 )
++
++            output = root / "herdr.zip"
++            package.archive_bundle(metadata_path, "x86_64", stage, output)
++            with zipfile.ZipFile(output) as archive:
++                self.assertEqual(
++                    set(archive.namelist()),
++                    package.expected_stage_files(
++                        package.load_metadata(metadata_path), "x86_64"
++                    ),
++                )
 +                self.assertTrue(
 +                    all(info.date_time == package.ZIP_TIMESTAMP for info in archive.infolist())
 +                )
@@ -54842,14 +55343,55 @@ index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..bf6be37eef8b0918a7513ea5a56cf8d1
 +            second_output = root / "herdr-second.zip"
 +            package.archive_bundle(metadata_path, "x86_64", stage, second_output)
 +            self.assertEqual(first_archive, second_output.read_bytes())
- 
-             (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
-             with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
++
++            (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
++            with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
++                package.validate_stage(metadata_path, "x86_64", stage)
++
++    @staticmethod
++    def _pe(machine: int, payload: bytes) -> bytes:
++        data = bytearray(0x80)
++        data[:2] = b"MZ"
++        struct.pack_into("<I", data, 0x3C, 0x40)
++        data[0x40:0x44] = b"PE\0\0"
++        struct.pack_into("<H", data, 0x44, machine)
++        return bytes(data) + payload
++
++    @staticmethod
++    def _file(source: str, destination: str, data: bytes, machine: str) -> dict[str, str]:
++        return {
++            "source": source,
++            "destination": destination,
++            "sha256": hashlib.sha256(data).hexdigest(),
++            "pe_machine": machine,
++        }
++
++    @staticmethod
++    def _write_package(
++        path: Path, files: list[dict[str, str]], payloads: dict[str, bytes]
++    ) -> None:
++        nuspec = """<?xml version="1.0" encoding="utf-8"?>
++<package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
++  <metadata>
++    <id>Microsoft.Windows.Console.ConPTY</id>
++    <version>1.24.260710001</version>
++    <license type="expression">MIT</license>
++  </metadata>
++</package>
++"""
++        with zipfile.ZipFile(path, "w") as archive:
++            archive.writestr("Microsoft.Windows.Console.ConPTY.nuspec", nuspec)
++            for item in files:
++                archive.writestr(item["source"], payloads[item["source"]])
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/scripts/test_preview.py b/scripts/test_preview.py
-index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0127ba847 100644
+index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b7b59612e 100644
 --- a/scripts/test_preview.py
 +++ b/scripts/test_preview.py
-@@ -32,8 +32,8 @@ class PreviewNotesTests(unittest.TestCase):
+@@ -32,28 +32,211 @@ class PreviewNotesTests(unittest.TestCase):
              content = preview.build_manifest(
                  output=output,
                  repo="ogulcancelik/herdr",
@@ -54860,12 +55402,14 @@ index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0
                  commit="abcdef1234567890",
                  built_at="2026-06-02T03:00:00Z",
                  base_version="0.6.6",
-@@ -42,26 +42,79 @@ class PreviewNotesTests(unittest.TestCase):
-                 shas={
-                     "linux-x86_64": "deadbeef",
-                     "windows-x86_64": "a" * 64,
+                 protocol=12,
+                 notes=notes,
+-                shas={"linux-x86_64": "deadbeef"},
++                shas={
++                    "linux-x86_64": "deadbeef",
++                    "windows-x86_64": "a" * 64,
 +                    "windows-x86_64-installer": "b" * 64,
-                 },
++                },
                  retain=30,
 +                release_version="2026.06.02.1",
              )
@@ -54888,15 +55432,14 @@ index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0
              )
              self.assertEqual(
                  data["assets"]["windows-x86_64"]["url"],
--                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
+-                "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.exe",
 +                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
-             )
-             self.assertEqual(
-                 data["assets"]["windows-x86_64"]["sha256"],
-                 "a" * 64,
-             )
-             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
--            self.assertIn("2026-06-02-abcdef123456", data["builds"])
++            )
++            self.assertEqual(
++                data["assets"]["windows-x86_64"]["sha256"],
++                "a" * 64,
++            )
++            self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
 +            self.assertEqual(
 +                data["assets"]["windows-x86_64-installer"]["url"],
 +                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
@@ -54912,7 +55455,8 @@ index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0
 +            self.assertEqual(
 +                data["builds"]["abcdef123456.7890abcdef12"]["release_version"],
 +                "2026.06.02.1",
-+            )
+             )
+-            self.assertIn("2026-06-02-abcdef123456", data["builds"])
 +
 +    def test_herdr_win_asset_names_require_real_calver(self):
 +        self.assertEqual(
@@ -54940,22 +55484,24 @@ index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0
 +                ValueError, "release_version"
 +            ):
 +                preview.herdr_win_asset_names(invalid)
- 
-     def test_windows_preview_asset_requires_sha256(self):
-         with tempfile.TemporaryDirectory() as tmp:
-@@ -70,7 +123,7 @@ class PreviewNotesTests(unittest.TestCase):
-                     output=Path(tmp) / "preview.json",
-                     repo="ogulcancelik/herdr",
-                     tag="preview-test",
--                    build_id="test",
++
++    def test_windows_preview_asset_requires_sha256(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
++                preview.build_manifest(
++                    output=Path(tmp) / "preview.json",
++                    repo="ogulcancelik/herdr",
++                    tag="preview-test",
 +                    build_id="abcdef123456.7890abcdef12",
-                     commit="abcdef",
-                     built_at="2026-06-02T03:00:00Z",
-                     base_version="0.6.6",
-@@ -80,6 +133,111 @@ class PreviewNotesTests(unittest.TestCase):
-                     retain=1,
-                 )
- 
++                    commit="abcdef",
++                    built_at="2026-06-02T03:00:00Z",
++                    base_version="0.6.6",
++                    protocol=12,
++                    notes="test",
++                    shas={},
++                    retain=1,
++                )
++
 +            with self.assertRaisesRegex(
 +                ValueError, "windows-x86_64-installer requires"
 +            ):
@@ -55060,10 +55606,9 @@ index 7b11d4c71b781bf38ab4762f2aeca1bf856e3fef..a904860c948fed853d8118f3e25e0cd0
 +                    },
 +                    retain=1,
 +                )
-+
+ 
      def test_hidden_subjects_include_preview_manifest_commits(self):
          self.assertTrue(preview.hidden_subject("docs: update preview manifest"))
-         self.assertTrue(preview.hidden_subject("docs: update website manifest"))
 diff --git a/scripts/test_vendor_libghostty_vt.py b/scripts/test_vendor_libghostty_vt.py
 index ad5c8d5e2f46793d46f75cbd84710b58a3447fdc..2986af8f9609e27886eb2be61f121c44710a6049 100644
 --- a/scripts/test_vendor_libghostty_vt.py
@@ -55081,7 +55626,7 @@ index ad5c8d5e2f46793d46f75cbd84710b58a3447fdc..2986af8f9609e27886eb2be61f121c44
          self.assertEqual(missing, [])
  
 diff --git a/scripts/test_vendor_portable_pty.py b/scripts/test_vendor_portable_pty.py
-index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6e2cb4462 100644
+index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6e2cb4462 100644
 --- a/scripts/test_vendor_portable_pty.py
 +++ b/scripts/test_vendor_portable_pty.py
 @@ -65,9 +65,9 @@ class VendorPortablePtyTests(unittest.TestCase):
@@ -55096,6 +55641,31 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
          ]
          self.assertEqual(missing, [])
  
+@@ -103,13 +103,22 @@ class VendorPortablePtyTests(unittest.TestCase):
+                 f"stderr:\n{result.stderr}",
+             )
+ 
+-    def test_windows_conpty_loader_does_not_probe_path_conpty_dll(self) -> None:
++    def test_windows_conpty_loader_uses_only_controlled_sources(self) -> None:
+         project_root = Path(__file__).resolve().parent.parent
+         source = project_root / "vendor" / "portable-pty" / "src" / "win" / "psuedocon.rs"
+         text = source.read_text()
+ 
+-        self.assertIn('ConPtyFuncs::open(Path::new("kernel32.dll"))', text)
++        self.assertIn("std::env::current_exe()", text)
++        self.assertIn('.join("conpty")', text)
++        self.assertIn('"x64/OpenConsole.exe"', text)
++        self.assertIn('"arm64/OpenConsole.exe"', text)
++        self.assertIn("LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR", text)
++        self.assertIn("LOAD_LIBRARY_SEARCH_SYSTEM32", text)
++        self.assertIn("GetModuleHandleW", text)
++        self.assertIn("HERDR_WINDOWS_CONPTY", text)
++        self.assertIn("Sha256::new()", text)
+         self.assertNotIn('Path::new("conpty.dll")', text)
++        self.assertNotIn("shared_library", text)
+ 
+ 
+ if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373fefc3dc99
@@ -55659,43 +56229,445 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/scripts/windows_conpty_enhanced_input_probe.ps1 b/scripts/windows_conpty_enhanced_input_probe.ps1
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbd2b40b332f87c805a36eab00ec74993126a83e
+--- /dev/null
++++ b/scripts/windows_conpty_enhanced_input_probe.ps1
+@@ -0,0 +1,418 @@
++param(
++    [Parameter(Mandatory = $true)]
++    [string] $ExePath,
++
++    [string] $Session = "conpty-input-$([guid]::NewGuid().ToString('N'))",
++
++    [string] $ExpectedConsoleHostPath = ""
++)
++
++Set-StrictMode -Version Latest
++$ErrorActionPreference = "Stop"
++
++function Invoke-Checked {
++    param([string] $Command, [string[]] $Arguments)
++    & $Command @Arguments
++    if ($LASTEXITCODE -ne 0) {
++        throw "command failed with exit code $LASTEXITCODE`: $Command $($Arguments -join ' ')"
++    }
++}
++
++function Read-Pane {
++    param([string] $PaneId)
++    $output = & $script:Exe pane read $PaneId --source recent-unwrapped --lines 200 --format text 2>&1
++    if ($LASTEXITCODE -ne 0) {
++        throw "pane read failed with exit code $LASTEXITCODE`: $($output -join "`n")"
++    }
++    return $output -join "`n"
++}
++
++function Wait-PaneText {
++    param(
++        [string] $PaneId,
++        [string] $Needle,
++        [int] $TimeoutSeconds = 10
++    )
++    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
++    do {
++        $text = Read-Pane -PaneId $PaneId
++        if ($text.Contains($Needle)) {
++            return $text
++        }
++        Start-Sleep -Milliseconds 200
++    } while ((Get-Date) -lt $deadline)
++    return $text
++}
++
++function New-ProbePane {
++    param([string] $Mode)
++    $created = & $script:Exe workspace create --cwd $PWD.Path 2>&1
++    if ($LASTEXITCODE -ne 0) {
++        throw "workspace create failed with exit code $LASTEXITCODE`: $($created -join "`n")"
++    }
++    $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
++    if ([string]::IsNullOrWhiteSpace($paneId)) {
++        throw "workspace create did not return a root pane id: $($created -join "`n")"
++    }
++
++    $command = "& '$script:ProbeExe' $Mode"
++    Invoke-Checked $script:Exe @("pane", "run", $paneId, $command)
++    $ready = "PROBE_READY_$($Mode.ToUpperInvariant())"
++    $text = Wait-PaneText -PaneId $paneId -Needle $ready
++    if (-not $text.Contains($ready)) {
++        throw "$Mode probe did not become ready: $text"
++    }
++    return $paneId
++}
++
++function Get-LatestProbeHex {
++    param([string] $PaneText)
++    $hexMatches = [regex]::Matches($PaneText, "PROBE_ALL:([0-9a-f]+)")
++    if ($hexMatches.Count -eq 0) {
++        return ""
++    }
++    return $hexMatches[$hexMatches.Count - 1].Groups[1].Value
++}
++
++function Wait-PaneHexAppend {
++    param(
++        [string] $PaneId,
++        [string] $PreviousHex,
++        [string] $ExpectedHex,
++        [int] $TimeoutSeconds = 4
++    )
++    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
++    do {
++        $paneText = Read-Pane -PaneId $PaneId
++        $latestHex = Get-LatestProbeHex -PaneText $paneText
++        if ($latestHex.StartsWith($PreviousHex)) {
++            $appendedHex = $latestHex.Substring($PreviousHex.Length)
++            if ($appendedHex -eq $ExpectedHex) {
++                return [ordered]@{ delivered = $true; pane = $paneText }
++            }
++        }
++        Start-Sleep -Milliseconds 200
++    } while ((Get-Date) -lt $deadline)
++    return [ordered]@{ delivered = $false; pane = $paneText }
++}
++
++function Send-KeyAndObserve {
++    param(
++        [string] $PaneId,
++        [string] $Key,
++        [string] $ExpectedHex
++    )
++    $before = Get-LatestProbeHex -PaneText (Read-Pane -PaneId $PaneId)
++    Invoke-Checked $script:Exe @("pane", "send-keys", $PaneId, $Key)
++    $observed = Wait-PaneHexAppend -PaneId $PaneId -PreviousHex $before -ExpectedHex $ExpectedHex
++    return [ordered]@{
++        key = $Key
++        expected_hex = $ExpectedHex
++        delivered = $observed.delivered
++        pane = $observed.pane
++    }
++}
++
++function Send-RawAndObserve {
++    param(
++        [string] $PaneId,
++        [string] $Text,
++        [string] $ExpectedHex
++    )
++    $before = Get-LatestProbeHex -PaneText (Read-Pane -PaneId $PaneId)
++    & $script:Exe pane send-text $PaneId $Text | Out-Null
++    if ($LASTEXITCODE -ne 0) {
++        throw "pane send-text failed with exit code $LASTEXITCODE"
++    }
++    $observed = Wait-PaneHexAppend -PaneId $PaneId -PreviousHex $before -ExpectedHex $ExpectedHex
++    return [ordered]@{
++        expected_hex = $ExpectedHex
++        delivered = $observed.delivered
++        pane = $observed.pane
++    }
++}
++
++$script:Exe = (Resolve-Path $ExePath).Path
++$workDir = Join-Path ([System.IO.Path]::GetTempPath()) "herdr-conpty-input-$([guid]::NewGuid().ToString('N'))"
++$probeSource = Join-Path $workDir "probe.rs"
++$script:ProbeExe = Join-Path $workDir "probe.exe"
++$oldSession = $env:HERDR_SESSION
++$oldSocket = $env:HERDR_SOCKET_PATH
++$oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
++$server = $null
++$report = [ordered]@{}
++$failed = $false
++$initialConsoleHostIds = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
++$expectedConsoleHost = if ([string]::IsNullOrWhiteSpace($ExpectedConsoleHostPath)) {
++    $null
++} else {
++    (Resolve-Path $ExpectedConsoleHostPath).Path
++}
++
++try {
++    New-Item -ItemType Directory -Force -Path $workDir | Out-Null
++@'
++use std::ffi::c_void;
++
++const STD_INPUT_HANDLE: u32 = -10i32 as u32;
++const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
++const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
++const ENABLE_LINE_INPUT: u32 = 0x0002;
++const ENABLE_ECHO_INPUT: u32 = 0x0004;
++const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
++
++type Handle = *mut c_void;
++
++#[link(name = "Kernel32")]
++extern "system" {
++    fn GetStdHandle(kind: u32) -> Handle;
++    fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
++    fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
++    fn ReadFile(
++        handle: Handle,
++        buffer: *mut c_void,
++        bytes_to_read: u32,
++        bytes_read: *mut u32,
++        overlapped: *mut c_void,
++    ) -> i32;
++    fn WriteFile(
++        handle: Handle,
++        buffer: *const c_void,
++        bytes_to_write: u32,
++        bytes_written: *mut u32,
++        overlapped: *mut c_void,
++    ) -> i32;
++}
++
++fn write_all(handle: Handle, mut bytes: &[u8]) {
++    while !bytes.is_empty() {
++        let mut written = 0;
++        let ok = unsafe {
++            WriteFile(
++                handle,
++                bytes.as_ptr().cast(),
++                bytes.len() as u32,
++                &mut written,
++                std::ptr::null_mut(),
++            )
++        };
++        if ok == 0 || written == 0 {
++            std::process::exit(3);
++        }
++        bytes = &bytes[written as usize..];
++    }
++}
++
++fn main() {
++    let mode = std::env::args().nth(1).unwrap_or_else(|| "legacy".to_string());
++    let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
++    let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
++    let mut console_mode = 0;
++    if unsafe { GetConsoleMode(input, &mut console_mode) } == 0 {
++        write_all(output, b"PROBE_ERROR_GET_MODE\r\n");
++        std::process::exit(1);
++    }
++    let raw_vt_mode = (console_mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
++        & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
++    if unsafe { SetConsoleMode(input, raw_vt_mode) } == 0 {
++        write_all(output, b"PROBE_ERROR_SET_MODE\r\n");
++        std::process::exit(2);
++    }
++
++    if mode == "kitty" {
++        write_all(output, b"\x1b[>7u\x1b[?u\x1b[cPROBE_READY_KITTY\r\n");
++    } else {
++        write_all(output, b"PROBE_READY_LEGACY\r\n");
++    }
++
++    let mut all = Vec::new();
++    let mut buffer = [0u8; 256];
++    loop {
++        let mut read = 0;
++        let ok = unsafe {
++            ReadFile(
++                input,
++                buffer.as_mut_ptr().cast(),
++                buffer.len() as u32,
++                &mut read,
++                std::ptr::null_mut(),
++            )
++        };
++        if ok == 0 || read == 0 {
++            break;
++        }
++        all.extend_from_slice(&buffer[..read as usize]);
++        let mut line = String::from("PROBE_ALL:");
++        for byte in &all {
++            use std::fmt::Write as _;
++            let _ = write!(&mut line, "{byte:02x}");
++        }
++        line.push_str("\r\n");
++        write_all(output, line.as_bytes());
++    }
++}
++'@ | Set-Content -NoNewline -Encoding utf8 $probeSource
++
++    Invoke-Checked rustc @("--edition", "2021", $probeSource, "-o", $script:ProbeExe)
++
++    $env:HERDR_SESSION = $Session
++    Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
++    Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
++
++    $os = Get-CimInstance Win32_OperatingSystem
++    $report.os = [ordered]@{
++        caption = $os.Caption
++        version = $os.Version
++        build = $os.BuildNumber
++    }
++
++    Invoke-Checked $script:Exe @("--version")
++    & $script:Exe --default-config | Out-Null
++    if ($LASTEXITCODE -ne 0) {
++        throw "command failed with exit code $LASTEXITCODE`: $script:Exe --default-config"
++    }
++
++    $server = Start-Process -FilePath $script:Exe -ArgumentList "server" -PassThru -WindowStyle Hidden
++    $deadline = (Get-Date).AddSeconds(10)
++    $serverReady = $false
++    do {
++        Start-Sleep -Milliseconds 250
++        $status = & $script:Exe status server 2>&1
++        if ($LASTEXITCODE -eq 0 -and (($status -join "`n") -match "status: running")) {
++            $serverReady = $true
++            break
++        }
++    } while ((Get-Date) -lt $deadline)
++    if (-not $serverReady) {
++        throw "server did not become ready: $($status -join "`n")"
++    }
++
++    $legacyPane = New-ProbePane -Mode "legacy"
++    $report.legacy_alt_v = Send-KeyAndObserve -PaneId $legacyPane -Key "alt+v" -ExpectedHex "1b76"
++
++    $kittyPane = New-ProbePane -Mode "kitty"
++    $report.kitty_initial = Wait-PaneText -PaneId $kittyPane -Needle "1b5b3f3775"
++    $kittyInitialHex = Get-LatestProbeHex -PaneText $report.kitty_initial
++    $report.device_attributes_response = $kittyInitialHex -match "1b5b3f(?:3[0-9]|3b)+63"
++    $report.kitty_query_response = $kittyInitialHex.Contains("1b5b3f3775")
++    $report.kitty_alt_v = Send-KeyAndObserve -PaneId $kittyPane -Key "alt+v" -ExpectedHex "1b5b3131383b333a3175"
++    $report.kitty_ctrl_u = Send-KeyAndObserve -PaneId $kittyPane -Key "ctrl+u" -ExpectedHex "1b5b3131373b353a3175"
++    $report.kitty_ctrl_v = Send-KeyAndObserve -PaneId $kittyPane -Key "ctrl+v" -ExpectedHex "1b5b3131383b353a3175"
++    $report.kitty_shift_enter = Send-KeyAndObserve -PaneId $kittyPane -Key "shift+enter" -ExpectedHex "1b5b31333b3275"
++    $report.kitty_ctrl_backspace = Send-KeyAndObserve -PaneId $kittyPane -Key "ctrl+backspace" -ExpectedHex "1b5b3132373b3575"
++    $report.kitty_up = Send-KeyAndObserve -PaneId $kittyPane -Key "up" -ExpectedHex "1b5b313b313a3141"
++    $report.kitty_escape = Send-KeyAndObserve -PaneId $kittyPane -Key "esc" -ExpectedHex "1b5b323775"
++    $report.raw_kitty_alt_v = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[118;3:1u") -ExpectedHex "1b5b3131383b333a3175"
++    $report.raw_kitty_ctrl_u = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[117;5:1u") -ExpectedHex "1b5b3131373b353a3175"
++    $report.raw_kitty_ctrl_v = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[118;5:1u") -ExpectedHex "1b5b3131383b353a3175"
++    $report.raw_kitty_shift_enter = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[13;2u") -ExpectedHex "1b5b31333b3275"
++    $report.raw_kitty_ctrl_backspace = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[127;5u") -ExpectedHex "1b5b3132373b3575"
++    $report.raw_kitty_ctrl_delete = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "[57426;5u") -ExpectedHex "1b5b35373432363b3575"
++    $report.raw_alt_v = Send-RawAndObserve -PaneId $kittyPane -Text ([char]27 + "v") -ExpectedHex "1b76"
++    $report.raw_ctrl_u = Send-RawAndObserve -PaneId $kittyPane -Text ([string][char]0x15) -ExpectedHex "15"
++
++    $consoleHosts = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue |
++        Where-Object { $initialConsoleHostIds -notcontains $_.Id } |
++        ForEach-Object {
++            $path = ""
++            $version = ""
++            try { $path = $_.Path } catch {}
++            try { $version = $_.MainModule.FileVersionInfo.FileVersion } catch {}
++            [ordered]@{
++                id = $_.Id
++                name = $_.ProcessName
++                path = $path
++                version = $version
++            }
++        })
++    $report.new_console_hosts = $consoleHosts
++    $appLocalHostRequired = $null -ne $expectedConsoleHost
++    if ($appLocalHostRequired) {
++        $report.expected_console_host = $expectedConsoleHost
++        $report.app_local_console_host = @($consoleHosts | Where-Object {
++            $_.name -ieq "OpenConsole" -and $_.path -ieq $expectedConsoleHost
++        }).Count -gt 0
++    } else {
++        $report.app_local_console_host = $null
++    }
++
++    $failed = -not $report.legacy_alt_v.delivered `
++        -or -not $report.device_attributes_response `
++        -or -not $report.kitty_query_response `
++        -or -not $report.kitty_alt_v.delivered `
++        -or -not $report.kitty_ctrl_u.delivered `
++        -or -not $report.kitty_ctrl_v.delivered `
++        -or -not $report.kitty_shift_enter.delivered `
++        -or -not $report.kitty_ctrl_backspace.delivered `
++        -or -not $report.kitty_up.delivered `
++        -or -not $report.kitty_escape.delivered `
++        -or -not $report.raw_kitty_alt_v.delivered `
++        -or -not $report.raw_kitty_ctrl_u.delivered `
++        -or -not $report.raw_kitty_ctrl_v.delivered `
++        -or -not $report.raw_kitty_shift_enter.delivered `
++        -or -not $report.raw_kitty_ctrl_backspace.delivered `
++        -or -not $report.raw_kitty_ctrl_delete.delivered `
++        -or -not $report.raw_alt_v.delivered `
++        -or -not $report.raw_ctrl_u.delivered `
++        -or ($appLocalHostRequired -and -not $report.app_local_console_host)
++} finally {
++    if ($null -ne $server) {
++        try {
++            $stopOutput = & $script:Exe server stop 2>&1
++            if ($LASTEXITCODE -ne 0) {
++                Write-Host "server stop during cleanup failed: $($stopOutput -join "`n")"
++            }
++        } catch {
++            Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
++        }
++        Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
++        $server.Refresh()
++        if (-not $server.HasExited) {
++            & taskkill.exe /PID $server.Id /T /F 2>&1 | Out-Null
++        }
++    }
++    if ($null -ne $expectedConsoleHost) {
++        $hostExitDeadline = (Get-Date).AddSeconds(5)
++        do {
++            $remainingHosts = @(Get-Process -Name OpenConsole -ErrorAction SilentlyContinue |
++                Where-Object { $initialConsoleHostIds -notcontains $_.Id } |
++                Where-Object {
++                    $path = ""
++                    try { $path = $_.Path } catch {}
++                    $path -ieq $expectedConsoleHost
++                })
++            if ($remainingHosts.Count -eq 0) {
++                break
++            }
++            Start-Sleep -Milliseconds 100
++        } while ((Get-Date) -lt $hostExitDeadline)
++        $report.app_local_console_host_exited = $remainingHosts.Count -eq 0
++        if (-not $report.app_local_console_host_exited) {
++            $failed = $true
++        }
++    }
++    $global:LASTEXITCODE = 0
++    if ($null -eq $oldSession) {
++        Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_SESSION = $oldSession
++    }
++    if ($null -eq $oldSocket) {
++        Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_SOCKET_PATH = $oldSocket
++    }
++    if ($null -eq $oldClientSocket) {
++        Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
++    }
++
++    $json = $report | ConvertTo-Json -Depth 8
++    Write-Host $json
++    Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
++}
++
++if ($failed) {
++    throw "enhanced Windows ConPTY input probe failed; see the JSON report above"
++}
 diff --git a/scripts/windows_install_conpty_package_test.ps1 b/scripts/windows_install_conpty_package_test.ps1
-index 232e61ac4dbc07220d5baa446e7d2390991d976e..d21517169521b05386f21ba2faeb6b458dc2fb06 100644
---- a/scripts/windows_install_conpty_package_test.ps1
+new file mode 100644
+index 0000000000000000000000000000000000000000..331dec1946e78838302c93b9325a825c2729de67
+--- /dev/null
 +++ b/scripts/windows_install_conpty_package_test.ps1
-@@ -70,140 +70,20 @@ try {
- }
- 
- $archive = (Resolve-Path -LiteralPath $ArchivePath).Path
--$root = Join-Path $env:RUNNER_TEMP ("herdr-installer-test-" + [Guid]::NewGuid().ToString("N"))
--$webRoot = Join-Path $root "web"
--$herdrHome = Join-Path $root "home"
--$installDir = Join-Path $root "bin"
--New-Item -ItemType Directory -Force -Path $webRoot | Out-Null
--Copy-Item -LiteralPath $archive -Destination (Join-Path $webRoot "herdr-windows-x86_64.zip")
--$hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
--
--$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
--$listener.Start()
--$port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
--$listener.Stop()
--$manifest = @{
--    channel = "preview"
--    base_version = "0.0.0"
--    build_id = "installer-test"
--    assets = @{
--        "windows-x86_64" = @{
--            url = "http://127.0.0.1:$port/herdr-windows-x86_64.zip"
--            sha256 = $hash
--            format = "zip"
--        }
--    }
--} | ConvertTo-Json -Depth 5
--$manifestPath = Join-Path $webRoot "preview.json"
--$manifest | Out-File -LiteralPath $manifestPath -Encoding utf8
--
--$server = $null
--$oldHerdrHome = $env:HERDR_HOME
+@@ -0,0 +1,26 @@
++param(
++    [Parameter(Mandatory = $true)]
++    [string]$ArchivePath
++)
++
++Set-StrictMode -Version Latest
++$ErrorActionPreference = "Stop"
++
++$archive = (Resolve-Path -LiteralPath $ArchivePath).Path
 +$tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
 +    [System.IO.Path]::GetTempPath()
 +} else {
@@ -55704,118 +56676,15 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..d21517169521b05386f21ba2faeb6b45
 +$root = Join-Path $tempRoot ("herdr-conpty-archive-test-" + [Guid]::NewGuid().ToString("N"))
 +$stage = Join-Path $root "stage"
 +New-Item -ItemType Directory -Path $root | Out-Null
- try {
--    $server = Start-Process python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $webRoot) -PassThru -WindowStyle Hidden
--    $env:HERDR_HOME = Join-Path $root "unused\..\home"
--    $manifestUrl = "http://127.0.0.1:$port/preview.json"
--    for ($attempt = 0; $attempt -lt 20; $attempt++) {
--        try {
--            Invoke-WebRequest -Uri $manifestUrl -UseBasicParsing | Out-Null
--            break
--        } catch {
--            if ($attempt -eq 19) { throw }
--            Start-Sleep -Milliseconds 100
--        }
--    }
--
--    & "$PSScriptRoot\..\website\install.ps1" `
--        -ManifestUrl $manifestUrl `
--        -InstallDir $installDir `
--        -ExpectedBuildId "installer-test"
--
--    $required = @(
--        "herdr.exe",
--        "conpty\herdr-conpty.json",
--        "conpty\conpty.dll",
--        "conpty\x64\OpenConsole.exe",
--        "conpty\arm64\OpenConsole.exe",
--        "THIRD-PARTY-NOTICES\Microsoft.Windows.Console.ConPTY-LICENSE.txt",
--        "THIRD-PARTY-NOTICES\Microsoft.Windows.Console.ConPTY-NOTICE.md"
--    )
--    foreach ($relative in $required) {
--        if (-not (Test-Path -LiteralPath (Join-Path $installDir $relative) -PathType Leaf)) {
--            throw "installer did not activate required file $relative"
--        }
--    }
--
--    $releaseDir = Get-ChildItem -LiteralPath (Join-Path $herdrHome "packages\standalone\releases") -Directory |
--        Where-Object { -not $_.Name.StartsWith(".staging.") } |
--        Select-Object -First 1
--    if ($null -eq $releaseDir) {
--        throw "installer did not create a versioned release"
--    }
--    Remove-Item -LiteralPath (Join-Path $releaseDir.FullName "conpty\conpty.dll") -Force
--
--    $badManifest = $manifest | ConvertFrom-Json
--    $badManifest.assets."windows-x86_64".url = "http://127.0.0.1:$port/missing.zip"
--    $badManifest | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $manifestPath -Encoding utf8
--    $downloadFailed = $false
--    try {
--        & "$PSScriptRoot\..\website\install.ps1" `
--            -ManifestUrl $manifestUrl `
--            -InstallDir $installDir `
--            -ExpectedBuildId "installer-test"
--    } catch {
--        if ($_.Exception.Message -notmatch "(?i)(404|not found)") {
--            throw
--        }
--        $downloadFailed = $true
--    }
--    if (-not $downloadFailed) {
--        throw "installer repair unexpectedly accepted a missing archive"
--    }
--    if (-not (Test-Path -LiteralPath (Join-Path $releaseDir.FullName "herdr.exe") -PathType Leaf)) {
--        throw "failed repair removed the existing release"
--    }
--
--    $manifest | Out-File -LiteralPath $manifestPath -Encoding utf8
--    & "$PSScriptRoot\..\website\install.ps1" `
--        -ManifestUrl $manifestUrl `
--        -InstallDir $installDir `
--        -ExpectedBuildId "installer-test"
--    if (-not (Test-Path -LiteralPath (Join-Path $installDir "conpty\conpty.dll") -PathType Leaf)) {
--        throw "installer did not repair an incomplete release"
--    }
--
--    $x64HostDir = Join-Path $releaseDir.FullName "conpty\x64"
--    $junctionTarget = Join-Path $root "junction-target"
--    Move-Item -LiteralPath $x64HostDir -Destination $junctionTarget
--    New-Item -ItemType Junction -Path $x64HostDir -Target $junctionTarget | Out-Null
--    & "$PSScriptRoot\..\website\install.ps1" `
--        -ManifestUrl $manifestUrl `
--        -InstallDir $installDir `
--        -ExpectedBuildId "installer-test"
--    $repairedHostDir = Get-Item -LiteralPath (Join-Path $installDir "conpty\x64") -Force
--    if ($repairedHostDir.Attributes -band [IO.FileAttributes]::ReparsePoint) {
--        throw "installer accepted a reparse-point ConPTY directory"
--    }
--
--    $rejected = $false
--    try {
--        & "$PSScriptRoot\..\website\install.ps1" `
--            -ManifestUrl $manifestUrl `
--            -InstallDir $installDir `
--            -ExpectedBuildId "different-build"
--    } catch {
--        if ($_.Exception.Message -notlike "Preview manifest changed while updating.*") {
--            throw
--        }
--        $rejected = $true
--    }
--    if (-not $rejected) {
--        throw "installer accepted a manifest that did not match the updater-selected build"
++try {
 +    Expand-Archive -LiteralPath $archive -DestinationPath $stage
 +    & python "$PSScriptRoot\package_windows_conpty.py" "validate" "--stage-dir" $stage
 +    if ($LASTEXITCODE -ne 0) {
 +        throw "ConPTY archive validation failed with exit code $LASTEXITCODE"
-     }
- } finally {
--    $env:HERDR_HOME = $oldHerdrHome
--    if ($null -ne $server -and -not $server.HasExited) {
--        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
--    }
-     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
- }
++    }
++} finally {
++    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
++}
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
 index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760afe25174
@@ -56789,6 +57658,272 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 +    }
 +}
+diff --git a/scripts/windows_smoke_conpty_path.ps1 b/scripts/windows_smoke_conpty_path.ps1
+index ce54dd45ba97ee4ae5482ac552ebb82bf5be7a72..bec93b66f489ecb10b022aac6a3776427269ce17 100644
+--- a/scripts/windows_smoke_conpty_path.ps1
++++ b/scripts/windows_smoke_conpty_path.ps1
+@@ -59,8 +59,11 @@ Invoke-Checked rustc @("--crate-type", "cdylib", "--edition", "2021", $fakeSourc
+ 
+ $oldPath = $env:PATH
+ $oldSession = $env:HERDR_SESSION
++$oldSocket = $env:HERDR_SOCKET_PATH
++$oldClientSocket = $env:HERDR_CLIENT_SOCKET_PATH
+ $env:PATH = "$fakeDir;$oldPath"
+ $env:HERDR_SESSION = $Session
++Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+ 
+ $server = $null
+ try {
+@@ -84,9 +87,16 @@ try {
+         throw "server did not become ready"
+     }
+ 
+-    $created = & $exe workspace create --cwd $PWD.Path 2>&1
+-    if ($LASTEXITCODE -ne 0) {
+-        throw "workspace create failed with exit code $LASTEXITCODE`: $($created -join "`n")"
++    $savedErrorActionPreference = $ErrorActionPreference
++    try {
++        $ErrorActionPreference = "Continue"
++        $created = & $exe workspace create --cwd $PWD.Path 2>&1
++        $createdExitCode = $LASTEXITCODE
++    } finally {
++        $ErrorActionPreference = $savedErrorActionPreference
++    }
++    if ($createdExitCode -ne 0) {
++        throw "workspace create failed with exit code $createdExitCode`: $($created -join "`n")"
+     }
+     $paneId = (($created -join "`n") | ConvertFrom-Json).result.root_pane.pane_id
+     if ([string]::IsNullOrWhiteSpace($paneId)) {
+@@ -126,9 +136,27 @@ try {
+             Write-Host "server stop during cleanup failed: $($_.Exception.Message)"
+         }
+         Wait-Process -Id $server.Id -Timeout 10 -ErrorAction SilentlyContinue
++        $server.Refresh()
++        if (-not $server.HasExited) {
++            & taskkill.exe /PID $server.Id /T /F 2>&1 | Out-Null
++        }
+     }
+     $global:LASTEXITCODE = 0
+     $env:PATH = $oldPath
+-    $env:HERDR_SESSION = $oldSession
++    if ($null -eq $oldSession) {
++        Remove-Item Env:HERDR_SESSION -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_SESSION = $oldSession
++    }
++    if ($null -eq $oldSocket) {
++        Remove-Item Env:HERDR_SOCKET_PATH -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_SOCKET_PATH = $oldSocket
++    }
++    if ($null -eq $oldClientSocket) {
++        Remove-Item Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
++    } else {
++        $env:HERDR_CLIENT_SOCKET_PATH = $oldClientSocket
++    }
+     Remove-Item -Recurse -Force $fakeDir -ErrorAction SilentlyContinue
+ }
+diff --git a/skills/herdr/SKILL.md b/skills/herdr/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fafea549c0c46b87bac6c7ae4ad22ef7ac635a5e
+--- /dev/null
++++ b/skills/herdr/SKILL.md
+@@ -0,0 +1,195 @@
++---
++name: herdr
++description: "Control Herdr, a terminal multiplexer for coding agents. Use only when the user explicitly mentions Herdr or asks to use Herdr to inspect or control panes, tabs, workspaces, commands, or another agent. Do not use merely because a task could benefit from a background terminal, delegation, or parallel work. Requires HERDR_ENV=1."
++---
++
++# Herdr
++
++Herdr organizes terminals into workspaces, tabs, and panes, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
++
++Before issuing any control command, verify that this agent is running inside a Herdr-managed pane:
++
++```bash
++test "${HERDR_ENV:-}" = 1
++```
++
++If the check fails, say that you are not running inside Herdr and stop. Do not inspect or control the focused Herdr session from outside Herdr.
++
++When the check passes, the `herdr` binary in `PATH` talks to the current session. Use it to inspect neighboring work, create terminal layout, start agents and commands, read output, and wait for state changes.
++
++## Learn the current CLI
++
++The installed binary is the authority for command syntax. Start with:
++
++```bash
++herdr --help
++```
++
++Then print the relevant command group by running the group without a subcommand:
++
++```bash
++herdr agent
++herdr pane
++herdr workspace
++herdr tab
++herdr worktree
++herdr terminal
++herdr notification
++herdr integration
++herdr session
++```
++
++Do not run bare `herdr` for discovery; it launches or attaches the TUI. Do not probe a mutating nested command by omitting arguments. Commands such as `herdr workspace create` are valid with defaults and will execute.
++
++Most control commands return JSON. Read identifiers and state from those responses instead of predicting them.
++
++## Understand layout, panes, and agents
++
++Choose the primitive that matches the job:
++
++- Workspace, tab, and pane topology organize terminal locations.
++- Pane commands control raw terminals, shells, tests, servers, input, and output.
++- Agent commands control the recognized coding agent currently occupying a pane.
++
++A pane exists whether or not it contains an agent. `agent start` requires an existing available shell pane and never creates, splits, or moves layout. Use pane commands for ordinary processes. Use agent commands when Herdr must validate agent identity or interpret `idle`, `working`, `blocked`, `done`, and `unknown` lifecycle states.
++
++Agent commands accept either a unique live agent name or the pane ID currently hosting that agent. They do not accept terminal IDs or bare agent-kind labels. Names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced.
++
++`idle` means the agent is ready for input and its tab has been seen in the focused Herdr UI. `done` is the same underlying idle state after unseen background work finishes. Focusing the tab or targeting the pane or agent with a focus command marks it seen. CLI reads do not mark it seen. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently; it does not prove completion.
++
++## Use IDs and caller context
++
++Public IDs are opaque stable handles:
++
++- workspace: `w1`
++- tab: `w1:t1`
++- pane: `w1:p1`
++
++Closed tab and pane IDs are not reused. A pane moved into another workspace receives a new workspace-qualified pane ID. After `pane move`, continue with `.result.move_result.pane.pane_id` or the live agent name. The old value is reported as `.result.move_result.previous_pane_id`; only the moved process's inherited caller context keeps resolving that old ID, so do not use it as a general agent target.
++
++Herdr injects the caller's context into each managed pane:
++
++```bash
++printf '%s\n' "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID"
++```
++
++Prefer `--current` when a pane command should target the calling pane. Omitting a target may use the UI-focused pane, which can belong to the user or another client.
++
++Discover live state with:
++
++```bash
++herdr workspace list
++herdr tab list --workspace "$HERDR_WORKSPACE_ID"
++herdr pane current --current
++herdr pane list --workspace "$HERDR_WORKSPACE_ID"
++herdr agent list
++```
++
++Creation responses expose the IDs to use next. `workspace create` returns `.result.workspace`, `.result.tab`, and `.result.root_pane`. `tab create` returns `.result.tab` and `.result.root_pane`. `pane split` returns the new pane as `.result.pane`.
++
++## Start and coordinate an agent
++
++Default to a sibling pane in the current tab and the current working directory. Do not create a workspace, tab, worktree, or different cwd unless the user explicitly requests that topology or location.
++
++Honor a direction requested by the user. Otherwise inspect the caller pane:
++
++```bash
++herdr pane layout --pane "$HERDR_PANE_ID"
++```
++
++Split a wide pane to the right and a narrow or tall pane down. Avoid repeated same-direction splits that create unusably narrow columns or short rows. Keep the user's focus in the calling pane and explicitly preserve the caller's working directory:
++
++```bash
++herdr pane split --current --direction right --cwd "$PWD" --no-focus
++```
++
++Replace `right` with `down` when appropriate. Read the new pane ID from `.result.pane.pane_id`.
++
++An available shell pane must be at its interactive prompt, with the shell itself in the foreground and no foreground command, editor, or agent running. Start a supported agent in that pane with a useful unique name:
++
++```bash
++herdr agent start reviewer --kind codex --pane <returned-pane-id>
++```
++
++Use the kind requested by the user. Run `herdr agent` to inspect the installed kind list and options. Pass native agent arguments only after `--`:
++
++```bash
++herdr agent start reviewer --kind codex --pane <returned-pane-id> -- <agent-args...>
++```
++
++`agent start` returns only after Herdr detects the expected agent in the same pane and considers it ready for interactive input. It defaults to a 30-second startup timeout.
++
++Submit work through the agent surface:
++
++```bash
++herdr agent prompt reviewer "Review the current diff and report only actionable findings." --wait --timeout 120000
++```
++
++`agent prompt` atomically submits text and encoded Enter while honoring the pane's live bracketed-paste mode. For normal agent work, `--wait` is enough: it waits for the first settled `idle`, `done`, or `blocked` state. Do not repeat those defaults with `--until`.
++
++A prompt sent from a non-working state must produce an observed lifecycle change within five seconds. Otherwise Herdr returns `agent_prompt_stalled` instead of waiting indefinitely. This wait tracks lifecycle state, not an individual turn; if the agent is already working, completion of the active turn may satisfy it.
++
++Use `--until` only for a state-specific workflow, such as waiting for an already-running agent to request input:
++
++```bash
++herdr agent wait reviewer --until blocked --timeout 120000
++```
++
++Without `--until`, standalone `agent wait` uses the same settled-state defaults as `agent prompt --wait`.
++
++Use logical keys for interactive agent UI controls:
++
++```bash
++herdr agent send-keys reviewer esc
++herdr agent send-keys reviewer ctrl+c
++```
++
++Herdr validates all keys before writing any bytes. Read the result through the resolved agent:
++
++```bash
++herdr agent get reviewer
++herdr agent read reviewer --source recent-unwrapped --lines 120
++```
++
++If a wait fails or returns `blocked`, inspect `agent get` and `agent read` before deciding what input to send. Use the pane surface only when raw terminal control is intentional.
++
++## Run an ordinary command in another pane
++
++Create a sibling pane with the same geometry rule, preserve the caller's working directory, and keep user focus unchanged:
++
++```bash
++herdr pane split --current --direction right --cwd "$PWD" --no-focus
++```
++
++Read the new pane ID from `.result.pane.pane_id`, then run and inspect the command:
++
++```bash
++herdr pane run <returned-pane-id> "just test"
++herdr pane wait-output <returned-pane-id> --match "test result" --timeout 120000
++herdr pane read <returned-pane-id> --source recent-unwrapped --lines 120
++```
++
++`pane run` atomically sends command text and Enter. `pane wait-output` searches the selected snapshot immediately, so output that already exists can match. Use `--match <text>` for a literal substring or `--regex <pattern>` for a Rust regular expression. Omitting `--timeout` allows an indefinite wait.
++
++Use the read source that matches the task:
++
++- `visible`: the currently rendered viewport.
++- `recent`: recent rendered output, including soft wraps.
++- `recent-unwrapped`: recent output with soft wraps joined; prefer it for logs and transcripts.
++- `detection`: the plain-text bottom-buffer snapshot used for agent detection.
++
++Use `--format ansi` when colors and terminal styling are evidence. Otherwise use text.
++
++`--lines` asks Herdr for more rows from the pane's available screen and host scrollback. If increasing it does not reveal more of a completed response, the pane is probably running the agent on the terminal's alternate screen. Rows that leave the alternate screen do not enter Herdr's host scrollback, so a larger line count cannot recover them.
++
++After that failed read, ask the agent to write its complete response as Markdown in a temporary directory and reply only with the file path, then read the file directly. Use this only as a fallback; do not request file output in the initial prompt.
++
++## Safety and coordination rules
++
++- Use `--no-focus` for background work unless the user asked to switch context.
++- Use `--current`, an explicit pane ID, or a unique agent name. Do not rely on another client's focused pane.
++- Parse IDs from JSON responses. Do not derive them from sidebar order or examples.
++- Do not close workspaces, tabs, panes, or sessions you did not create unless the user explicitly asked.
++- Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.
++- Never kill the main Herdr process. Use named test sessions for experiments that need an isolated server.
++- CLI server errors are JSON on stderr with exit status 1. CLI syntax errors exit with status 2.
 diff --git a/src/app/api/plugins/panes.rs b/src/app/api/plugins/panes.rs
 index 74a5df23131f9ff8f51c40ac90a0e7a14abd3f6d..189624358165f8a2662593f5fedfdd315a19500f 100644
 --- a/src/app/api/plugins/panes.rs
@@ -56803,7 +57938,7 @@ index 74a5df23131f9ff8f51c40ac90a0e7a14abd3f6d..189624358165f8a2662593f5fedfdd31
                  "HERDR_BIN_PATH".to_string(),
                  current_exe.display().to_string(),
 diff --git a/src/app/api/plugins/runtime.rs b/src/app/api/plugins/runtime.rs
-index b956fc987b3ade0a310464ca0021d00813216121..79feaa78029d6bd67d5434f3b4ee22a219fcf2ac 100644
+index 9106886c6bd3f91418cecaad4580b156a8b5af48..a1f0760ad225106b04d881efb3012fedb99f8ea9 100644
 --- a/src/app/api/plugins/runtime.rs
 +++ b/src/app/api/plugins/runtime.rs
 @@ -46,7 +46,7 @@ impl App {
@@ -56816,10 +57951,10 @@ index b956fc987b3ade0a310464ca0021d00813216121..79feaa78029d6bd67d5434f3b4ee22a2
                  "HERDR_BIN_PATH".to_string(),
                  current_exe.display().to_string(),
 diff --git a/src/app/input/navigate.rs b/src/app/input/navigate.rs
-index 93dfe77ddface708a9d514192ae8178970169c39..0f4904babea7350c7f333ec4c13e000c233b62ce 100644
+index d151b94d4f530155a8c72ccb6b755e9ee10fd8c5..ede7436c28d0b4a7596225b491f4c3d0f0591423 100644
 --- a/src/app/input/navigate.rs
 +++ b/src/app/input/navigate.rs
-@@ -835,7 +835,7 @@ impl App {
+@@ -809,7 +809,7 @@ impl App {
              crate::api::SOCKET_PATH_ENV_VAR.to_string(),
              crate::api::socket_path().display().to_string(),
          )];
@@ -56940,7 +58075,7 @@ index 9d7389b5170af663ea70846e6fde8ab579c0631d..ee812e6bffba5f7face70a0ced2cf336
  
  fn run_config_command(args: &[String]) -> std::io::Result<i32> {
 diff --git a/src/cli/status.rs b/src/cli/status.rs
-index d22bd3338f1c50e89cbe3f09d6a2eefded3a2fcc..d2d101abcd2ee34c3e7c9ca5a011036f079246e5 100644
+index 08e68724aae701f7512d47ace3827c7a669608c7..f9fcf91b000776bbebc525dbbbae82016f6ba753 100644
 --- a/src/cli/status.rs
 +++ b/src/cli/status.rs
 @@ -93,10 +93,7 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
@@ -56990,7 +58125,7 @@ index f07f66cee70db2a79abfab02986390ca26ff5796..76ca0724907e09889a4d03faf1990c6b
      sidebar::{
          AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
 diff --git a/src/config/model.rs b/src/config/model.rs
-index 72c810514b4340c0d2071ec70763c9ad2f69995c..de5e8d5f59062b155aad3e40ef79ffd0247c3c8e 100644
+index 9fbca3a601c7c0c29c53ceb94d112d97f5b5c5bc..5ec5f0e61199d4040bd4015ece9052e6854eca70 100644
 --- a/src/config/model.rs
 +++ b/src/config/model.rs
 @@ -19,15 +19,6 @@ pub enum UpdateChannelConfig {
@@ -57009,7 +58144,7 @@ index 72c810514b4340c0d2071ec70763c9ad2f69995c..de5e8d5f59062b155aad3e40ef79ffd0
  #[derive(Debug, Clone, Copy, Deserialize)]
  #[serde(default)]
  pub struct UpdateConfig {
-@@ -1127,7 +1118,6 @@ manifest_check = false
+@@ -1123,7 +1114,6 @@ manifest_check = false
  "#;
          let config: Config = toml::from_str(toml).unwrap();
          assert_eq!(config.update.channel, UpdateChannelConfig::Preview);
@@ -57064,7 +58199,7 @@ index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435
 +    }
 +}
 diff --git a/src/main.rs b/src/main.rs
-index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd400ef3eeb8 100644
+index 0857225f3596f9fd135ca3c87f1676b40a084487..d2a15057c442505e2ceb56303718f7fac55a0ffc 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -63,6 +63,7 @@ mod cli;
@@ -57083,7 +58218,7 @@ index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd40
  mod metadata_tokens;
  mod noninteractive_process;
  mod pane;
-@@ -147,12 +149,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
+@@ -146,12 +148,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
  # new_cwd = "follow"
  
  [update]
@@ -57099,7 +58234,7 @@ index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd40
  # version_check = true
  
  # Check herdr.dev for remote agent-detection manifest updates in the background.
-@@ -457,6 +457,7 @@ fn exit_if_nested_disabled(config: &config::Config) {
+@@ -450,6 +450,7 @@ fn exit_if_nested_disabled(config: &config::Config) {
  }
  
  fn main() -> io::Result<()> {
@@ -57107,7 +58242,7 @@ index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd40
      let raw_args: Vec<String> = std::env::args().collect();
      let args = match session::configure_from_args(&raw_args) {
          Ok(args) => args,
-@@ -577,8 +578,8 @@ fn main() -> io::Result<()> {
+@@ -570,8 +571,8 @@ fn main() -> io::Result<()> {
                  "Stop the running server via the API socket",
              ),
              (
@@ -57118,7 +58253,7 @@ index 29bebcc27bd5d22101e71b729549fbb3396d308a..babfcddac460fa1aad2314065415dd40
              ),
              (
                  "herdr server reload-config",
-@@ -588,10 +589,6 @@ fn main() -> io::Result<()> {
+@@ -581,10 +582,6 @@ fn main() -> io::Result<()> {
                  "herdr config reset-keys",
                  "Back up config.toml and remove custom keybindings",
              ),
@@ -57365,7 +58500,7 @@ index 0000000000000000000000000000000000000000..78ce2b1e2d14892c9aec49728025a71e
 +    }
 +}
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
-index 8a9a2ee0a0de4814baea3213192b69b8c2123f95..fc10c9f6bcf2479cbdae7fd12d7b44803bd020ec 100644
+index 0a4fd1b179ab8e541108f8e34930724eb3bc8201..19024e5d9cea5ced082484e5c66bd7a41954e854 100644
 --- a/src/platform/mod.rs
 +++ b/src/platform/mod.rs
 @@ -39,6 +39,31 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command)
@@ -57401,7 +58536,7 @@ index 8a9a2ee0a0de4814baea3213192b69b8c2123f95..fc10c9f6bcf2479cbdae7fd12d7b4480
  fn configure_background_command_platform(_command: &mut std::process::Command) {}
  
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b3150c39714f 100644
+index 622c99c1ce22a1a30672500706957e89c8cb6f79..2e2fa8ed3092ced669373967eac319981d614a83 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
 @@ -3,7 +3,8 @@ use std::{
@@ -57417,7 +58552,7 @@ index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b315
 @@ -13,7 +14,7 @@ use windows_sys::{
      Win32::{
          Foundation::{
-             CloseHandle, GlobalFree, LocalFree, HANDLE, HWND, INVALID_HANDLE_VALUE, NTSTATUS,
+             CloseHandle, GlobalFree, LocalFree, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
 -            STATUS_SUCCESS, UNICODE_STRING,
 +            STATUS_SUCCESS, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
          },
@@ -57442,7 +58577,7 @@ index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b315
                  PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
              },
          },
-@@ -60,6 +65,14 @@ use windows_sys::{
+@@ -44,6 +49,14 @@ use windows_sys::{
  use super::{ClipboardImage, ForegroundJob, Signal};
  
  mod clipboard_image;
@@ -57457,7 +58592,7 @@ index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b315
  
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
-@@ -683,6 +696,108 @@ pub fn process_exists(pid: u32) -> bool {
+@@ -678,6 +691,108 @@ pub fn process_exists(pid: u32) -> bool {
      ok && exit_code == STILL_ACTIVE
  }
  
@@ -57566,7 +58701,7 @@ index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b315
  pub fn write_clipboard(bytes: &[u8]) -> bool {
      let Ok(text) = std::str::from_utf8(bytes) else {
          return false;
-@@ -1369,6 +1484,37 @@ mod tests {
+@@ -959,6 +1074,37 @@ mod tests {
          AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
      };
  
@@ -57602,8 +58737,8 @@ index f90c9a263b4c5db6bf96d6a51e3ccfe639bbc046..1b9a911d04ecf04c027da9e7f314b315
 +    }
 +
      #[test]
-     fn windows_notification_text_is_null_terminated_and_unicode_safe() {
-         let mut destination = [u16::MAX; 6];
+     fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
+         use base64::Engine as _;
 diff --git a/src/platform/windows/launcher.rs b/src/platform/windows/launcher.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23dd2f6088
@@ -59722,7 +60857,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994da7d68b8 100644
+index b874c117d472ba82f23dcee5bba652f9ce752efc..9ec77c4332bbd1fde893a26dca783994da7d68b8 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -60058,16 +61193,12 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
          notes_body,
      }))
  }
-@@ -628,53 +776,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -628,45 +776,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
--fn install_windows_update_with_installer(
--    channel: UpdateChannel,
--    expected_build_id: Option<&str>,
--) -> Result<(), String> {
--    let mut command = Command::new("powershell");
--    command
+-fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), String> {
+-    let status = Command::new("powershell")
 -        .args([
 -            "-NoProfile",
 -            "-ExecutionPolicy",
@@ -60081,11 +61212,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 -        // PowerShell 5.1 (this `powershell`) fails to autoload cmdlets like
 -        // Get-FileHash. Removing it lets 5.1 compute its own default path.
 -        // See PowerShell/PowerShell#8635.
--        .env_remove("PSModulePath");
--    if let Some(build_id) = expected_build_id {
--        command.env("HERDR_EXPECTED_BUILD_ID", build_id);
--    }
--    let status = command
+-        .env_remove("PSModulePath")
 -        .status()
 -        .map_err(|err| format!("failed to run Windows installer: {err}"))?;
 +struct DownloadedWindowsInstaller {
@@ -60245,7 +61372,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
  }
  
  // ---------------------------------------------------------------------------
-@@ -2024,22 +2267,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2016,22 +2267,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      #[cfg(windows)]
      {
          let _ = options;
@@ -60269,7 +61396,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 +            eprintln!("installed {}", release.label());
 +            eprintln!("New Herdr launches use the managed Windows installation.");
          }
--        install_windows_update_with_installer(channel, release.build_id.as_deref())?;
+-        install_windows_update_with_installer(channel)?;
 -        let updated_exe = windows_installed_herdr_exe_path()?;
 -        eprintln!("installed {}", release.label());
 -        print_outdated_integration_notice_with_updated_binary(&updated_exe);
@@ -60280,7 +61407,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
      }
  
      #[cfg(not(windows))]
-@@ -2079,6 +2320,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2071,6 +2320,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      Ok(release.version)
  }
  
@@ -60288,7 +61415,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2488,148 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2238,6 +2488,148 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -60437,7 +61564,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2709,7 @@ mod tests {
+@@ -2317,6 +2709,7 @@ mod tests {
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60445,7 +61572,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2702,6 +3087,7 @@ mod tests {
+@@ -2694,6 +3087,7 @@ mod tests {
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60453,7 +61580,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3330,7 @@ mod tests {
+@@ -2936,6 +3330,7 @@ mod tests {
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60461,7 +61588,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3466,7 @@ mod tests {
+@@ -3071,6 +3466,7 @@ mod tests {
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60469,7 +61596,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3775,7 @@ mod tests {
+@@ -3379,7 +3775,7 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
@@ -60478,7 +61605,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3787,7 @@ mod tests {
+@@ -3391,7 +3787,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -60487,7 +61614,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3809,7 @@ mod tests {
+@@ -3413,7 +3809,7 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);
@@ -60496,3 +61623,823 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
          assert_eq!(release.target_protocol, Some(77));
          assert_eq!(release.sha256.as_deref(), Some("deadbeef"));
      }
+diff --git a/vendor/patches/portable-pty/0001-control-conpty-loading.patch b/vendor/patches/portable-pty/0001-control-conpty-loading.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c49300e1048c7166a65cc4655f8dd9d58940a75
+--- /dev/null
++++ b/vendor/patches/portable-pty/0001-control-conpty-loading.patch
+@@ -0,0 +1,357 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: herdr maintainers <maintainers@herdr.dev>
++Date: Tue, 23 Jun 2026 00:00:00 +0000
++Subject: [PATCH] control ConPTY loading
++
++Load Herdr's hash-verified app-local ConPTY with a constrained DLL search,
++otherwise use the exports from the already loaded kernel32 module. Never
++probe for a bare conpty.dll through the DLL search path.
++
++Herdr issues: https://github.com/ogulcancelik/herdr/issues/761
++              https://github.com/ogulcancelik/herdr/issues/1533
++Vendored base: portable-pty 0.9.0
++---
++diff --git a/vendor/portable-pty/Cargo.toml b/vendor/portable-pty/Cargo.toml
++index b8d11230..8a33abf9 100644
++--- a/vendor/portable-pty/Cargo.toml
+++++ b/vendor/portable-pty/Cargo.toml
++@@ -102,8 +102,8 @@ version = "1.3"
++ [target."cfg(windows)".dependencies.lazy_static]
++ version = "1.4"
++
++-[target."cfg(windows)".dependencies.shared_library]
++-version = "0.1"
+++[target."cfg(windows)".dependencies.sha2]
+++version = "0.10"
++
++ [target."cfg(windows)".dependencies.winapi]
++ version = "0.3"
++@@ -112,6 +112,7 @@ features = [
++     "consoleapi",
++     "handleapi",
++     "fileapi",
+++    "libloaderapi",
++     "namedpipeapi",
++     "synchapi",
++ ]
++diff --git a/vendor/portable-pty/Cargo.toml.orig b/vendor/portable-pty/Cargo.toml.orig
++index 0c3d6b8d..21abe3b6 100644
++--- a/vendor/portable-pty/Cargo.toml.orig
+++++ b/vendor/portable-pty/Cargo.toml.orig
++@@ -27,12 +27,13 @@ serde_support = ["serde", "serde_derive"]
++ [target."cfg(windows)".dependencies]
++ bitflags = "1.3"
++ lazy_static = "1.4"
++-shared_library = "0.1"
+++sha2 = "0.10"
++ winapi = { version = "0.3", features = [
++     "winuser",
++     "consoleapi",
++     "handleapi",
++     "fileapi",
+++    "libloaderapi",
++     "namedpipeapi",
++     "synchapi",
++ ]}
++diff --git a/vendor/portable-pty/src/win/psuedocon.rs b/vendor/portable-pty/src/win/psuedocon.rs
++index 133eab52..d4f111bb 100644
++--- a/vendor/portable-pty/src/win/psuedocon.rs
+++++ b/vendor/portable-pty/src/win/psuedocon.rs
++@@ -4,17 +4,24 @@ use crate::win::procthreadattr::ProcThreadAttributeList;
++ use anyhow::{bail, ensure, Error};
++ use filedescriptor::{FileDescriptor, OwnedHandle};
++ use lazy_static::lazy_static;
++-use shared_library::shared_library;
++-use std::ffi::OsString;
++-use std::io::Error as IoError;
++-use std::os::windows::ffi::OsStringExt;
+++use sha2::{Digest, Sha256};
+++use std::collections::BTreeSet;
+++use std::ffi::{OsStr, OsString};
+++use std::fs::File;
+++use std::io::{Error as IoError, Read};
+++use std::os::windows::ffi::{OsStrExt, OsStringExt};
+++use std::os::windows::fs::MetadataExt;
++ use std::os::windows::io::{AsRawHandle, FromRawHandle};
++-use std::path::Path;
+++use std::path::{Path, PathBuf};
++ use std::sync::Mutex;
++ use std::{mem, ptr};
++-use winapi::shared::minwindef::DWORD;
+++use winapi::shared::minwindef::{DWORD, HMODULE};
++ use winapi::shared::winerror::{HRESULT, S_OK};
++ use winapi::um::handleapi::*;
+++use winapi::um::libloaderapi::{
+++    FreeLibrary, GetModuleHandleW, GetProcAddress, LoadLibraryExW,
+++    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+++};
++ use winapi::um::processthreadsapi::*;
++ use winapi::um::winbase::{
++     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
++@@ -30,26 +37,249 @@ pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
++ #[allow(dead_code)]
++ pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
++
++-shared_library!(ConPtyFuncs,
++-    pub fn CreatePseudoConsole(
++-        size: COORD,
++-        hInput: HANDLE,
++-        hOutput: HANDLE,
++-        flags: DWORD,
++-        hpc: *mut HPCON
++-    ) -> HRESULT,
++-    pub fn ResizePseudoConsole(hpc: HPCON, size: COORD) -> HRESULT,
++-    pub fn ClosePseudoConsole(hpc: HPCON),
++-);
+++type CreatePseudoConsoleFn = unsafe extern "system" fn(
+++    size: COORD,
+++    h_input: HANDLE,
+++    h_output: HANDLE,
+++    flags: DWORD,
+++    hpc: *mut HPCON,
+++) -> HRESULT;
+++type ResizePseudoConsoleFn = unsafe extern "system" fn(hpc: HPCON, size: COORD) -> HRESULT;
+++type ClosePseudoConsoleFn = unsafe extern "system" fn(hpc: HPCON);
+++
+++// These fields intentionally mirror the exported Win32 symbol names.
+++#[allow(non_snake_case)]
+++struct ConPtyFuncs {
+++    module: HMODULE,
+++    owned: bool,
+++    CreatePseudoConsole: CreatePseudoConsoleFn,
+++    ResizePseudoConsole: ResizePseudoConsoleFn,
+++    ClosePseudoConsole: ClosePseudoConsoleFn,
+++}
+++
+++unsafe impl Send for ConPtyFuncs {}
+++unsafe impl Sync for ConPtyFuncs {}
+++
+++impl Drop for ConPtyFuncs {
+++    fn drop(&mut self) {
+++        if self.owned {
+++            unsafe { FreeLibrary(self.module) };
+++        }
+++    }
+++}
+++
+++impl ConPtyFuncs {
+++    unsafe fn from_module(module: HMODULE, owned: bool) -> Result<Self, String> {
+++        if module.is_null() {
+++            return Err(IoError::last_os_error().to_string());
+++        }
+++        Ok(Self {
+++            module,
+++            owned,
+++            CreatePseudoConsole: load_symbol(module, b"CreatePseudoConsole\0")?,
+++            ResizePseudoConsole: load_symbol(module, b"ResizePseudoConsole\0")?,
+++            ClosePseudoConsole: load_symbol(module, b"ClosePseudoConsole\0")?,
+++        })
+++    }
+++}
+++
+++unsafe fn load_symbol<T: Copy>(module: HMODULE, name: &'static [u8]) -> Result<T, String> {
+++    let symbol = GetProcAddress(module, name.as_ptr().cast());
+++    if symbol.is_null() {
+++        return Err(format!(
+++            "missing symbol {}",
+++            String::from_utf8_lossy(&name[..name.len() - 1])
+++        ));
+++    }
+++    Ok(mem::transmute_copy(&symbol))
+++}
+++
+++fn load_system_conpty() -> Result<ConPtyFuncs, String> {
+++    let kernel_name = wide_string(OsStr::new("kernel32.dll"));
+++    let module = unsafe { GetModuleHandleW(kernel_name.as_ptr()) };
+++    unsafe { ConPtyFuncs::from_module(module, false) }
+++}
+++
+++fn load_app_local_conpty(path: &Path) -> Result<ConPtyFuncs, String> {
+++    let wide_path = wide_string(path.as_os_str());
+++    let module = unsafe {
+++        LoadLibraryExW(
+++            wide_path.as_ptr(),
+++            ptr::null_mut(),
+++            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+++        )
+++    };
+++    match unsafe { ConPtyFuncs::from_module(module, true) } {
+++        Ok(functions) => Ok(functions),
+++        Err(error) => {
+++            if !module.is_null() {
+++                unsafe { FreeLibrary(module) };
+++            }
+++            Err(error)
+++        }
+++    }
+++}
+++
+++fn wide_string(value: &OsStr) -> Vec<u16> {
+++    value.encode_wide().chain(Some(0)).collect()
+++}
++
++ fn load_conpty() -> ConPtyFuncs {
++     // If the kernel doesn't export these functions then their system is
++     // too old and we cannot run.
++-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
++-        "this system does not support conpty.  Windows 10 October 2018 or newer is required",
++-    );
+++    let system = load_system_conpty().unwrap_or_else(|error| {
+++        panic!(
+++            "this system does not support conpty. Windows 10 October 2018 or newer is required: {}",
+++            error
+++        )
+++    });
+++
+++    if std::env::var("HERDR_WINDOWS_CONPTY").as_deref() == Ok("system") {
+++        log::warn!("HERDR_WINDOWS_CONPTY=system disables Herdr's bundled ConPTY");
+++        return system;
+++    }
+++
+++    match app_local_conpty_path() {
+++        Ok(Some(path)) => load_app_local_conpty(&path).unwrap_or_else(|error| {
+++            panic!(
+++                "failed to load verified app-local ConPTY from {}: {error}; set HERDR_WINDOWS_CONPTY=system to use the Windows system ConPTY",
+++                path.display()
+++            )
+++        }),
+++        Ok(None) => system,
+++        Err(error) => panic!(
+++            "Herdr's app-local ConPTY bundle is invalid: {}; reinstall Herdr or set HERDR_WINDOWS_CONPTY=system to use the Windows system ConPTY",
+++            error
+++        ),
+++    }
+++}
+++
+++const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+++const CONPTY_FILES: &[(&str, &str)] = &[
+++    (
+++        "conpty.dll",
+++        "39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8",
+++    ),
+++    (
+++        "x64/OpenConsole.exe",
+++        "b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160",
+++    ),
+++    (
+++        "arm64/OpenConsole.exe",
+++        "ed7622fd0d3bedc9ab9f122f5e58edf0def9e7999224f52dd395ba9f54edbe09",
+++    ),
+++];
+++
+++fn app_local_conpty_path() -> Result<Option<PathBuf>, String> {
+++    if std::env::consts::ARCH != "x86_64" {
+++        return Ok(None);
+++    }
+++    let executable = std::env::current_exe()
+++        .map_err(|error| format!("cannot locate the Herdr executable: {error}"))?;
+++    let executable_dir = executable
+++        .parent()
+++        .ok_or_else(|| "Herdr executable has no parent directory".to_string())?;
+++    let bundle = executable_dir.join("conpty");
+++    if !bundle.exists() {
+++        return Ok(None);
+++    }
+++    reject_reparse_point(&bundle)?;
+++
+++    let mut expected = BTreeSet::from(["herdr-conpty.json".to_string()]);
+++    for (relative, expected_hash) in CONPTY_FILES {
+++        expected.insert((*relative).to_string());
+++        verify_bundle_file(&bundle, relative, expected_hash)?;
+++    }
+++    let marker = bundle.join("herdr-conpty.json");
+++    verify_regular_file(&marker)?;
+++
+++    let actual = bundle_files(&bundle)?;
+++    if actual != expected {
+++        return Err(format!(
+++            "unexpected bundle layout; expected {expected:?}, found {actual:?}"
+++        ));
+++    }
+++    Ok(Some(bundle.join("conpty.dll")))
+++}
+++
+++fn verify_bundle_file(root: &Path, relative: &str, expected_hash: &str) -> Result<(), String> {
+++    let path = root.join(relative);
+++    verify_regular_file(&path)?;
+++    let mut file = File::open(&path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+++    let mut digest = Sha256::new();
+++    let mut buffer = [0; 64 * 1024];
+++    loop {
+++        let read = file
+++            .read(&mut buffer)
+++            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+++        if read == 0 {
+++            break;
+++        }
+++        digest.update(&buffer[..read]);
+++    }
+++    let actual_hash = format!("{:x}", digest.finalize());
+++    if actual_hash != expected_hash {
+++        return Err(format!(
+++            "{} has hash {actual_hash}, expected {expected_hash}",
+++            path.display()
+++        ));
+++    }
+++    Ok(())
+++}
+++
+++fn verify_regular_file(path: &Path) -> Result<(), String> {
+++    let metadata = path
+++        .symlink_metadata()
+++        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+++    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+++        return Err(format!("{} is not a regular file", path.display()));
+++    }
+++    Ok(())
+++}
+++
+++fn reject_reparse_point(path: &Path) -> Result<(), String> {
+++    let metadata = path
+++        .symlink_metadata()
+++        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+++    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+++        return Err(format!("{} is not a regular directory", path.display()));
+++    }
+++    Ok(())
+++}
+++
+++fn bundle_files(root: &Path) -> Result<BTreeSet<String>, String> {
+++    fn visit(root: &Path, directory: &Path, files: &mut BTreeSet<String>) -> Result<(), String> {
+++        reject_reparse_point(directory)?;
+++        for entry in std::fs::read_dir(directory)
+++            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
+++        {
+++            let entry = entry.map_err(|error| error.to_string())?;
+++            let path = entry.path();
+++            let metadata = path
+++                .symlink_metadata()
+++                .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+++            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+++                return Err(format!("{} is a reparse point", path.display()));
+++            }
+++            if metadata.is_dir() {
+++                visit(root, &path, files)?;
+++            } else if metadata.is_file() {
+++                let relative = path
+++                    .strip_prefix(root)
+++                    .map_err(|error| error.to_string())?
+++                    .to_string_lossy()
+++                    .replace('\\', "/");
+++                files.insert(relative);
+++            } else {
+++                return Err(format!("{} is not a regular file", path.display()));
+++            }
+++        }
+++        Ok(())
+++    }
++
++-    kernel
+++    let mut files = BTreeSet::new();
+++    visit(root, root, &mut files)?;
+++    Ok(files)
++ }
++
++ lazy_static! {
++--
++2.50.1
+diff --git a/vendor/patches/portable-pty/0001-force-system-conpty.patch b/vendor/patches/portable-pty/0001-force-system-conpty.patch
+deleted file mode 100644
+index 6074df5721f0f0bff05fce0ecf5995683d3c989a..0000000000000000000000000000000000000000
+--- a/vendor/patches/portable-pty/0001-force-system-conpty.patch
++++ /dev/null
+@@ -1,37 +0,0 @@
+-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+-From: herdr maintainers <maintainers@herdr.dev>
+-Date: Tue, 23 Jun 2026 00:00:00 +0000
+-Subject: [PATCH] force system ConPTY
+-
+-Herdr should use the ConPTY functions exported by kernel32.dll and must not
+-load a bare conpty.dll from PATH. portable-pty's sideload probe is intentional
+-for WezTerm's bundled OpenConsole.exe/conpty.dll pair, but Herdr does not ship
+-that pair.
+-
+-Herdr issue: https://github.com/ogulcancelik/herdr/issues/761
+-Vendored base: portable-pty 0.9.0
+----
+- vendor/portable-pty/src/win/psuedocon.rs | 9 +--------
+- 1 file changed, 1 insertion(+), 8 deletions(-)
+-
+-diff --git a/vendor/portable-pty/src/win/psuedocon.rs b/vendor/portable-pty/src/win/psuedocon.rs
+-index 0000000..0000000 100644
+---- a/vendor/portable-pty/src/win/psuedocon.rs
+-+++ b/vendor/portable-pty/src/win/psuedocon.rs
+-@@ -49,14 +49,7 @@ fn load_conpty() -> ConPtyFuncs {
+-         "this system does not support conpty.  Windows 10 October 2018 or newer is required",
+-     );
+--
+--    // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
+--    // alongside the application.  We check for this after checking for kernel
+--    // support so that we don't try to proceed and do something crazy.
+--    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
+--        sideloaded
+--    } else {
+--        kernel
+--    }
+-+
+-+    kernel
+- }
+-
+- lazy_static! {
+diff --git a/vendor/portable-pty.patches.md b/vendor/portable-pty.patches.md
+index 7e6d27431043f4d2306051e52e452eca9a549681..83976ac57c4de208494c62fd3e935d2bc245d71a 100644
+--- a/vendor/portable-pty.patches.md
++++ b/vendor/portable-pty.patches.md
+@@ -4,15 +4,18 @@ This file tracks intentional local changes applied on top of the vendored
+ `portable-pty` source. Remove a patch only when the upstream crate contains an
+ equivalent fix or exposes an option that lets Herdr keep the same behavior.
+ 
+-## 0001 force system ConPTY
++## 0001 control ConPTY loading
+ 
+ status: active
+ 
+-patch: `vendor/patches/portable-pty/0001-force-system-conpty.patch`
++patch: `vendor/patches/portable-pty/0001-control-conpty-loading.patch`
+ 
+-herdr issue: https://github.com/ogulcancelik/herdr/issues/761
++herdr issues:
+ 
+-upstream discussion: none found
++- https://github.com/ogulcancelik/herdr/issues/761
++- https://github.com/ogulcancelik/herdr/issues/1533
++
++upstream discussion: https://github.com/microsoft/terminal/issues/17452
+ 
+ upstream pr: none
+ 
+@@ -20,16 +23,23 @@ vendored base: `portable-pty 0.9.0`
+ 
+ local files:
+ 
++- `vendor/portable-pty/Cargo.toml`
++- `vendor/portable-pty/Cargo.toml.orig`
+ - `vendor/portable-pty/src/win/psuedocon.rs`
+ 
+-reason: `portable-pty` intentionally probes a bare `conpty.dll` after verifying
+-that `kernel32.dll` exports the ConPTY API. That is useful for WezTerm's bundled
+-`OpenConsole.exe` and `conpty.dll` pair, but Herdr does not ship that pair and
+-must not load another application's `conpty.dll` from `PATH`.
++reason: `portable-pty` intentionally probes a bare `conpty.dll` through the DLL
++search path. Herdr must never load another application's DLL from `PATH`. The
++Windows package ships a pinned Microsoft ConPTY runtime under `conpty/`; Herdr
++verifies the exact DLL and x64/ARM64 host hashes, rejects reparse points and
++unexpected files, then loads the DLL by absolute path with its dependency search
++limited to that directory and System32. Installations without a bundle continue
++using the ConPTY exports from the already loaded `kernel32.dll`. Set
++`HERDR_WINDOWS_CONPTY=system` to bypass the bundle during compatibility
++recovery.
+ 
+-remove when: upstream `portable-pty` no longer loads bare `conpty.dll` from the
+-DLL search path, upstream exposes a way for consumers to force system ConPTY, or
+-Herdr replaces the Windows PTY backend.
++remove when: upstream `portable-pty` exposes hash-verified app-local and system
++ConPTY selection with constrained DLL loading and no bare DLL search, or Herdr
++replaces the Windows PTY backend.
+ 
+ verification:
+ 
+@@ -37,8 +47,9 @@ verification:
+ python3 -m unittest scripts.test_vendor_portable_pty
+ ```
+ 
+-On Windows, also verify that pane creation succeeds when `PATH` contains a
+-directory with `conpty.dll`.
++On Windows, run the enhanced-input CI probe against the packaged `conpty/`
++bundle. It verifies the exact OpenConsole process path on Server 2022 and 2025,
++rejects a tampered bundle, and verifies the explicit system fallback.
+ 
+ ## 0002 expose Windows raw command tails
+ 
+diff --git a/vendor/portable-pty/Cargo.toml b/vendor/portable-pty/Cargo.toml
+index b8d11230b846e0d80f72e29abcc3b1b1e529a7f9..8a33abf965f0ff9ac8f0c30c77f32c800fcb1d9e 100644
+--- a/vendor/portable-pty/Cargo.toml
++++ b/vendor/portable-pty/Cargo.toml
+@@ -102,8 +102,8 @@ version = "1.3"
+ [target."cfg(windows)".dependencies.lazy_static]
+ version = "1.4"
+ 
+-[target."cfg(windows)".dependencies.shared_library]
+-version = "0.1"
++[target."cfg(windows)".dependencies.sha2]
++version = "0.10"
+ 
+ [target."cfg(windows)".dependencies.winapi]
+ version = "0.3"
+@@ -112,6 +112,7 @@ features = [
+     "consoleapi",
+     "handleapi",
+     "fileapi",
++    "libloaderapi",
+     "namedpipeapi",
+     "synchapi",
+ ]
+diff --git a/vendor/portable-pty/Cargo.toml.orig b/vendor/portable-pty/Cargo.toml.orig
+index 0c3d6b8dcf343cefbd8abe06abbcf38cbdf7f782..21abe3b65efe119834df7cc331896ce23f8915de 100644
+--- a/vendor/portable-pty/Cargo.toml.orig
++++ b/vendor/portable-pty/Cargo.toml.orig
+@@ -27,12 +27,13 @@ serde_support = ["serde", "serde_derive"]
+ [target."cfg(windows)".dependencies]
+ bitflags = "1.3"
+ lazy_static = "1.4"
+-shared_library = "0.1"
++sha2 = "0.10"
+ winapi = { version = "0.3", features = [
+     "winuser",
+     "consoleapi",
+     "handleapi",
+     "fileapi",
++    "libloaderapi",
+     "namedpipeapi",
+     "synchapi",
+ ]}
+diff --git a/vendor/portable-pty/src/win/psuedocon.rs b/vendor/portable-pty/src/win/psuedocon.rs
+index 133eab52dbefde90fccc1e80f2fcc01fdbdb3193..21700f702bbc0cb54cb4a3100c0d85a4236f155d 100644
+--- a/vendor/portable-pty/src/win/psuedocon.rs
++++ b/vendor/portable-pty/src/win/psuedocon.rs
+@@ -4,17 +4,24 @@ use crate::win::procthreadattr::ProcThreadAttributeList;
+ use anyhow::{bail, ensure, Error};
+ use filedescriptor::{FileDescriptor, OwnedHandle};
+ use lazy_static::lazy_static;
+-use shared_library::shared_library;
+-use std::ffi::OsString;
+-use std::io::Error as IoError;
+-use std::os::windows::ffi::OsStringExt;
++use sha2::{Digest, Sha256};
++use std::collections::BTreeSet;
++use std::ffi::{OsStr, OsString};
++use std::fs::File;
++use std::io::{Error as IoError, Read};
++use std::os::windows::ffi::{OsStrExt, OsStringExt};
++use std::os::windows::fs::MetadataExt;
+ use std::os::windows::io::{AsRawHandle, FromRawHandle};
+-use std::path::Path;
++use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+ use std::{mem, ptr};
+-use winapi::shared::minwindef::DWORD;
++use winapi::shared::minwindef::{DWORD, HMODULE};
+ use winapi::shared::winerror::{HRESULT, S_OK};
+ use winapi::um::handleapi::*;
++use winapi::um::libloaderapi::{
++    FreeLibrary, GetModuleHandleW, GetProcAddress, LoadLibraryExW,
++    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
++};
+ use winapi::um::processthreadsapi::*;
+ use winapi::um::winbase::{
+     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+@@ -30,26 +37,249 @@ pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
+ #[allow(dead_code)]
+ pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
+ 
+-shared_library!(ConPtyFuncs,
+-    pub fn CreatePseudoConsole(
+-        size: COORD,
+-        hInput: HANDLE,
+-        hOutput: HANDLE,
+-        flags: DWORD,
+-        hpc: *mut HPCON
+-    ) -> HRESULT,
+-    pub fn ResizePseudoConsole(hpc: HPCON, size: COORD) -> HRESULT,
+-    pub fn ClosePseudoConsole(hpc: HPCON),
+-);
++type CreatePseudoConsoleFn = unsafe extern "system" fn(
++    size: COORD,
++    h_input: HANDLE,
++    h_output: HANDLE,
++    flags: DWORD,
++    hpc: *mut HPCON,
++) -> HRESULT;
++type ResizePseudoConsoleFn = unsafe extern "system" fn(hpc: HPCON, size: COORD) -> HRESULT;
++type ClosePseudoConsoleFn = unsafe extern "system" fn(hpc: HPCON);
++
++// These fields intentionally mirror the exported Win32 symbol names.
++#[allow(non_snake_case)]
++struct ConPtyFuncs {
++    module: HMODULE,
++    owned: bool,
++    CreatePseudoConsole: CreatePseudoConsoleFn,
++    ResizePseudoConsole: ResizePseudoConsoleFn,
++    ClosePseudoConsole: ClosePseudoConsoleFn,
++}
++
++unsafe impl Send for ConPtyFuncs {}
++unsafe impl Sync for ConPtyFuncs {}
++
++impl Drop for ConPtyFuncs {
++    fn drop(&mut self) {
++        if self.owned {
++            unsafe { FreeLibrary(self.module) };
++        }
++    }
++}
++
++impl ConPtyFuncs {
++    unsafe fn from_module(module: HMODULE, owned: bool) -> Result<Self, String> {
++        if module.is_null() {
++            return Err(IoError::last_os_error().to_string());
++        }
++        Ok(Self {
++            module,
++            owned,
++            CreatePseudoConsole: load_symbol(module, b"CreatePseudoConsole\0")?,
++            ResizePseudoConsole: load_symbol(module, b"ResizePseudoConsole\0")?,
++            ClosePseudoConsole: load_symbol(module, b"ClosePseudoConsole\0")?,
++        })
++    }
++}
++
++unsafe fn load_symbol<T: Copy>(module: HMODULE, name: &'static [u8]) -> Result<T, String> {
++    let symbol = GetProcAddress(module, name.as_ptr().cast());
++    if symbol.is_null() {
++        return Err(format!(
++            "missing symbol {}",
++            String::from_utf8_lossy(&name[..name.len() - 1])
++        ));
++    }
++    Ok(mem::transmute_copy(&symbol))
++}
++
++fn load_system_conpty() -> Result<ConPtyFuncs, String> {
++    let kernel_name = wide_string(OsStr::new("kernel32.dll"));
++    let module = unsafe { GetModuleHandleW(kernel_name.as_ptr()) };
++    unsafe { ConPtyFuncs::from_module(module, false) }
++}
++
++fn load_app_local_conpty(path: &Path) -> Result<ConPtyFuncs, String> {
++    let wide_path = wide_string(path.as_os_str());
++    let module = unsafe {
++        LoadLibraryExW(
++            wide_path.as_ptr(),
++            ptr::null_mut(),
++            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
++        )
++    };
++    match unsafe { ConPtyFuncs::from_module(module, true) } {
++        Ok(functions) => Ok(functions),
++        Err(error) => {
++            if !module.is_null() {
++                unsafe { FreeLibrary(module) };
++            }
++            Err(error)
++        }
++    }
++}
++
++fn wide_string(value: &OsStr) -> Vec<u16> {
++    value.encode_wide().chain(Some(0)).collect()
++}
+ 
+ fn load_conpty() -> ConPtyFuncs {
+     // If the kernel doesn't export these functions then their system is
+     // too old and we cannot run.
+-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
+-        "this system does not support conpty.  Windows 10 October 2018 or newer is required",
+-    );
++    let system = load_system_conpty().unwrap_or_else(|error| {
++        panic!(
++            "this system does not support conpty. Windows 10 October 2018 or newer is required: {}",
++            error
++        )
++    });
++
++    if std::env::var("HERDR_WINDOWS_CONPTY").as_deref() == Ok("system") {
++        log::warn!("HERDR_WINDOWS_CONPTY=system disables Herdr's bundled ConPTY");
++        return system;
++    }
++
++    match app_local_conpty_path() {
++        Ok(Some(path)) => load_app_local_conpty(&path).unwrap_or_else(|error| {
++            panic!(
++                "failed to load verified app-local ConPTY from {}: {error}; set HERDR_WINDOWS_CONPTY=system to use the Windows system ConPTY",
++                path.display()
++            )
++        }),
++        Ok(None) => system,
++        Err(error) => panic!(
++            "Herdr's app-local ConPTY bundle is invalid: {}; reinstall Herdr or set HERDR_WINDOWS_CONPTY=system to use the Windows system ConPTY",
++            error
++        ),
++    }
++}
++
++const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
++const CONPTY_FILES: &[(&str, &str)] = &[
++    (
++        "conpty.dll",
++        "39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8",
++    ),
++    (
++        "x64/OpenConsole.exe",
++        "b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160",
++    ),
++    (
++        "arm64/OpenConsole.exe",
++        "ed7622fd0d3bedc9ab9f122f5e58edf0def9e7999224f52dd395ba9f54edbe09",
++    ),
++];
++
++fn app_local_conpty_path() -> Result<Option<PathBuf>, String> {
++    if std::env::consts::ARCH != "x86_64" {
++        return Ok(None);
++    }
++    let executable = std::env::current_exe()
++        .map_err(|error| format!("cannot locate the Herdr executable: {error}"))?;
++    let executable_dir = executable
++        .parent()
++        .ok_or_else(|| "Herdr executable has no parent directory".to_string())?;
++    let bundle = executable_dir.join("conpty");
++    if !bundle.exists() {
++        return Ok(None);
++    }
++    reject_reparse_point(&bundle)?;
++
++    let mut expected = BTreeSet::from(["herdr-conpty.json".to_string()]);
++    for (relative, expected_hash) in CONPTY_FILES {
++        expected.insert((*relative).to_string());
++        verify_bundle_file(&bundle, relative, expected_hash)?;
++    }
++    let marker = bundle.join("herdr-conpty.json");
++    verify_regular_file(&marker)?;
++
++    let actual = bundle_files(&bundle)?;
++    if actual != expected {
++        return Err(format!(
++            "unexpected bundle layout; expected {expected:?}, found {actual:?}"
++        ));
++    }
++    Ok(Some(bundle.join("conpty.dll")))
++}
++
++fn verify_bundle_file(root: &Path, relative: &str, expected_hash: &str) -> Result<(), String> {
++    let path = root.join(relative);
++    verify_regular_file(&path)?;
++    let mut file = File::open(&path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
++    let mut digest = Sha256::new();
++    let mut buffer = [0; 64 * 1024];
++    loop {
++        let read = file
++            .read(&mut buffer)
++            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
++        if read == 0 {
++            break;
++        }
++        digest.update(&buffer[..read]);
++    }
++    let actual_hash = format!("{:x}", digest.finalize());
++    if actual_hash != expected_hash {
++        return Err(format!(
++            "{} has hash {actual_hash}, expected {expected_hash}",
++            path.display()
++        ));
++    }
++    Ok(())
++}
++
++fn verify_regular_file(path: &Path) -> Result<(), String> {
++    let metadata = path
++        .symlink_metadata()
++        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
++    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
++        return Err(format!("{} is not a regular file", path.display()));
++    }
++    Ok(())
++}
++
++fn reject_reparse_point(path: &Path) -> Result<(), String> {
++    let metadata = path
++        .symlink_metadata()
++        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
++    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
++        return Err(format!("{} is not a regular directory", path.display()));
++    }
++    Ok(())
++}
++
++fn bundle_files(root: &Path) -> Result<BTreeSet<String>, String> {
++    fn visit(root: &Path, directory: &Path, files: &mut BTreeSet<String>) -> Result<(), String> {
++        reject_reparse_point(directory)?;
++        for entry in std::fs::read_dir(directory)
++            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
++        {
++            let entry = entry.map_err(|error| error.to_string())?;
++            let path = entry.path();
++            let metadata = path
++                .symlink_metadata()
++                .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
++            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
++                return Err(format!("{} is a reparse point", path.display()));
++            }
++            if metadata.is_dir() {
++                visit(root, &path, files)?;
++            } else if metadata.is_file() {
++                let relative = path
++                    .strip_prefix(root)
++                    .map_err(|error| error.to_string())?
++                    .to_string_lossy()
++                    .replace('\\', "/");
++                files.insert(relative);
++            } else {
++                return Err(format!("{} is not a regular file", path.display()));
++            }
++        }
++        Ok(())
++    }
+ 
+-    kernel
++    let mut files = BTreeSet::new();
++    visit(root, root, &mut files)?;
++    Ok(files)
+ }
+ 
+ lazy_static! {
+-- 
+2.55.0.windows.3

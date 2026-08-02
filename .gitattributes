@@ -1,2 +1,3 @@
 patches/upstream/*.patch -whitespace
+patches/delta/*.patch -whitespace
 packaging/windows/licenses/* binary

@@ -101,6 +101,7 @@ jobs:
           ref: ${{ steps.upstream_source.outputs.ref }}
           path: source
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Record immutable source identity
@@ -215,7 +216,13 @@ jobs:
             throw "could not read replayed Cargo package version"
           }
           $baseVersion = $Matches[1]
+          $stableTag = "v$baseVersion"
+          $tagCommit = (& git -C ..\source rev-list -n 1 $stableTag).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $base) {
+            throw "recorded BASE $base is not upstream stable release $stableTag"
+          }
           "HERDR_BASE_VERSION=$baseVersion" >> $env:GITHUB_ENV
+          "HERDR_UPSTREAM_RELEASE=$stableTag" >> $env:GITHUB_ENV
           $wire = Get-Content -LiteralPath ..\source\src\protocol\wire.rs -Raw
           if ($wire -notmatch 'pub const PROTOCOL_VERSION: u32 = ([0-9]+);') {
             throw "could not read replayed wire protocol version"
@@ -629,6 +636,7 @@ jobs:
             if [[ "$(jq -r .draft <<<"$release_json")" != "false" || \
                   "$(jq -r .prerelease <<<"$release_json")" != "true" || \
                   "$(jq -r '.immutable // false' <<<"$release_json")" != "true" || \
+                  "$(jq -r .name <<<"$release_json")" != "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})" || \
                   "$(jq '.assets | length' <<<"$release_json")" != "3" ]]; then
               echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
@@ -642,6 +650,7 @@ jobs:
             echo "Unofficial herdr-win Windows snapshot built from upstream Herdr plus the maintained delta."
             echo
             echo "- herdr-win release: \`v${RELEASE_VERSION}\`"
+            echo "- Upstream release: \`Herdr v${BASE_VERSION}\`"
             echo "- Upstream source: \`${UPSTREAM_SHA}\`"
             echo "- herdr-win control revision: \`${CONTROL_SHA}\`"
             echo "- Build identity: \`${BUILD_ID}\`"
@@ -688,7 +697,7 @@ jobs:
               "${INSTALLER_ASSET_NAME}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "herdr-win v${RELEASE_VERSION}" \
+              --title "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})" \
               --notes-file RELEASE_NOTES.md \
               --prerelease \
               --latest=false

@@ -9,15 +9,17 @@ behavior; code and tests remain the detailed implementation truth.
 
 ## Source and Ownership Model
 
-- Release source is a fresh checkout of the reviewed `ogulcancelik/herdr` revision
-  recorded in `BASE` plus the ordered `patches/delta/series` queue.
-  `BASE` records the reviewed upstream commit; the control branch is not an
-  integration product branch.
-- `BASE` is a deliberate user-selected integration boundary, not a moving pointer.
-  Ordinary work and fork-origin synchronization never advance it. Refreshing from
-  official upstream is a separate, manual user-directed maintenance operation.
-  There is no scheduled upstream replay or release path; manual release dispatch
-  always replays the recorded `BASE`.
+- Release source is a fresh checkout of the exact commit behind the upstream stable
+  release recorded in `BASE` plus the ordered `patches/delta/series` queue. At each
+  explicit manual refresh, that commit must be the latest non-draft,
+  non-prerelease stable release then published by `ogulcancelik/herdr`; the control
+  branch is not an integration product branch.
+- `BASE` is a deliberate reviewed stable-release boundary, not a moving pointer.
+  Ordinary work and fork-origin synchronization never advance it. Between explicit
+  user-directed refreshes, releases stay on the recorded stable source even if
+  upstream moves. There is no scheduled upstream replay or release path; manual
+  release dispatch always replays the recorded `BASE` and verifies its `v<Cargo
+  version>` stable tag.
 - Each maintained product responsibility has one logical mailbox. Evolving a
   responsibility refreshes its mailbox rather than appending development history.
   A new mailbox requires an independent owner, verification plan, and upstream
@@ -121,6 +123,10 @@ behavior; code and tests remain the detailed implementation truth.
   currently using `windows_amd64`. The manifest's upstream-compatible target keys
   remain separate from filenames so additional upstream-supported platforms can
   use the same release and naming contract later.
+- Machine-consumed tags and asset filenames remain CalVer-only for existing updater
+  compatibility. The GitHub release title is `herdr-win v<CalVer> (Herdr
+  v<upstream-version>)`; release notes and installer metadata expose that same
+  stable upstream version alongside the CalVer-bearing original filename.
 - The runtime build ID remains the upstream/control 12-hex pair because it owns
   managed-runtime identity and exact source provenance. CalVer owns the human fork
   release identity; the upstream Cargo version remains compatibility/provenance

@@ -2,7 +2,7 @@
 
 This is the canonical product delta applied by the manually dispatched herdr-win
 release workflow on top of the reviewed [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr)
-commit recorded in `BASE`.
+stable-release commit recorded in `BASE`.
 
 The queue intentionally contains a few coarse, logical feature patches rather
 than one monolith or a patch for every development commit:
@@ -19,7 +19,8 @@ turning the queue into task history.
 
 ## Files
 
-- `BASE` records the upstream commit used for the latest reviewed refresh.
+- `BASE` records the exact commit behind the latest non-draft, non-prerelease
+  upstream stable release selected during the latest explicit manual refresh.
 - `series` is the only release application order.
 - `*.patch` files are full-index, binary-safe `git format-patch` mailboxes.
 
@@ -28,13 +29,16 @@ files and do not belong in this product patch queue.
 
 ## Refreshing the queue
 
-1. Manually choose and review an upstream commit, then start a clean branch there.
+1. Query the official latest stable release, fetch and peel its `v<version>` tag,
+   verify it is neither draft nor prerelease, and start a clean branch at that
+   exact commit.
 2. Apply `series` in order with `git am --3way`.
 3. Resolve upstream drift in the patch that owns the behavior.
 4. Keep one reviewed commit per logical patch and regenerate its mailbox with
    `git format-patch --full-index --binary`.
-5. Preserve the stable filename, update `BASE`, replay the complete queue on a
-   fresh upstream checkout, and run the relevant verification.
+5. Preserve the stable filename, update `BASE` only after review, replay the
+   complete queue on a fresh checkout of that tagged stable commit, verify the tag
+   matches Cargo version, and run the relevant verification.
 
 Validate the control-plane inventory with:
 
