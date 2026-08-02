@@ -92,6 +92,12 @@ active memory owner.
 - Preserve the user-visible promises in `PRODUCT.md` and technical boundaries in
   `ARCHITECTURE.md`; do not hide a changed product or architecture decision inside
   a mailbox refresh or procedural edit.
+- Do not add Windows installer compatibility handling for non-current install
+  layouts: no alternate manifest/layout parser, migration, backup, junction bridge,
+  or parent-PID exception. Preserve and reject such roots with the documented
+  uninstall-first action. This does not weaken current managed locked-binary safety;
+  immutable runtimes, per-build leases, pending activation, and process-safe
+  uninstall remain required.
 - Status inspection is pure and never starts or retries work.
 - Keyboard-first terminal interaction remains complete end to end.
 - Windows PTY integration owns process-tree cleanup, handle inheritance, resize,
