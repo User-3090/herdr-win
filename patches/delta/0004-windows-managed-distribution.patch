@@ -1,4 +1,4 @@
-From ec4e18a6c4f273779e2f931d5c6d5c0d7d0d2f1d Mon Sep 17 00:00:00 2001
+From 94b8bcbdf0f2039017d747580c440f682b847a5d Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -16,7 +16,7 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  483 ++++
+ packaging/windows/installer/project.nsi       |  482 ++++
  scripts/package_windows_conpty.py             |   24 +-
  scripts/package_windows_installer.ps1         |  455 ++++
  scripts/preview.py                            |   80 +-
@@ -24,9 +24,9 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  170 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  557 +++++
+ scripts/test_windows_installer.py             |  556 +++++
  .../windows_install_conpty_package_test.ps1   |  144 +-
- scripts/windows_installer_fault_test.ps1      |  344 +++
+ scripts/windows_installer_fault_test.ps1      |  347 +++
  scripts/windows_installer_test.ps1            |  614 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
@@ -48,8 +48,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    8 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  526 ++++-
- website/install.ps1                           |    5 +-
- 44 files changed, 7753 insertions(+), 293 deletions(-)
+ 43 files changed, 7750 insertions(+), 292 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -53596,10 +53595,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb7d13607e04a03b5eae9e253c26946c40a0fdf1
+index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb108620de63870
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,483 @@
+@@ -0,0 +1,482 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -53666,7 +53665,6 @@ index 0000000000000000000000000000000000000000..fb7d13607e04a03b5eae9e253c26946c
 +ShowInstDetails show
 +ShowUninstDetails show
 +AutoCloseWindow true
-+BrandingText "${INFO_PRODUCTNAME}"
 +ManifestDPIAware true
 +VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
 +VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
@@ -53729,7 +53727,7 @@ index 0000000000000000000000000000000000000000..fb7d13607e04a03b5eae9e253c26946c
 +
 +LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
 +LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-+LangString AppSettingsPageText ${LANG_ENGLISH} "Keep this selected for a clean removal. Clear it to reuse your configuration and sessions after installing ${INFO_PRODUCTNAME} again."
++LangString AppSettingsPageText ${LANG_ENGLISH} "Settings and session data are kept by default. Select this only if you also want to delete them."
 +LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
 +LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 +
@@ -53835,12 +53833,12 @@ index 0000000000000000000000000000000000000000..fb7d13607e04a03b5eae9e253c26946c
 +
 +Function un.onInit
 +  SetShellVarContext current
-+  StrCpy $SettingsDisposition "Remove"
++  StrCpy $SettingsDisposition "Keep"
 +  ${GetParameters} $0
 +  ClearErrors
-+  ${GetOptions} "$0" "/KEEP_SETTINGS" $1
++  ${GetOptions} "$0" "/REMOVE_SETTINGS" $1
 +  ${IfNot} ${Errors}
-+    StrCpy $SettingsDisposition "Keep"
++    StrCpy $SettingsDisposition "Remove"
 +  ${EndIf}
 +  Call un.SetPowerShellPath
 +  IfFileExists "$PowerShellPath" un_powershell_ok
@@ -55101,10 +55099,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..c38f96c61dd187c594d7ec7ed0a0593a93444e48
+index 0000000000000000000000000000000000000000..7de4d1e0ef0f9bf1791c321ca672401b5ec8c293
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,556 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -55346,7 +55344,7 @@ index 0000000000000000000000000000000000000000..c38f96c61dd187c594d7ec7ed0a0593a
 +        self.assertNotRegex(nsi, re.compile(r"herdr", re.IGNORECASE))
 +        self.assertIn('Name "${INFO_PRODUCTNAME}"', nsi)
 +        self.assertIn('Caption "${INFO_PRODUCTNAME} Setup"', nsi)
-+        self.assertIn('BrandingText "${INFO_PRODUCTNAME}"', nsi)
++        self.assertNotIn("BrandingText", nsi)
 +        self.assertIn('!include "MUI2.nsh"', nsi)
 +        self.assertIn('!include "nsDialogs.nsh"', nsi)
 +        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
@@ -55470,9 +55468,10 @@ index 0000000000000000000000000000000000000000..c38f96c61dd187c594d7ec7ed0a0593a
 +        self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
 +        self.assertIn("IntCmp $0 600", nsi)
-+        self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
-+        self.assertIn('${GetOptions} "$0" "/KEEP_SETTINGS" $1', nsi)
 +        self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
++        self.assertIn('${GetOptions} "$0" "/REMOVE_SETTINGS" $1', nsi)
++        self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
++        self.assertNotIn("/KEEP_SETTINGS", nsi)
 +        self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
 +        self.assertIn('-SettingsDisposition "$SettingsDisposition"', nsi)
 +        self.assertIn('SettingsDisposition = "Keep"', helper)
@@ -55630,8 +55629,6 @@ index 0000000000000000000000000000000000000000..c38f96c61dd187c594d7ec7ed0a0593a
 +        self.assertNotIn("website\\install.ps1", package_smoke)
 +        self.assertIn('"validate"', package_smoke)
 +
-+        old_installer = (PROJECT_ROOT / "website/install.ps1").read_text(encoding="utf-8")
-+        self.assertIn("Where-Object { $_.PSIsContainer }", old_installer)
 +        self.assertIn("managed-install-v1", HELPER.read_text(encoding="utf-8"))
 +
 +    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell contract test")
@@ -55821,10 +55818,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..d21517169521b05386f21ba2faeb6b45
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a19d4a376
+index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760afe25174
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,347 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -56044,7 +56041,7 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +        }
 +        Assert-TestSkillInstalled
 +        New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
-+        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-by-default")
++        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-by-default")
 +
 +        $uninstaller = Join-Path $installRoot "uninstall.exe"
 +        [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
@@ -56062,8 +56059,8 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +            [IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
 +            throw "Injected uninstall $fault removed a foreign skill sibling."
 +        }
-+        if (Test-Path -LiteralPath $settingsRoot) {
-+            throw "Injected uninstall $fault retained settings despite the default removal policy."
++        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-by-default") {
++            throw "Injected uninstall $fault did not preserve settings by default."
 +        }
 +        if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
 +            throw "Injected uninstall $fault removed its retry executable."
@@ -56075,6 +56072,10 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +                -not (Test-Path -LiteralPath $arpKey) -and
 +                -not (Test-Path -LiteralPath $faultMarker)
 +        }
++        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-by-default") {
++            throw "Retry uninstall $fault did not preserve settings by default."
++        }
++        Remove-Item -LiteralPath $settingsRoot -Recurse -Force
 +        Write-Host "Uninstall fault retry passed: $fault"
 +    }
 +
@@ -56106,12 +56107,12 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +    }
 +    Assert-TestSkillInstalled
 +    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
-+    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-explicitly")
++    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-explicitly")
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
 +    New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
 +    $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/KEEP_SETTINGS")
++    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
 +    if ($modifiedUninstallExit -ne 0) {
 +        throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
 +    }
@@ -56134,10 +56135,9 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +    if ([IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
 +        throw "Sibling-preserving uninstall removed Claude skill content."
 +    }
-+    if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-explicitly") {
-+        throw "Uninstall ignored /KEEP_SETTINGS."
++    if (Test-Path -LiteralPath $settingsRoot) {
++        throw "Uninstall ignored /REMOVE_SETTINGS."
 +    }
-+    Remove-Item -LiteralPath $settingsRoot -Recurse -Force
 +    Write-Host "Sibling-preserving skill uninstall passed."
 +} finally {
 +    Remove-TestInstallIfPresent
@@ -60496,19 +60496,3 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
          assert_eq!(release.target_protocol, Some(77));
          assert_eq!(release.sha256.as_deref(), Some("deadbeef"));
      }
-diff --git a/website/install.ps1 b/website/install.ps1
-index e5842dc8f54be11f544d574e438ffc73ce3aaac9..7934eae0427db1a13c24095446006bf31ada0704 100644
---- a/website/install.ps1
-+++ b/website/install.ps1
-@@ -603,7 +603,10 @@ try {
- 
-         if (-not (Test-HerdrReleaseComplete -ReleaseDir $releaseDir -Format $asset.Format)) {
-             $downloadPath = Join-Path $tempDir "herdr-download.$($asset.Format)"
--            $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
-+            # Keep the transient path short enough for Windows PowerShell 5.1's
-+            # Expand-Archive implementation on systems without long paths.
-+            # The install lock makes the process ID unique for this operation.
-+            $stagingDir = Join-Path $releasesDir ".staging.$PID"
-             Write-Step "Downloading Herdr"
-             Invoke-WebRequest -Uri $asset.Url -OutFile $downloadPath
-             Test-FileDigest -Path $downloadPath -ExpectedDigest $asset.Sha256

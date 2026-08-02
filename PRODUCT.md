@@ -50,11 +50,11 @@ tests remain the detailed implementation truth.
   removes the managed program, user `PATH` entry, Installed Apps registration, and
   `SKILL.md` at its managed universal and Claude locations even when that file was
   edited after installation. Other skill-directory content is preserved, and an
-  empty `herdr` skill directory is removed. The
-  interactive uninstaller defaults to also removing configuration and session data
-  under `%USERPROFILE%\.herdr`; users can clear that checkbox to keep the data for
-  a later installation. Silent uninstall uses the same remove-by-default policy and
-  accepts `/KEEP_SETTINGS` as the explicit preservation choice.
+  empty `herdr` skill directory is removed. The interactive uninstaller preserves
+  configuration and session data under `%USERPROFILE%\.herdr` by default; users
+  must explicitly select the removal checkbox to delete it. Silent uninstall uses
+  the same preserve-by-default policy and accepts `/REMOVE_SETTINGS` as the explicit
+  deletion choice.
 - The executable and setup are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.

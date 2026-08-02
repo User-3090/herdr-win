@@ -217,7 +217,7 @@ try {
         }
         Assert-TestSkillInstalled
         New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-by-default")
+        [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-by-default")
 
         $uninstaller = Join-Path $installRoot "uninstall.exe"
         [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
@@ -235,8 +235,8 @@ try {
             [IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
             throw "Injected uninstall $fault removed a foreign skill sibling."
         }
-        if (Test-Path -LiteralPath $settingsRoot) {
-            throw "Injected uninstall $fault retained settings despite the default removal policy."
+        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-by-default") {
+            throw "Injected uninstall $fault did not preserve settings by default."
         }
         if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
             throw "Injected uninstall $fault removed its retry executable."
@@ -248,6 +248,10 @@ try {
                 -not (Test-Path -LiteralPath $arpKey) -and
                 -not (Test-Path -LiteralPath $faultMarker)
         }
+        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-by-default") {
+            throw "Retry uninstall $fault did not preserve settings by default."
+        }
+        Remove-Item -LiteralPath $settingsRoot -Recurse -Force
         Write-Host "Uninstall fault retry passed: $fault"
     }
 
@@ -279,12 +283,12 @@ try {
     }
     Assert-TestSkillInstalled
     New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
-    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-explicitly")
+    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-explicitly")
     [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
     [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
     $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/KEEP_SETTINGS")
+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
     if ($modifiedUninstallExit -ne 0) {
         throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
     }
@@ -307,10 +311,9 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt")) -cne "previous resource") {
         throw "Sibling-preserving uninstall removed Claude skill content."
     }
-    if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-explicitly") {
-        throw "Uninstall ignored /KEEP_SETTINGS."
+    if (Test-Path -LiteralPath $settingsRoot) {
+        throw "Uninstall ignored /REMOVE_SETTINGS."
     }
-    Remove-Item -LiteralPath $settingsRoot -Recurse -Force
     Write-Host "Sibling-preserving skill uninstall passed."
 } finally {
     Remove-TestInstallIfPresent

@@ -73,10 +73,10 @@ behavior; code and tests remain the detailed implementation truth.
   provide native 100–200% DPI buckets without runtime resampling. Installer
   compression uses datablock optimization, an 8 MiB LZMA dictionary, and solid
   final LZMA settings.
-- Interactive and silent uninstall both default to removing
-  `%USERPROFILE%\.herdr`; the interactive checkbox or `/KEEP_SETTINGS` can preserve
-  it. Settings cleanup stays in the helper's validated filesystem boundary and
-  fails closed on ambiguous/reparse-point content rather than following it.
+- Interactive and silent uninstall both preserve `%USERPROFILE%\.herdr` by
+  default; the interactive checkbox or `/REMOVE_SETTINGS` explicitly authorizes
+  deletion. Settings cleanup stays in the helper's validated filesystem boundary
+  and fails closed on ambiguous/reparse-point content rather than following it.
 - `src/distribution.rs` is the single fork channel/source configuration. New
   Windows clients consume the separately hashed immutable NSIS asset from the fork
   release; there is no upstream-source fallback. The portable ZIP remains only as

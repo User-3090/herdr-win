@@ -1147,7 +1147,7 @@ jobs:
             if ($managedUpdate -notlike "*$expected*") {
               throw "managed updater did not confirm the published fork build: $managedUpdate"
             }
-            Invoke-BoundedProcess -FilePath (Join-Path $installRoot "uninstall.exe") -Arguments @("/S")
+            Invoke-BoundedProcess -FilePath (Join-Path $installRoot "uninstall.exe") -Arguments @("/S", "/REMOVE_SETTINGS")
             Wait-Condition -Description "managed uninstall" -Condition {
               -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
             }
@@ -1155,7 +1155,7 @@ jobs:
             $uninstaller = Join-Path $installRoot "uninstall.exe"
             if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
               try {
-                Invoke-BoundedProcess -FilePath $uninstaller -Arguments @("/S")
+                Invoke-BoundedProcess -FilePath $uninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
               } catch {
                 Write-Warning $_
               }

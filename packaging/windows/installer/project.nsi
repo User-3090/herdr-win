@@ -64,7 +64,6 @@ AllowSkipFiles off
 ShowInstDetails show
 ShowUninstDetails show
 AutoCloseWindow true
-BrandingText "${INFO_PRODUCTNAME}"
 ManifestDPIAware true
 VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
 VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
@@ -127,7 +126,7 @@ UninstPage custom un.SettingsPage un.SettingsPageLeave
 
 LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
 LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-LangString AppSettingsPageText ${LANG_ENGLISH} "Keep this selected for a clean removal. Clear it to reuse your configuration and sessions after installing ${INFO_PRODUCTNAME} again."
+LangString AppSettingsPageText ${LANG_ENGLISH} "Settings and session data are kept by default. Select this only if you also want to delete them."
 LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
 LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 
@@ -233,12 +232,12 @@ FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
-  StrCpy $SettingsDisposition "Remove"
+  StrCpy $SettingsDisposition "Keep"
   ${GetParameters} $0
   ClearErrors
-  ${GetOptions} "$0" "/KEEP_SETTINGS" $1
+  ${GetOptions} "$0" "/REMOVE_SETTINGS" $1
   ${IfNot} ${Errors}
-    StrCpy $SettingsDisposition "Keep"
+    StrCpy $SettingsDisposition "Remove"
   ${EndIf}
   Call un.SetPowerShellPath
   IfFileExists "$PowerShellPath" un_powershell_ok

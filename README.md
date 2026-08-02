@@ -72,7 +72,7 @@ If older managed sessions are still active, the update is reported as staged. Th
 
 ### Uninstall
 
-Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and `SKILL.md` from the managed universal and Claude skill locations even if that file was edited. Every sibling remains untouched, and the `herdr` skill directory is removed only when empty. **Remove Herdr settings and session data** is selected by default; clear it to keep `%USERPROFILE%\.herdr` for a later installation. Silent uninstall also removes those settings by default; pass `/KEEP_SETTINGS` to preserve them.
+Close all managed Herdr sessions, then uninstall **Herdr** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, user `PATH` entry, Installed Apps registration, and `SKILL.md` from the managed universal and Claude skill locations even if that file was edited. Every sibling remains untouched, and the `herdr` skill directory is removed only when empty. **Remove Herdr settings and session data** is clear by default, preserving `%USERPROFILE%\.herdr` for a later installation unless you select it. Silent uninstall also preserves settings by default; pass `/REMOVE_SETTINGS` to delete them explicitly.
 
 ## Maintained Windows delta
 
