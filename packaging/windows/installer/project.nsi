@@ -82,8 +82,6 @@ VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFIL
 !include "nsDialogs.nsh"
 !include "x64.nsh"
 
-Var ParentPid
-Var ParentPidProvided
 Var PowerShellPath
 Var HelperExitCode
 Var HelperOutput
@@ -161,41 +159,6 @@ Function un.SetPowerShellPath
   ${EndIf}
 FunctionEnd
 
-Function ValidateParentPid
-  StrCpy $0 "0"
-  StrCmp $ParentPidProvided "1" 0 parent_pid_valid
-  StrLen $1 $ParentPid
-  IntCmp $1 0 parent_pid_invalid parent_pid_invalid parent_pid_length_nonzero
-parent_pid_length_nonzero:
-  IntCmp $1 10 parent_pid_digits parent_pid_digits parent_pid_invalid
-parent_pid_digits:
-  StrCpy $2 0
-  StrCpy $3 "0"
-parent_pid_loop:
-  StrCpy $4 $ParentPid 1 $2
-  StrCmp $4 "" parent_pid_done
-  StrCmp $4 "0" parent_pid_next
-  StrCmp $4 "1" parent_pid_nonzero
-  StrCmp $4 "2" parent_pid_nonzero
-  StrCmp $4 "3" parent_pid_nonzero
-  StrCmp $4 "4" parent_pid_nonzero
-  StrCmp $4 "5" parent_pid_nonzero
-  StrCmp $4 "6" parent_pid_nonzero
-  StrCmp $4 "7" parent_pid_nonzero
-  StrCmp $4 "8" parent_pid_nonzero
-  StrCmp $4 "9" parent_pid_nonzero parent_pid_invalid
-parent_pid_nonzero:
-  StrCpy $3 "1"
-parent_pid_next:
-  IntOp $2 $2 + 1
-  Goto parent_pid_loop
-parent_pid_done:
-  StrCmp $3 "1" parent_pid_valid parent_pid_invalid
-parent_pid_valid:
-  StrCpy $0 "1"
-parent_pid_invalid:
-FunctionEnd
-
 Function FailInstall
   Exch $0
   DetailPrint "$0"
@@ -261,20 +224,6 @@ Function .onInit
     Call FailInstall
   ${EndIf}
   Call WaitForUpdaterStartGate
-
-  StrCpy $ParentPid "0"
-  StrCpy $ParentPidProvided "0"
-  ${GetParameters} $0
-  ClearErrors
-  ${GetOptions} "$0" "/PARENT_PID=" $ParentPid
-  ${IfNot} ${Errors}
-    StrCpy $ParentPidProvided "1"
-  ${EndIf}
-  Call ValidateParentPid
-  StrCmp $0 "1" parent_pid_ok
-  Push "Invalid /PARENT_PID value. Expected a positive decimal process ID."
-  Call FailInstall
-parent_pid_ok:
   Call SetPowerShellPath
   IfFileExists "$PowerShellPath" powershell_ok
   Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
@@ -441,7 +390,7 @@ Section "${INFO_PRODUCTNAME}" SEC_APP
   Call FailInstall
 
 installer_inputs_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -ParentPid "$ParentPid"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete

@@ -1,4 +1,4 @@
-From ed463f160ac9233ed662f739fb27abd807009795 Mon Sep 17 00:00:00 2001
+From ec4e18a6c4f273779e2f931d5c6d5c0d7d0d2f1d Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 2218 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 1985 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -16,7 +16,7 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  534 ++++
+ packaging/windows/installer/project.nsi       |  483 ++++
  scripts/package_windows_conpty.py             |   24 +-
  scripts/package_windows_installer.ps1         |  455 ++++
  scripts/preview.py                            |   80 +-
@@ -24,10 +24,10 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  170 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  555 +++++
+ scripts/test_windows_installer.py             |  557 +++++
  .../windows_install_conpty_package_test.ps1   |  144 +-
  scripts/windows_installer_fault_test.ps1      |  344 +++
- scripts/windows_installer_test.ps1            |  651 +++++
+ scripts/windows_installer_test.ps1            |  614 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -42,14 +42,14 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  229 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  154 +-
- src/platform/windows/launcher.rs              | 1319 ++++++++++
- src/platform/windows/managed_install.rs       |  687 +++++
+ src/platform/windows/launcher.rs              | 1319 +++++++++++
+ src/platform/windows/managed_install.rs       |  687 ++++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  527 +++-
+ src/update.rs                                 |  526 ++++-
  website/install.ps1                           |    5 +-
- 44 files changed, 8073 insertions(+), 293 deletions(-)
+ 44 files changed, 7753 insertions(+), 293 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -150,10 +150,10 @@ index a3726db05cd7efeb29091aaf68339e68f50c3b62..dfb681f74799c988f744d758aadeedc4
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386f6807cd6
+index 0000000000000000000000000000000000000000..b90220ca42f3d75a02b413ed21c2b1454b398fc0
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,2218 @@
+@@ -0,0 +1,1985 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall")]
@@ -171,7 +171,6 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +    [string]$NumericVersion,
 +    [ValidateSet("Keep", "Remove")]
 +    [string]$SettingsDisposition = "Keep",
-+    [long]$ParentPid = 0,
 +    [switch]$Silent
 +)
 +
@@ -1469,100 +1468,8 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +    }
 +}
 +
-+function Get-HerdrLegacyPayloadFiles {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
-+        (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
-+    })
-+    [Array]::Sort($files, [StringComparer]::Ordinal)
-+    return $files
-+}
-+
-+function Test-HerdrRecognizedLegacyPayload {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    try {
-+        $actual = @(Get-HerdrLegacyPayloadFiles -Path $Path)
-+    } catch {
-+        return $false
-+    }
-+    $single = @("herdr.exe")
-+    $conpty = @(
-+        "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-LICENSE.txt",
-+        "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-NOTICE.md",
-+        "conpty/arm64/OpenConsole.exe",
-+        "conpty/conpty.dll",
-+        "conpty/herdr-conpty.json",
-+        "conpty/x64/OpenConsole.exe",
-+        "herdr.exe"
-+    )
-+    [Array]::Sort($conpty, [StringComparer]::Ordinal)
-+    return (@(Compare-Object $actual $single -CaseSensitive).Count -eq 0) -or
-+        (@(Compare-Object $actual $conpty -CaseSensitive).Count -eq 0)
-+}
-+
-+function Get-HerdrJunctionTarget {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    $item = Get-Item -LiteralPath $Path -Force
-+    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType -ne "Junction") {
-+        throw "Only a recognized legacy Herdr junction can be migrated: $Path"
-+    }
-+    $targets = @($item.Target)
-+    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
-+        throw "Legacy Herdr junction has an ambiguous target: $Path"
-+    }
-+    $target = [string]$targets[0]
-+    if (-not [IO.Path]::IsPathRooted($target)) {
-+        $target = Join-Path (Split-Path -Parent $Path) $target
-+    }
-+    return [IO.Path]::GetFullPath($target).TrimEnd('\')
-+}
-+
-+function Assert-HerdrRecognizedLegacyEntry {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-+    )
-+
-+    if (Test-HerdrReparsePoint -Path $Path) {
-+        $target = Get-HerdrJunctionTarget -Path $Path
-+        if (-not (Test-HerdrPathWithin -Path $target -Root $LegacyReleasesRoot) -or
-+            -not (Test-HerdrRecognizedLegacyPayload -Path $target)) {
-+            throw "Legacy Herdr junction target is not an exact owned release: $Path"
-+        }
-+        return
-+    }
-+    if (-not (Test-HerdrRecognizedLegacyPayload -Path $Path)) {
-+        throw "Legacy Herdr directory has an unrecognized layout: $Path"
-+    }
-+}
-+
-+function Assert-HerdrLegacyRoot {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Root,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-+    )
-+
-+    Assert-HerdrRegularDirectory -Path $Root
-+    $entries = @(Get-ChildItem -LiteralPath $Root -Force)
-+    foreach ($entry in $entries) {
-+        if (($entry.Name -cne "bin" -and $entry.Name -cnotmatch '^bin\.legacy\.[0-9a-f]{32}$') -or -not $entry.PSIsContainer) {
-+            throw "Refusing ambiguous legacy Herdr root content: $($entry.FullName)"
-+        }
-+        Assert-HerdrRecognizedLegacyEntry -Path $entry.FullName -LegacyReleasesRoot $LegacyReleasesRoot
-+    }
-+    if (@($entries | Where-Object { $_.Name -ceq "bin" }).Count -ne 1) {
-+        throw "Legacy Herdr root does not contain exactly one bin entry."
-+    }
-+}
-+
 +function Get-HerdrRootKind {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-+    )
++    param([Parameter(Mandatory = $true)][string]$InstallRoot)
 +
 +    if (-not (Test-Path -LiteralPath $InstallRoot)) {
 +        return "New"
@@ -1575,42 +1482,8 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +        Assert-HerdrManagedRoot -InstallRoot $InstallRoot
 +        return "Managed"
 +    } catch {
-+        try {
-+            Assert-HerdrLegacyRoot -Root $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
-+            return "Legacy"
-+        } catch {
-+            throw "Herdr install root is neither an exact managed nor recognized legacy layout: $InstallRoot"
-+        }
++        throw "The existing Herdr installation is not compatible with this setup. Uninstall Herdr from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
 +    }
-+}
-+
-+function Get-HerdrLegacyBackups {
-+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
-+
-+    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
-+    $parent = Split-Path -Parent $InstallRoot
-+    if (-not (Test-Path -LiteralPath $parent)) {
-+        return @()
-+    }
-+    Assert-HerdrRegularDirectory -Path $parent
-+    $leaf = [regex]::Escape((Split-Path -Leaf $InstallRoot))
-+    return @(Get-ChildItem -LiteralPath $parent -Force -Directory | Where-Object {
-+        $_.Name -cmatch "^$leaf\.legacy-backup\.[0-9a-f]{32}$"
-+    } | ForEach-Object { $_.FullName })
-+}
-+
-+function Get-HerdrLegacyReleasesRoot {
-+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-+        throw "USERPROFILE is not set; legacy Herdr ownership cannot be checked safely."
-+    }
-+    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".herdr\packages\standalone\releases")).TrimEnd('\')
-+}
-+
-+function Get-HerdrLegacyInstallLockPath {
-+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-+        throw "USERPROFILE is not set; legacy Herdr install lock cannot be located."
-+    }
-+    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".herdr\packages\standalone\install.lock"))
 +}
 +
 +function Get-HerdrLifecycleLockPath {
@@ -1720,32 +1593,6 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +    return $false
 +}
 +
-+function Test-HerdrLegacyProcessBusy {
-+    param(
-+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Processes,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-+        [long]$ParentPid = 0
-+    )
-+
-+    foreach ($process in $Processes) {
-+        $path = [string]$process.ExecutablePath
-+        if ([string]::IsNullOrWhiteSpace($path)) {
-+            continue
-+        }
-+        if ($ParentPid -gt 0 -and [long]$process.ProcessId -eq $ParentPid) {
-+            continue
-+        }
-+        if (Test-HerdrPathWithin -Path $path -Root $InstallRoot) {
-+            return $true
-+        }
-+        if (Test-HerdrPathWithin -Path $path -Root $LegacyReleasesRoot) {
-+            return $true
-+        }
-+    }
-+    return $false
-+}
-+
 +function Get-HerdrLeaseStatus {
 +    param([Parameter(Mandatory = $true)][string]$LeasesDir)
 +
@@ -1817,79 +1664,18 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +    Assert-HerdrManagedRoot -InstallRoot $Destination
 +}
 +
-+function Restore-HerdrLegacyBackupIfNeeded {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-+        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-+        [int]$LockTimeoutMilliseconds = 30000
-+    )
-+
-+    if (Test-Path -LiteralPath $InstallRoot) {
-+        return
-+    }
-+    $backups = @(Get-HerdrLegacyBackups -InstallRoot $InstallRoot)
-+    if ($backups.Count -eq 0) {
-+        return
-+    }
-+    if ($backups.Count -ne 1) {
-+        throw "Multiple legacy Herdr backups exist while the visible root is absent; refusing ambiguous recovery."
-+    }
-+    Assert-HerdrLegacyRoot -Root $backups[0] -LegacyReleasesRoot $LegacyReleasesRoot
-+    $legacyLock = Open-HerdrShareModeLock -Path $LegacyInstallLockPath -TimeoutMilliseconds $LockTimeoutMilliseconds
-+    try {
-+        if (-not (Test-Path -LiteralPath $InstallRoot)) {
-+            [IO.Directory]::Move($backups[0], $InstallRoot)
-+        }
-+    } finally {
-+        $legacyLock.Dispose()
-+    }
-+}
-+
 +function Publish-HerdrFreshTransaction {
 +    param(
 +        [Parameter(Mandatory = $true)][object]$Transaction,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-+        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-+        [ValidateSet("New", "Legacy")][string]$RootKind,
-+        [long]$ParentPid = 0,
-+        [int]$LockTimeoutMilliseconds = 30000,
-+        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
++        [Parameter(Mandatory = $true)][string]$InstallRoot
 +    )
 +
 +    $stagedRoot = Join-Path $Transaction.Path "root"
 +    Assert-HerdrManagedRoot -InstallRoot $stagedRoot
-+    if ($RootKind -eq "New") {
-+        if (Test-Path -LiteralPath $InstallRoot) {
-+            throw "Herdr install root appeared before fresh publication."
-+        }
-+        [IO.Directory]::Move($stagedRoot, $InstallRoot)
-+        return $null
++    if (Test-Path -LiteralPath $InstallRoot) {
++        throw "Herdr install root appeared before fresh publication."
 +    }
-+
-+    $legacyLock = Open-HerdrShareModeLock -Path $LegacyInstallLockPath -TimeoutMilliseconds $LockTimeoutMilliseconds
-+    $backup = $null
-+    try {
-+        Assert-HerdrLegacyRoot -Root $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
-+        $processes = @(& $ProcessProvider)
-+        if (Test-HerdrLegacyProcessBusy -Processes $processes -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -ParentPid $ParentPid) {
-+            throw "A legacy Herdr process is still active; close it before migration."
-+        }
-+        $backup = "$InstallRoot.legacy-backup.$([Guid]::NewGuid().ToString('N'))"
-+        [IO.Directory]::Move($InstallRoot, $backup)
-+        try {
-+            [IO.Directory]::Move($stagedRoot, $InstallRoot)
-+        } catch {
-+            if (-not (Test-Path -LiteralPath $InstallRoot) -and (Test-Path -LiteralPath $backup)) {
-+                [IO.Directory]::Move($backup, $InstallRoot)
-+            }
-+            throw
-+        }
-+        return $backup
-+    } finally {
-+        $legacyLock.Dispose()
-+    }
++    [IO.Directory]::Move($stagedRoot, $InstallRoot)
 +}
 +
 +function Install-HerdrManagedUpgrade {
@@ -1987,11 +1773,7 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
-+        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-+        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-+        [long]$ParentPid = 0,
-+        [int]$LockTimeoutMilliseconds = 30000,
-+        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
++        [int]$LockTimeoutMilliseconds = 30000
 +    )
 +
 +    Assert-HerdrVersionIdentity -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion -BuildId $BuildId
@@ -2008,12 +1790,11 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +        Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
 +    }
 +
-+    Restore-HerdrLegacyBackupIfNeeded -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -LegacyInstallLockPath $LegacyInstallLockPath -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
 +    if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
 +        throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
 +    }
-+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
++    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
 +    if ($rootKind -eq "UninstallRetry") {
 +        throw "A previous Herdr uninstall is incomplete; rerun uninstall before installing."
 +    }
@@ -2041,16 +1822,10 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +                -BuildId $BuildId `
 +                -DisplayVersion $DisplayVersion `
 +                -NumericVersion $NumericVersion
-+            $legacyBackup = Publish-HerdrFreshTransaction `
++            Publish-HerdrFreshTransaction `
 +                -Transaction $transaction `
-+                -InstallRoot $InstallRoot `
-+                -LegacyReleasesRoot $LegacyReleasesRoot `
-+                -LegacyInstallLockPath $LegacyInstallLockPath `
-+                -RootKind $rootKind `
-+                -ParentPid $ParentPid `
-+                -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
-+                -ProcessProvider $ProcessProvider
-+            $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId; LegacyBackup = $legacyBackup }
++                -InstallRoot $InstallRoot
++            $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
 +        } finally {
 +            if (Test-Path -LiteralPath $transaction.Path) {
 +                Remove-HerdrTransaction -Path $transaction.Path -Kind "fresh" -InstallRoot $InstallRoot
@@ -2200,13 +1975,9 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
-+        [long]$ParentPid = 0,
 +        [int]$LifecycleLockTimeoutMilliseconds = 30000
 +    )
 +
-+    if ($ParentPid -lt 0 -or $ParentPid -gt [uint32]::MaxValue) {
-+        throw "PARENT_PID must be a valid 32-bit process ID."
-+    }
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
@@ -2223,9 +1994,7 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +            -ClaudeSkillsRoot $claudeSkillsRoot `
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
-+            -NumericVersion $NumericVersion `
-+            -LegacyReleasesRoot (Get-HerdrLegacyReleasesRoot) `
-+            -ParentPid $ParentPid
++            -NumericVersion $NumericVersion
 +        Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
 +        Set-HerdrArpRegistration -InstallRoot $InstallRoot -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion
 +        return $result
@@ -2243,8 +2012,7 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-+    $legacyRoot = Get-HerdrLegacyReleasesRoot
-+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $legacyRoot
++    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
 +    if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
 +        throw "Only an exact managed Herdr root can be uninstalled."
 +    }
@@ -2350,8 +2118,7 @@ index 0000000000000000000000000000000000000000..3424a90889237e696254a753abff5386
 +                    -SkillSourcePath $SkillSourcePath `
 +                    -BuildId $BuildId `
 +                    -DisplayVersion $DisplayVersion `
-+                    -NumericVersion $NumericVersion `
-+                    -ParentPid $ParentPid
++                    -NumericVersion $NumericVersion
 +                if ($result.Status -ceq "Pending") {
 +                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
 +                } else {
@@ -53829,10 +53596,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddd8b510248b3a52e35f86a9b93fa8821e07b982
+index 0000000000000000000000000000000000000000..fb7d13607e04a03b5eae9e253c26946c40a0fdf1
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,483 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -53917,8 +53684,6 @@ index 0000000000000000000000000000000000000000..ddd8b510248b3a52e35f86a9b93fa882
 +!include "nsDialogs.nsh"
 +!include "x64.nsh"
 +
-+Var ParentPid
-+Var ParentPidProvided
 +Var PowerShellPath
 +Var HelperExitCode
 +Var HelperOutput
@@ -53996,41 +53761,6 @@ index 0000000000000000000000000000000000000000..ddd8b510248b3a52e35f86a9b93fa882
 +  ${EndIf}
 +FunctionEnd
 +
-+Function ValidateParentPid
-+  StrCpy $0 "0"
-+  StrCmp $ParentPidProvided "1" 0 parent_pid_valid
-+  StrLen $1 $ParentPid
-+  IntCmp $1 0 parent_pid_invalid parent_pid_invalid parent_pid_length_nonzero
-+parent_pid_length_nonzero:
-+  IntCmp $1 10 parent_pid_digits parent_pid_digits parent_pid_invalid
-+parent_pid_digits:
-+  StrCpy $2 0
-+  StrCpy $3 "0"
-+parent_pid_loop:
-+  StrCpy $4 $ParentPid 1 $2
-+  StrCmp $4 "" parent_pid_done
-+  StrCmp $4 "0" parent_pid_next
-+  StrCmp $4 "1" parent_pid_nonzero
-+  StrCmp $4 "2" parent_pid_nonzero
-+  StrCmp $4 "3" parent_pid_nonzero
-+  StrCmp $4 "4" parent_pid_nonzero
-+  StrCmp $4 "5" parent_pid_nonzero
-+  StrCmp $4 "6" parent_pid_nonzero
-+  StrCmp $4 "7" parent_pid_nonzero
-+  StrCmp $4 "8" parent_pid_nonzero
-+  StrCmp $4 "9" parent_pid_nonzero parent_pid_invalid
-+parent_pid_nonzero:
-+  StrCpy $3 "1"
-+parent_pid_next:
-+  IntOp $2 $2 + 1
-+  Goto parent_pid_loop
-+parent_pid_done:
-+  StrCmp $3 "1" parent_pid_valid parent_pid_invalid
-+parent_pid_valid:
-+  StrCpy $0 "1"
-+parent_pid_invalid:
-+FunctionEnd
-+
 +Function FailInstall
 +  Exch $0
 +  DetailPrint "$0"
@@ -54096,20 +53826,6 @@ index 0000000000000000000000000000000000000000..ddd8b510248b3a52e35f86a9b93fa882
 +    Call FailInstall
 +  ${EndIf}
 +  Call WaitForUpdaterStartGate
-+
-+  StrCpy $ParentPid "0"
-+  StrCpy $ParentPidProvided "0"
-+  ${GetParameters} $0
-+  ClearErrors
-+  ${GetOptions} "$0" "/PARENT_PID=" $ParentPid
-+  ${IfNot} ${Errors}
-+    StrCpy $ParentPidProvided "1"
-+  ${EndIf}
-+  Call ValidateParentPid
-+  StrCmp $0 "1" parent_pid_ok
-+  Push "Invalid /PARENT_PID value. Expected a positive decimal process ID."
-+  Call FailInstall
-+parent_pid_ok:
 +  Call SetPowerShellPath
 +  IfFileExists "$PowerShellPath" powershell_ok
 +  Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
@@ -54276,7 +53992,7 @@ index 0000000000000000000000000000000000000000..ddd8b510248b3a52e35f86a9b93fa882
 +  Call FailInstall
 +
 +installer_inputs_ready:
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -ParentPid "$ParentPid"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -55385,10 +55101,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..52e18eb8efbe36cc9067b1acac2f6ed0a23e929c
+index 0000000000000000000000000000000000000000..c38f96c61dd187c594d7ec7ed0a0593a93444e48
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,555 @@
+@@ -0,0 +1,557 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -55747,7 +55463,9 @@ index 0000000000000000000000000000000000000000..52e18eb8efbe36cc9067b1acac2f6ed0
 +            '"ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"', nsi
 +        )
 +        self.assertIn('"OriginalFilename" "${INFO_ORIGINALFILENAME}"', nsi)
-+        self.assertIn("/PARENT_PID=", nsi)
++        self.assertNotIn("/PARENT_PID=", nsi)
++        self.assertNotIn("LegacyReleasesRoot", helper)
++        self.assertNotIn("legacy-backup", helper)
 +        self.assertIn("/TIMEOUT=120000", nsi)
 +        self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
@@ -56453,10 +56171,10 @@ index 0000000000000000000000000000000000000000..69aeb7c23f546e6fca286737c0fa7f0a
 +Write-Host "Windows installer fault matrix passed."
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a4865b8b5
+index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277ac6bc380
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,614 @@
 +[CmdletBinding()]
 +param()
 +
@@ -56535,10 +56253,6 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +        [string]$SkillSource = $script:TestSkillSource,
 +        [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
 +        [string]$ClaudeSkillsRoot,
-+        [string]$LegacyReleases,
-+        [string]$LegacyLock,
-+        [scriptblock]$ProcessProvider = { @() },
-+        [long]$ParentPid = 0,
 +        [int]$LockTimeoutMilliseconds = 3000
 +    )
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
@@ -56554,10 +56268,6 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
-+            -LegacyReleasesRoot $LegacyReleases `
-+            -LegacyInstallLockPath $LegacyLock `
-+            -ProcessProvider $ProcessProvider `
-+            -ParentPid $ParentPid `
 +            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    }
 +}
@@ -56638,7 +56348,6 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +
 +$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("hi-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 +New-Item -ItemType Directory -Path $tempRoot | Out-Null
-+$junctionPath = $null
 +$childProcesses = New-Object System.Collections.Generic.List[Diagnostics.Process]
 +$registryPath = "HKCU:\Software\HerdrInstallerTests\$([Guid]::NewGuid().ToString('N'))"
 +try {
@@ -56662,10 +56371,6 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    $script:TestClaudeSkillsRoot = Join-Path $tempRoot ".claude\skills"
 +    Write-TestFile -Path $script:TestSkillSource -Text "---`nname: herdr`ndescription: first`n---`n`n# Herdr one`n"
 +    Write-TestFile -Path $skillSource2 -Text "---`nname: herdr`ndescription: second`n---`n`n# Herdr two`n"
-+    $legacyReleases = Join-Path $tempRoot "legacy-home\releases"
-+    $legacyLock = Join-Path $tempRoot "legacy-home\install.lock"
-+    New-Item -ItemType Directory -Path $legacyReleases -Force | Out-Null
-+
 +    # A persistent sibling lifecycle lock protects a live transaction from a
 +    # second real PowerShell process before any recovery/classification runs.
 +    $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
@@ -56820,7 +56525,7 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    $rejectedRoot = Join-Path $tempRoot "reparse-rejected-install"
 +    try {
 +        Assert-Throws {
-+            Invoke-TestInstall -Root $rejectedRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $reparseSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++            Invoke-TestInstall -Root $rejectedRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $reparseSkillsRoot
 +        } "reparse-point directory" "Reparse-point skill rejection did not fail closed."
 +        Assert-True (-not (Test-Path -LiteralPath $rejectedRoot)) "Rejected skill path changed the managed install root."
 +        Assert-True (Test-Path -LiteralPath (Join-Path $reparseTarget "SKILL.md")) "Rejected skill path changed its junction target."
@@ -56852,13 +56557,12 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +        -NumericVersion $numeric1
 +    Remove-Item -LiteralPath (Join-Path $crashFresh.Path "root\runtime\$id1\herdr.exe") -Force
 +    Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
-+    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
 +    Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
 +    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
 +    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
-+    Assert-True (-not (Test-HerdrRecognizedLegacyPayload -Path (Join-Path $installRoot "bin"))) "Old installer could mistake managed bin for legacy payload."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh bootstrap differs from launcher input."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh runtime dispatcher is missing."
 +    $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
@@ -56883,7 +56587,7 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    $leaseProcess = Start-TestSharedFileHolder -Path $leasePath -ReadyPath $leaseReady -Seconds 10
 +    $childProcesses.Add($leaseProcess)
 +    Wait-TestPath -Path $leaseReady
-+    $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++    $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $pending.Status "Pending" "Second-process lease did not produce pending success."
 +    Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Runtime crash transaction was not recovered."
 +    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
@@ -56895,15 +56599,15 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt")) "old-version" "Managed update removed a foreign skill sibling."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
 +    Write-TestFile -Path $installedSkill -Text "modified-after-update"
-+    $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++    $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $repairedSkill.Status "Pending" "Skill repair changed the busy managed update outcome."
 +    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed reinstall did not overwrite a modified prior skill."
 +    if (-not $leaseProcess.WaitForExit(15000)) { throw "Lease holder did not exit within 15 seconds." }
-+    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Activation retained pending."
 +    Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id1)
-+    $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
++    $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $alreadyActive.Status "AlreadyActive" "Same-build reinstall did not report already active."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Same-build reinstall retained an obsolete pending build."
 +
@@ -56921,55 +56625,35 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    $extraDirectory = Join-Path $installRoot "runtime\$id2\user-empty"
 +    New-Item -ItemType Directory -Path $extraDirectory | Out-Null
 +    Assert-Throws {
-+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    } "neither an exact managed nor recognized legacy layout|owned-directory set" "Same-build extra directory was accepted."
++        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
++    } "not compatible with this setup|owned-directory set" "Same-build extra directory was accepted."
 +    Assert-True (Test-Path -LiteralPath $extraDirectory) "Rejected same-build directory was deleted."
 +    Remove-Item -LiteralPath $extraDirectory -Force
 +    $extra = Join-Path $installRoot "runtime\$id2\user-content.txt"
 +    Write-TestFile -Path $extra -Text "preserve"
 +    Assert-Throws {
-+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    } "neither an exact managed nor recognized legacy layout|owned-file set" "Same-build extra content was accepted."
++        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
++    } "not compatible with this setup|owned-file set" "Same-build extra content was accepted."
 +    Assert-True (Test-Path -LiteralPath $extra) "Rejected same-build content was deleted."
 +    Remove-Item -LiteralPath $extra -Force
 +    $runtimePayload = Join-Path $installRoot "runtime\$id2\herdr.exe"
 +    $ownedPayloadBytes = [IO.File]::ReadAllBytes((Join-Path $stage2 "herdr.exe"))
 +    [IO.File]::WriteAllText($runtimePayload, "corrupt", $script:Utf8NoBom)
 +    Assert-Throws {
-+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    } "neither an exact managed nor recognized legacy layout|hash mismatch" "Same-build hash corruption was accepted."
++        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
++    } "not compatible with this setup|hash mismatch" "Same-build hash corruption was accepted."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $runtimePayload) "corrupt" "Rejected corruption was silently repaired or deleted."
 +    [IO.File]::WriteAllBytes($runtimePayload, $ownedPayloadBytes)
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +
-+    # Legacy publication uses the canonical lock, preserves an exact backup and
-+    # permits only the supplied parent runtime whether Windows reports its
-+    # visible junction path or its physical release path.
-+    $legacyTarget = Join-Path $legacyReleases "legacy-release"
-+    New-Item -ItemType Directory -Path $legacyTarget -Force | Out-Null
-+    Write-TestFile -Path (Join-Path $legacyTarget "herdr.exe") -Text "legacy"
-+    $legacyRoot = Join-Path $tempRoot "legacy-visible"
-+    New-Item -ItemType Directory -Path $legacyRoot | Out-Null
-+    $junctionPath = Join-Path $legacyRoot "bin"
-+    New-Item -ItemType Junction -Path $junctionPath -Target $legacyTarget | Out-Null
-+    $parentProcesses = @([PSCustomObject]@{ ProcessId = 444; ExecutablePath = (Join-Path $junctionPath "herdr.exe"); Name = "herdr.exe" })
-+    $migrated = Invoke-TestInstall -Root $legacyRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock -ProcessProvider { $parentProcesses } -ParentPid 444
-+    $junctionPath = $null
-+    Assert-Equal $migrated.Status "Activated" "Recognized legacy root did not migrate."
-+    Assert-True (Test-Path -LiteralPath (Join-Path $legacyTarget "herdr.exe")) "Live parent runtime was deleted."
-+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$migrated.LegacyBackup)) "Legacy migration did not preserve a backup."
-+    Assert-HerdrLegacyRoot -Root $migrated.LegacyBackup -LegacyReleasesRoot $legacyReleases
-+    Assert-True (Test-Path -LiteralPath $legacyLock) "Canonical legacy install lock was not acquired."
-+
-+    # An interrupted legacy move is rolled back before a new migration.
-+    $rollbackRoot = Join-Path $tempRoot "legacy-rollback"
-+    New-Item -ItemType Directory -Path (Join-Path $rollbackRoot "bin") -Force | Out-Null
-+    Write-TestFile -Path (Join-Path $rollbackRoot "bin\herdr.exe") -Text "legacy-direct"
-+    $orphanBackup = "$rollbackRoot.legacy-backup.$([Guid]::NewGuid().ToString('N'))"
-+    [IO.Directory]::Move($rollbackRoot, $orphanBackup)
-+    $recovered = Invoke-TestInstall -Root $rollbackRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-+    Assert-Equal $recovered.Status "Activated" "Legacy backup recovery did not finish migration."
-+    Assert-HerdrManagedRoot -InstallRoot $rollbackRoot
++    # Setup preserves and rejects every non-current layout. The user must remove
++    # an earlier installation before retrying the current setup.
++    $incompatibleRoot = Join-Path $tempRoot "incompatible-install"
++    Write-TestFile -Path (Join-Path $incompatibleRoot "bin\herdr.exe") -Text "preserve"
++    Assert-Throws {
++        Invoke-TestInstall -Root $incompatibleRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    } "not compatible with this setup.*Uninstall Herdr from Windows Installed Apps" "An incompatible install root was accepted."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 +
 +    # ARP stores the truthful display/numeric identity and preserves mismatches.
 +    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
@@ -56985,7 +56669,7 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    $processRoot = Join-Path $tempRoot "process-busy-install"
 +    $processAgentSkillsRoot = Join-Path $tempRoot "process-agent-skills"
 +    $realLauncher = Join-Path $env:WINDIR "System32\cmd.exe"
-+    [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock)
++    [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot)
 +    $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("/d", "/c", "ping -n 4 127.0.0.1 >nul") -PassThru -WindowStyle Hidden
 +    $childProcesses.Add($busyProcess)
 +    Start-Sleep -Milliseconds 200
@@ -57055,7 +56739,7 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +    # Extra files and nested directories survive while SKILL.md is removed.
 +    $extraTreeRoot = Join-Path $tempRoot "extra-tree-install"
 +    $extraTreeSkillsRoot = Join-Path $tempRoot "extra-tree-agent-skills"
-+    [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock)
++    [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot)
 +    $extraTreeSkillRoot = Join-Path $extraTreeSkillsRoot "herdr"
 +    $extraTreeSkill = Join-Path $extraTreeSkillRoot "SKILL.md"
 +    Write-TestFile -Path (Join-Path $extraTreeSkillRoot "user.txt") -Text "preserve-file"
@@ -57097,9 +56781,6 @@ index 0000000000000000000000000000000000000000..e37d0cbd46e30e256c956b7db2dd787a
 +            }
 +        }
 +        $process.Dispose()
-+    }
-+    if ($null -ne $junctionPath -and (Test-Path -LiteralPath $junctionPath)) {
-+        [IO.Directory]::Delete($junctionPath)
 +    }
 +    if (Test-Path -LiteralPath $registryPath) {
 +        Remove-Item -LiteralPath $registryPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -60041,7 +59722,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb2bf490c0 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994da7d68b8 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -60377,7 +60058,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
          notes_body,
      }))
  }
-@@ -628,53 +776,149 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -628,53 +776,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
@@ -60484,11 +60165,10 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
  
 -    Ok(())
 +#[cfg(windows)]
-+fn windows_installer_command(installer: &Path, parent_pid: u32, start_gate: &Path) -> Command {
++fn windows_installer_command(installer: &Path, start_gate: &Path) -> Command {
 +    let mut command = Command::new(installer);
 +    command
 +        .arg("/S")
-+        .arg(format!("/PARENT_PID={parent_pid}"))
 +        .env(WINDOWS_INSTALLER_START_GATE_ENV, start_gate);
 +    command
  }
@@ -60521,7 +60201,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
 +    let start_gate = installer.root.join("installer.start");
 +    let job = crate::platform::ChildProcessJob::new_kill_on_close()
 +        .map_err(|err| format!("failed to create Windows installer process job: {err}"))?;
-+    let mut child = windows_installer_command(&installer.path, std::process::id(), &start_gate)
++    let mut child = windows_installer_command(&installer.path, &start_gate)
 +        .spawn()
 +        .map_err(|err| format!("failed to start Windows installer: {err}"))?;
 +    if let Err(err) = job.assign(&child) {
@@ -60565,7 +60245,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
  }
  
  // ---------------------------------------------------------------------------
-@@ -2024,22 +2268,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2024,22 +2267,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      #[cfg(windows)]
      {
          let _ = options;
@@ -60600,7 +60280,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
      }
  
      #[cfg(not(windows))]
-@@ -2079,6 +2321,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2079,6 +2320,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      Ok(release.version)
  }
  
@@ -60608,7 +60288,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2489,148 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2246,6 +2488,148 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -60640,16 +60320,16 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
 +
 +    #[cfg(windows)]
 +    #[test]
-+    fn windows_installer_command_uses_verified_local_asset_parent_and_start_gate() {
++    fn windows_installer_command_uses_verified_local_asset_and_start_gate() {
 +        let installer = Path::new(r"C:\Temp\herdr-win_v2026.07.31.1_windows_amd64_setup.exe");
 +        let start_gate = Path::new(r"C:\Temp\installer.start");
-+        let command = windows_installer_command(installer, 4242, start_gate);
++        let command = windows_installer_command(installer, start_gate);
 +        assert_eq!(command.get_program(), installer.as_os_str());
 +        let arguments = command
 +            .get_args()
 +            .map(|argument| argument.to_string_lossy())
 +            .collect::<Vec<_>>();
-+        assert_eq!(arguments, ["/S", "/PARENT_PID=4242"]);
++        assert_eq!(arguments, ["/S"]);
 +        assert_eq!(
 +            command
 +                .get_envs()
@@ -60757,7 +60437,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2710,7 @@ mod tests {
+@@ -2325,6 +2709,7 @@ mod tests {
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60765,7 +60445,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2702,6 +3088,7 @@ mod tests {
+@@ -2702,6 +3087,7 @@ mod tests {
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60773,7 +60453,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3331,7 @@ mod tests {
+@@ -2944,6 +3330,7 @@ mod tests {
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60781,7 +60461,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3467,7 @@ mod tests {
+@@ -3079,6 +3466,7 @@ mod tests {
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -60789,7 +60469,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3776,7 @@ mod tests {
+@@ -3387,7 +3775,7 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
@@ -60798,7 +60478,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3788,7 @@ mod tests {
+@@ -3399,7 +3787,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -60807,7 +60487,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..556be75ecae108c30861709f17499cbb
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3810,7 @@ mod tests {
+@@ -3421,7 +3809,7 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);

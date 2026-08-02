@@ -356,7 +356,9 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             '"ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"', nsi
         )
         self.assertIn('"OriginalFilename" "${INFO_ORIGINALFILENAME}"', nsi)
-        self.assertIn("/PARENT_PID=", nsi)
+        self.assertNotIn("/PARENT_PID=", nsi)
+        self.assertNotIn("LegacyReleasesRoot", helper)
+        self.assertNotIn("legacy-backup", helper)
         self.assertIn("/TIMEOUT=120000", nsi)
         self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
         self.assertIn("Call WaitForUpdaterStartGate", nsi)

@@ -37,6 +37,10 @@ tests remain the detailed implementation truth.
   it also copies the skill below `CLAUDE_CONFIG_DIR` or
   `%USERPROFILE%\.claude`. Install/update overwrites only `SKILL.md` and
   preserves every sibling file and directory.
+- Setup updates only an exact current managed installation. Any other existing
+  install layout is preserved and rejected with instructions to uninstall Herdr
+  from Windows Installed Apps before running setup again; setup never migrates,
+  backs up, or removes an incompatible layout.
 - Snapshot updates use only the fork-owned immutable setup asset and verified
   digest through the fork-owned update feed. Existing managed sessions continue on
   their current runtime; a newer runtime may remain staged until old sessions exit,

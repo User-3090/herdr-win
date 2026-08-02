@@ -76,10 +76,6 @@ function Invoke-TestInstall {
         [string]$SkillSource = $script:TestSkillSource,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
         [string]$ClaudeSkillsRoot,
-        [string]$LegacyReleases,
-        [string]$LegacyLock,
-        [scriptblock]$ProcessProvider = { @() },
-        [long]$ParentPid = 0,
         [int]$LockTimeoutMilliseconds = 3000
     )
     return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
@@ -95,10 +91,6 @@ function Invoke-TestInstall {
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
-            -LegacyReleasesRoot $LegacyReleases `
-            -LegacyInstallLockPath $LegacyLock `
-            -ProcessProvider $ProcessProvider `
-            -ParentPid $ParentPid `
             -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     }
 }
@@ -179,7 +171,6 @@ function Complete-TestNsisCleanup {
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("hi-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
-$junctionPath = $null
 $childProcesses = New-Object System.Collections.Generic.List[Diagnostics.Process]
 $registryPath = "HKCU:\Software\HerdrInstallerTests\$([Guid]::NewGuid().ToString('N'))"
 try {
@@ -203,10 +194,6 @@ try {
     $script:TestClaudeSkillsRoot = Join-Path $tempRoot ".claude\skills"
     Write-TestFile -Path $script:TestSkillSource -Text "---`nname: herdr`ndescription: first`n---`n`n# Herdr one`n"
     Write-TestFile -Path $skillSource2 -Text "---`nname: herdr`ndescription: second`n---`n`n# Herdr two`n"
-    $legacyReleases = Join-Path $tempRoot "legacy-home\releases"
-    $legacyLock = Join-Path $tempRoot "legacy-home\install.lock"
-    New-Item -ItemType Directory -Path $legacyReleases -Force | Out-Null
-
     # A persistent sibling lifecycle lock protects a live transaction from a
     # second real PowerShell process before any recovery/classification runs.
     $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
@@ -361,7 +348,7 @@ try {
     $rejectedRoot = Join-Path $tempRoot "reparse-rejected-install"
     try {
         Assert-Throws {
-            Invoke-TestInstall -Root $rejectedRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $reparseSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+            Invoke-TestInstall -Root $rejectedRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $reparseSkillsRoot
         } "reparse-point directory" "Reparse-point skill rejection did not fail closed."
         Assert-True (-not (Test-Path -LiteralPath $rejectedRoot)) "Rejected skill path changed the managed install root."
         Assert-True (Test-Path -LiteralPath (Join-Path $reparseTarget "SKILL.md")) "Rejected skill path changed its junction target."
@@ -393,13 +380,12 @@ try {
         -NumericVersion $numeric1
     Remove-Item -LiteralPath (Join-Path $crashFresh.Path "root\runtime\$id1\herdr.exe") -Force
     Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
-    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
     Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
     Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
     Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
     Assert-HerdrManagedRoot -InstallRoot $installRoot
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
-    Assert-True (-not (Test-HerdrRecognizedLegacyPayload -Path (Join-Path $installRoot "bin"))) "Old installer could mistake managed bin for legacy payload."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh bootstrap differs from launcher input."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh runtime dispatcher is missing."
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
@@ -424,7 +410,7 @@ try {
     $leaseProcess = Start-TestSharedFileHolder -Path $leasePath -ReadyPath $leaseReady -Seconds 10
     $childProcesses.Add($leaseProcess)
     Wait-TestPath -Path $leaseReady
-    $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+    $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $pending.Status "Pending" "Second-process lease did not produce pending success."
     Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Runtime crash transaction was not recovered."
     Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
@@ -436,15 +422,15 @@ try {
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt")) "old-version" "Managed update removed a foreign skill sibling."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
     Write-TestFile -Path $installedSkill -Text "modified-after-update"
-    $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+    $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $repairedSkill.Status "Pending" "Skill repair changed the busy managed update outcome."
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed reinstall did not overwrite a modified prior skill."
     if (-not $leaseProcess.WaitForExit(15000)) { throw "Lease holder did not exit within 15 seconds." }
-    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Activation retained pending."
     Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id1)
-    $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
+    $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $alreadyActive.Status "AlreadyActive" "Same-build reinstall did not report already active."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Same-build reinstall retained an obsolete pending build."
 
@@ -462,55 +448,35 @@ try {
     $extraDirectory = Join-Path $installRoot "runtime\$id2\user-empty"
     New-Item -ItemType Directory -Path $extraDirectory | Out-Null
     Assert-Throws {
-        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-    } "neither an exact managed nor recognized legacy layout|owned-directory set" "Same-build extra directory was accepted."
+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
+    } "not compatible with this setup|owned-directory set" "Same-build extra directory was accepted."
     Assert-True (Test-Path -LiteralPath $extraDirectory) "Rejected same-build directory was deleted."
     Remove-Item -LiteralPath $extraDirectory -Force
     $extra = Join-Path $installRoot "runtime\$id2\user-content.txt"
     Write-TestFile -Path $extra -Text "preserve"
     Assert-Throws {
-        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-    } "neither an exact managed nor recognized legacy layout|owned-file set" "Same-build extra content was accepted."
+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
+    } "not compatible with this setup|owned-file set" "Same-build extra content was accepted."
     Assert-True (Test-Path -LiteralPath $extra) "Rejected same-build content was deleted."
     Remove-Item -LiteralPath $extra -Force
     $runtimePayload = Join-Path $installRoot "runtime\$id2\herdr.exe"
     $ownedPayloadBytes = [IO.File]::ReadAllBytes((Join-Path $stage2 "herdr.exe"))
     [IO.File]::WriteAllText($runtimePayload, "corrupt", $script:Utf8NoBom)
     Assert-Throws {
-        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-    } "neither an exact managed nor recognized legacy layout|hash mismatch" "Same-build hash corruption was accepted."
+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
+    } "not compatible with this setup|hash mismatch" "Same-build hash corruption was accepted."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $runtimePayload) "corrupt" "Rejected corruption was silently repaired or deleted."
     [IO.File]::WriteAllBytes($runtimePayload, $ownedPayloadBytes)
     Assert-HerdrManagedRoot -InstallRoot $installRoot
 
-    # Legacy publication uses the canonical lock, preserves an exact backup and
-    # permits only the supplied parent runtime whether Windows reports its
-    # visible junction path or its physical release path.
-    $legacyTarget = Join-Path $legacyReleases "legacy-release"
-    New-Item -ItemType Directory -Path $legacyTarget -Force | Out-Null
-    Write-TestFile -Path (Join-Path $legacyTarget "herdr.exe") -Text "legacy"
-    $legacyRoot = Join-Path $tempRoot "legacy-visible"
-    New-Item -ItemType Directory -Path $legacyRoot | Out-Null
-    $junctionPath = Join-Path $legacyRoot "bin"
-    New-Item -ItemType Junction -Path $junctionPath -Target $legacyTarget | Out-Null
-    $parentProcesses = @([PSCustomObject]@{ ProcessId = 444; ExecutablePath = (Join-Path $junctionPath "herdr.exe"); Name = "herdr.exe" })
-    $migrated = Invoke-TestInstall -Root $legacyRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock -ProcessProvider { $parentProcesses } -ParentPid 444
-    $junctionPath = $null
-    Assert-Equal $migrated.Status "Activated" "Recognized legacy root did not migrate."
-    Assert-True (Test-Path -LiteralPath (Join-Path $legacyTarget "herdr.exe")) "Live parent runtime was deleted."
-    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$migrated.LegacyBackup)) "Legacy migration did not preserve a backup."
-    Assert-HerdrLegacyRoot -Root $migrated.LegacyBackup -LegacyReleasesRoot $legacyReleases
-    Assert-True (Test-Path -LiteralPath $legacyLock) "Canonical legacy install lock was not acquired."
-
-    # An interrupted legacy move is rolled back before a new migration.
-    $rollbackRoot = Join-Path $tempRoot "legacy-rollback"
-    New-Item -ItemType Directory -Path (Join-Path $rollbackRoot "bin") -Force | Out-Null
-    Write-TestFile -Path (Join-Path $rollbackRoot "bin\herdr.exe") -Text "legacy-direct"
-    $orphanBackup = "$rollbackRoot.legacy-backup.$([Guid]::NewGuid().ToString('N'))"
-    [IO.Directory]::Move($rollbackRoot, $orphanBackup)
-    $recovered = Invoke-TestInstall -Root $rollbackRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -LegacyReleases $legacyReleases -LegacyLock $legacyLock
-    Assert-Equal $recovered.Status "Activated" "Legacy backup recovery did not finish migration."
-    Assert-HerdrManagedRoot -InstallRoot $rollbackRoot
+    # Setup preserves and rejects every non-current layout. The user must remove
+    # an earlier installation before retrying the current setup.
+    $incompatibleRoot = Join-Path $tempRoot "incompatible-install"
+    Write-TestFile -Path (Join-Path $incompatibleRoot "bin\herdr.exe") -Text "preserve"
+    Assert-Throws {
+        Invoke-TestInstall -Root $incompatibleRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    } "not compatible with this setup.*Uninstall Herdr from Windows Installed Apps" "An incompatible install root was accepted."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 
     # ARP stores the truthful display/numeric identity and preserves mismatches.
     Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
@@ -526,7 +492,7 @@ try {
     $processRoot = Join-Path $tempRoot "process-busy-install"
     $processAgentSkillsRoot = Join-Path $tempRoot "process-agent-skills"
     $realLauncher = Join-Path $env:WINDIR "System32\cmd.exe"
-    [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock)
+    [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot)
     $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("/d", "/c", "ping -n 4 127.0.0.1 >nul") -PassThru -WindowStyle Hidden
     $childProcesses.Add($busyProcess)
     Start-Sleep -Milliseconds 200
@@ -596,7 +562,7 @@ try {
     # Extra files and nested directories survive while SKILL.md is removed.
     $extraTreeRoot = Join-Path $tempRoot "extra-tree-install"
     $extraTreeSkillsRoot = Join-Path $tempRoot "extra-tree-agent-skills"
-    [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot -LegacyReleases $legacyReleases -LegacyLock $legacyLock)
+    [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot)
     $extraTreeSkillRoot = Join-Path $extraTreeSkillsRoot "herdr"
     $extraTreeSkill = Join-Path $extraTreeSkillRoot "SKILL.md"
     Write-TestFile -Path (Join-Path $extraTreeSkillRoot "user.txt") -Text "preserve-file"
@@ -638,9 +604,6 @@ try {
             }
         }
         $process.Dispose()
-    }
-    if ($null -ne $junctionPath -and (Test-Path -LiteralPath $junctionPath)) {
-        [IO.Directory]::Delete($junctionPath)
     }
     if (Test-Path -LiteralPath $registryPath) {
         Remove-Item -LiteralPath $registryPath -Recurse -Force -ErrorAction SilentlyContinue

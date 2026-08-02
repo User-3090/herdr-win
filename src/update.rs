@@ -851,11 +851,10 @@ fn download_windows_installer(release: &ReleaseInfo) -> Result<DownloadedWindows
 }
 
 #[cfg(windows)]
-fn windows_installer_command(installer: &Path, parent_pid: u32, start_gate: &Path) -> Command {
+fn windows_installer_command(installer: &Path, start_gate: &Path) -> Command {
     let mut command = Command::new(installer);
     command
         .arg("/S")
-        .arg(format!("/PARENT_PID={parent_pid}"))
         .env(WINDOWS_INSTALLER_START_GATE_ENV, start_gate);
     command
 }
@@ -878,7 +877,7 @@ fn install_windows_update_with_installer(release: &ReleaseInfo) -> Result<(), St
     let start_gate = installer.root.join("installer.start");
     let job = crate::platform::ChildProcessJob::new_kill_on_close()
         .map_err(|err| format!("failed to create Windows installer process job: {err}"))?;
-    let mut child = windows_installer_command(&installer.path, std::process::id(), &start_gate)
+    let mut child = windows_installer_command(&installer.path, &start_gate)
         .spawn()
         .map_err(|err| format!("failed to start Windows installer: {err}"))?;
     if let Err(err) = job.assign(&child) {
@@ -2517,16 +2516,16 @@ mod cross_platform_tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_installer_command_uses_verified_local_asset_parent_and_start_gate() {
+    fn windows_installer_command_uses_verified_local_asset_and_start_gate() {
         let installer = Path::new(r"C:\Temp\herdr-win_v2026.07.31.1_windows_amd64_setup.exe");
         let start_gate = Path::new(r"C:\Temp\installer.start");
-        let command = windows_installer_command(installer, 4242, start_gate);
+        let command = windows_installer_command(installer, start_gate);
         assert_eq!(command.get_program(), installer.as_os_str());
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy())
             .collect::<Vec<_>>();
-        assert_eq!(arguments, ["/S", "/PARENT_PID=4242"]);
+        assert_eq!(arguments, ["/S"]);
         assert_eq!(
             command
                 .get_envs()

@@ -15,7 +15,6 @@ param(
     [string]$NumericVersion,
     [ValidateSet("Keep", "Remove")]
     [string]$SettingsDisposition = "Keep",
-    [long]$ParentPid = 0,
     [switch]$Silent
 )
 
@@ -1313,100 +1312,8 @@ function Remove-HerdrRecoverableUninstallTransaction {
     }
 }
 
-function Get-HerdrLegacyPayloadFiles {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
-        (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
-    })
-    [Array]::Sort($files, [StringComparer]::Ordinal)
-    return $files
-}
-
-function Test-HerdrRecognizedLegacyPayload {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    try {
-        $actual = @(Get-HerdrLegacyPayloadFiles -Path $Path)
-    } catch {
-        return $false
-    }
-    $single = @("herdr.exe")
-    $conpty = @(
-        "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-LICENSE.txt",
-        "THIRD-PARTY-NOTICES/Microsoft.Windows.Console.ConPTY-NOTICE.md",
-        "conpty/arm64/OpenConsole.exe",
-        "conpty/conpty.dll",
-        "conpty/herdr-conpty.json",
-        "conpty/x64/OpenConsole.exe",
-        "herdr.exe"
-    )
-    [Array]::Sort($conpty, [StringComparer]::Ordinal)
-    return (@(Compare-Object $actual $single -CaseSensitive).Count -eq 0) -or
-        (@(Compare-Object $actual $conpty -CaseSensitive).Count -eq 0)
-}
-
-function Get-HerdrJunctionTarget {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $item = Get-Item -LiteralPath $Path -Force
-    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.LinkType -ne "Junction") {
-        throw "Only a recognized legacy Herdr junction can be migrated: $Path"
-    }
-    $targets = @($item.Target)
-    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
-        throw "Legacy Herdr junction has an ambiguous target: $Path"
-    }
-    $target = [string]$targets[0]
-    if (-not [IO.Path]::IsPathRooted($target)) {
-        $target = Join-Path (Split-Path -Parent $Path) $target
-    }
-    return [IO.Path]::GetFullPath($target).TrimEnd('\')
-}
-
-function Assert-HerdrRecognizedLegacyEntry {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-    )
-
-    if (Test-HerdrReparsePoint -Path $Path) {
-        $target = Get-HerdrJunctionTarget -Path $Path
-        if (-not (Test-HerdrPathWithin -Path $target -Root $LegacyReleasesRoot) -or
-            -not (Test-HerdrRecognizedLegacyPayload -Path $target)) {
-            throw "Legacy Herdr junction target is not an exact owned release: $Path"
-        }
-        return
-    }
-    if (-not (Test-HerdrRecognizedLegacyPayload -Path $Path)) {
-        throw "Legacy Herdr directory has an unrecognized layout: $Path"
-    }
-}
-
-function Assert-HerdrLegacyRoot {
-    param(
-        [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-    )
-
-    Assert-HerdrRegularDirectory -Path $Root
-    $entries = @(Get-ChildItem -LiteralPath $Root -Force)
-    foreach ($entry in $entries) {
-        if (($entry.Name -cne "bin" -and $entry.Name -cnotmatch '^bin\.legacy\.[0-9a-f]{32}$') -or -not $entry.PSIsContainer) {
-            throw "Refusing ambiguous legacy Herdr root content: $($entry.FullName)"
-        }
-        Assert-HerdrRecognizedLegacyEntry -Path $entry.FullName -LegacyReleasesRoot $LegacyReleasesRoot
-    }
-    if (@($entries | Where-Object { $_.Name -ceq "bin" }).Count -ne 1) {
-        throw "Legacy Herdr root does not contain exactly one bin entry."
-    }
-}
-
 function Get-HerdrRootKind {
-    param(
-        [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot
-    )
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
     if (-not (Test-Path -LiteralPath $InstallRoot)) {
         return "New"
@@ -1419,42 +1326,8 @@ function Get-HerdrRootKind {
         Assert-HerdrManagedRoot -InstallRoot $InstallRoot
         return "Managed"
     } catch {
-        try {
-            Assert-HerdrLegacyRoot -Root $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
-            return "Legacy"
-        } catch {
-            throw "Herdr install root is neither an exact managed nor recognized legacy layout: $InstallRoot"
-        }
+        throw "The existing Herdr installation is not compatible with this setup. Uninstall Herdr from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
     }
-}
-
-function Get-HerdrLegacyBackups {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot)
-
-    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
-    $parent = Split-Path -Parent $InstallRoot
-    if (-not (Test-Path -LiteralPath $parent)) {
-        return @()
-    }
-    Assert-HerdrRegularDirectory -Path $parent
-    $leaf = [regex]::Escape((Split-Path -Leaf $InstallRoot))
-    return @(Get-ChildItem -LiteralPath $parent -Force -Directory | Where-Object {
-        $_.Name -cmatch "^$leaf\.legacy-backup\.[0-9a-f]{32}$"
-    } | ForEach-Object { $_.FullName })
-}
-
-function Get-HerdrLegacyReleasesRoot {
-    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        throw "USERPROFILE is not set; legacy Herdr ownership cannot be checked safely."
-    }
-    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".herdr\packages\standalone\releases")).TrimEnd('\')
-}
-
-function Get-HerdrLegacyInstallLockPath {
-    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        throw "USERPROFILE is not set; legacy Herdr install lock cannot be located."
-    }
-    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".herdr\packages\standalone\install.lock"))
 }
 
 function Get-HerdrLifecycleLockPath {
@@ -1564,32 +1437,6 @@ function Test-HerdrProcessWithinRoots {
     return $false
 }
 
-function Test-HerdrLegacyProcessBusy {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Processes,
-        [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-        [long]$ParentPid = 0
-    )
-
-    foreach ($process in $Processes) {
-        $path = [string]$process.ExecutablePath
-        if ([string]::IsNullOrWhiteSpace($path)) {
-            continue
-        }
-        if ($ParentPid -gt 0 -and [long]$process.ProcessId -eq $ParentPid) {
-            continue
-        }
-        if (Test-HerdrPathWithin -Path $path -Root $InstallRoot) {
-            return $true
-        }
-        if (Test-HerdrPathWithin -Path $path -Root $LegacyReleasesRoot) {
-            return $true
-        }
-    }
-    return $false
-}
-
 function Get-HerdrLeaseStatus {
     param([Parameter(Mandatory = $true)][string]$LeasesDir)
 
@@ -1661,79 +1508,18 @@ function New-HerdrManagedRootTree {
     Assert-HerdrManagedRoot -InstallRoot $Destination
 }
 
-function Restore-HerdrLegacyBackupIfNeeded {
-    param(
-        [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-        [int]$LockTimeoutMilliseconds = 30000
-    )
-
-    if (Test-Path -LiteralPath $InstallRoot) {
-        return
-    }
-    $backups = @(Get-HerdrLegacyBackups -InstallRoot $InstallRoot)
-    if ($backups.Count -eq 0) {
-        return
-    }
-    if ($backups.Count -ne 1) {
-        throw "Multiple legacy Herdr backups exist while the visible root is absent; refusing ambiguous recovery."
-    }
-    Assert-HerdrLegacyRoot -Root $backups[0] -LegacyReleasesRoot $LegacyReleasesRoot
-    $legacyLock = Open-HerdrShareModeLock -Path $LegacyInstallLockPath -TimeoutMilliseconds $LockTimeoutMilliseconds
-    try {
-        if (-not (Test-Path -LiteralPath $InstallRoot)) {
-            [IO.Directory]::Move($backups[0], $InstallRoot)
-        }
-    } finally {
-        $legacyLock.Dispose()
-    }
-}
-
 function Publish-HerdrFreshTransaction {
     param(
         [Parameter(Mandatory = $true)][object]$Transaction,
-        [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-        [ValidateSet("New", "Legacy")][string]$RootKind,
-        [long]$ParentPid = 0,
-        [int]$LockTimeoutMilliseconds = 30000,
-        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
+        [Parameter(Mandatory = $true)][string]$InstallRoot
     )
 
     $stagedRoot = Join-Path $Transaction.Path "root"
     Assert-HerdrManagedRoot -InstallRoot $stagedRoot
-    if ($RootKind -eq "New") {
-        if (Test-Path -LiteralPath $InstallRoot) {
-            throw "Herdr install root appeared before fresh publication."
-        }
-        [IO.Directory]::Move($stagedRoot, $InstallRoot)
-        return $null
+    if (Test-Path -LiteralPath $InstallRoot) {
+        throw "Herdr install root appeared before fresh publication."
     }
-
-    $legacyLock = Open-HerdrShareModeLock -Path $LegacyInstallLockPath -TimeoutMilliseconds $LockTimeoutMilliseconds
-    $backup = $null
-    try {
-        Assert-HerdrLegacyRoot -Root $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
-        $processes = @(& $ProcessProvider)
-        if (Test-HerdrLegacyProcessBusy -Processes $processes -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -ParentPid $ParentPid) {
-            throw "A legacy Herdr process is still active; close it before migration."
-        }
-        $backup = "$InstallRoot.legacy-backup.$([Guid]::NewGuid().ToString('N'))"
-        [IO.Directory]::Move($InstallRoot, $backup)
-        try {
-            [IO.Directory]::Move($stagedRoot, $InstallRoot)
-        } catch {
-            if (-not (Test-Path -LiteralPath $InstallRoot) -and (Test-Path -LiteralPath $backup)) {
-                [IO.Directory]::Move($backup, $InstallRoot)
-            }
-            throw
-        }
-        return $backup
-    } finally {
-        $legacyLock.Dispose()
-    }
+    [IO.Directory]::Move($stagedRoot, $InstallRoot)
 }
 
 function Install-HerdrManagedUpgrade {
@@ -1831,11 +1617,7 @@ function Install-HerdrLayout {
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
-        [Parameter(Mandatory = $true)][string]$LegacyReleasesRoot,
-        [string]$LegacyInstallLockPath = (Get-HerdrLegacyInstallLockPath),
-        [long]$ParentPid = 0,
-        [int]$LockTimeoutMilliseconds = 30000,
-        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
+        [int]$LockTimeoutMilliseconds = 30000
     )
 
     Assert-HerdrVersionIdentity -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion -BuildId $BuildId
@@ -1852,12 +1634,11 @@ function Install-HerdrLayout {
         Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
     }
 
-    Restore-HerdrLegacyBackupIfNeeded -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot -LegacyInstallLockPath $LegacyInstallLockPath -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
     if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
         throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
     }
-    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $LegacyReleasesRoot
+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
     if ($rootKind -eq "UninstallRetry") {
         throw "A previous Herdr uninstall is incomplete; rerun uninstall before installing."
     }
@@ -1885,16 +1666,10 @@ function Install-HerdrLayout {
                 -BuildId $BuildId `
                 -DisplayVersion $DisplayVersion `
                 -NumericVersion $NumericVersion
-            $legacyBackup = Publish-HerdrFreshTransaction `
+            Publish-HerdrFreshTransaction `
                 -Transaction $transaction `
-                -InstallRoot $InstallRoot `
-                -LegacyReleasesRoot $LegacyReleasesRoot `
-                -LegacyInstallLockPath $LegacyInstallLockPath `
-                -RootKind $rootKind `
-                -ParentPid $ParentPid `
-                -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
-                -ProcessProvider $ProcessProvider
-            $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId; LegacyBackup = $legacyBackup }
+                -InstallRoot $InstallRoot
+            $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
         } finally {
             if (Test-Path -LiteralPath $transaction.Path) {
                 Remove-HerdrTransaction -Path $transaction.Path -Kind "fresh" -InstallRoot $InstallRoot
@@ -2044,13 +1819,9 @@ function Invoke-HerdrInstall {
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
-        [long]$ParentPid = 0,
         [int]$LifecycleLockTimeoutMilliseconds = 30000
     )
 
-    if ($ParentPid -lt 0 -or $ParentPid -gt [uint32]::MaxValue) {
-        throw "PARENT_PID must be a valid 32-bit process ID."
-    }
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
@@ -2067,9 +1838,7 @@ function Invoke-HerdrInstall {
             -ClaudeSkillsRoot $claudeSkillsRoot `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
-            -NumericVersion $NumericVersion `
-            -LegacyReleasesRoot (Get-HerdrLegacyReleasesRoot) `
-            -ParentPid $ParentPid
+            -NumericVersion $NumericVersion
         Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
         Set-HerdrArpRegistration -InstallRoot $InstallRoot -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion
         return $result
@@ -2087,8 +1856,7 @@ function Invoke-HerdrUninstallLayout {
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
     Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-    $legacyRoot = Get-HerdrLegacyReleasesRoot
-    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot -LegacyReleasesRoot $legacyRoot
+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
     if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
         throw "Only an exact managed Herdr root can be uninstalled."
     }
@@ -2194,8 +1962,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -SkillSourcePath $SkillSourcePath `
                     -BuildId $BuildId `
                     -DisplayVersion $DisplayVersion `
-                    -NumericVersion $NumericVersion `
-                    -ParentPid $ParentPid
+                    -NumericVersion $NumericVersion
                 if ($result.Status -ceq "Pending") {
                     [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
                 } else {

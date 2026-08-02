@@ -42,6 +42,8 @@ if ($actual -cne [string] $asset.sha256) { throw "herdr-win setup checksum misma
 
 The English-only, keyboard-operable Windows setup uses native-DPI Herdr Win artwork on its Welcome and Finish pages, presents the Apache-2.0 license before modifying files, installs to `%LOCALAPPDATA%\Programs\Herdr` without administrator privileges, adds its stable `bin` directory to your user `PATH`, and registers Herdr in **Windows Settings → Apps → Installed apps**. The same license remains available as `LICENSE.txt`. Setup copies upstream's canonical agent skill to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and, when Claude Code is detected, to its configured or default `.claude\skills\herdr\SKILL.md`. Install and update overwrite only `SKILL.md`; every sibling file and directory remains untouched. The executable and command remain `herdr.exe` and `herdr`.
 
+Setup updates only an exact current managed installation. If it reports an incompatible existing installation, uninstall **Herdr** from **Windows Settings → Apps → Installed apps**, then run setup again. Setup preserves that directory and does not migrate, back up, or remove it.
+
 For a portable or manual install, download both:
 
 - `herdr-win_v<YYYY.MM.DD.N>_windows_amd64.zip`
@@ -80,7 +82,7 @@ The release product delta is exactly the ordered mailbox queue in [`patches/delt
 | --- | --- |
 | [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
 | [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a small fork-specific Sandbox adapter. |
-| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, immutable runtimes and launcher leases, per-user NSIS install/update/uninstall, legacy migration, and fork-owned update sources. |
+| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, immutable runtimes and launcher leases, strict per-user NSIS install/update/uninstall, and fork-owned update sources. |
 | [`0005`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | **OpenCode lifecycle:** correlate errors with explicit retry and idle events so active retries stay quiet while terminal failures remain actionable. |
 
 Until matching platform artifacts are implemented, this channel cannot automatically install the corresponding snapshot binary on a Linux or macOS remote. Use a pre-provisioned matching target or provide a matching build through `HERDR_REMOTE_BINARY` when attaching from a snapshot.

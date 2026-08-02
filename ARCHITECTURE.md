@@ -44,7 +44,7 @@ behavior; code and tests remain the detailed implementation truth.
   `windows_remote_guest_executable` so consumers can reject an absent or different
   adapter contract before provisioning.
 - Mailbox 0004 owns deterministic ConPTY packaging, managed Windows distribution,
-  fork update sources, installer lifecycle, and the bounded legacy migration.
+  fork update sources, and installer lifecycle.
 - Mailbox 0005 owns OpenCode retry/error lifecycle correlation. It must preserve
   actionable terminal failures without surfacing transient errors during an active
   retry.
@@ -60,9 +60,9 @@ behavior; code and tests remain the detailed implementation truth.
 - NSIS owns the setup/uninstall executable shell, embedded inputs, user-visible
   progress/error boundary, and final self-cleanup. The packaged PowerShell helper
   owns filesystem lifecycle, validation, PATH/Installed Apps integration,
-  migration, optional user-settings removal, and recoverable install/uninstall
-  state. Rust owns runtime selection and downloading/verifying/launching the
-  immutable installer asset.
+  optional user-settings removal, and recoverable install/uninstall state. Rust
+  owns runtime selection and downloading/verifying/launching the immutable
+  installer asset.
 - The packager passes one product display name into NSIS and the helper so setup
   copy, install location, executable metadata, and Installed Apps registration do
   not maintain separate product-name literals. The NSIS presentation uses standard
@@ -81,9 +81,9 @@ behavior; code and tests remain the detailed implementation truth.
   Windows clients consume the separately hashed immutable NSIS asset from the fork
   release; there is no upstream-source fallback. The portable ZIP remains only as
   a user choice and compatibility asset for older immutable clients.
-- `website/install.ps1` is a legacy-layout bridge, not the active updater for new
-  managed builds. Keep exactly one bounded standalone/junction migration and add no
-  speculative migration variants.
+- The managed setup accepts only a missing install root or the exact current
+  managed layout. Any other root is preserved and rejected with an uninstall-first
+  action; there are no migration, compatibility, or backup branches.
 - NSIS embeds upstream's canonical `skills/herdr/SKILL.md` and delegates skill
   filesystem work to the existing PowerShell installation boundary. The helper
   always copies it to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and also to
