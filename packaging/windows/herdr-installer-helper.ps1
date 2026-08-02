@@ -14,8 +14,7 @@ param(
     [string]$DisplayVersion,
     [string]$NumericVersion,
     [ValidateSet("Keep", "Remove")]
-    [string]$SettingsDisposition = "Keep",
-    [switch]$Silent
+    [string]$SettingsDisposition = "Keep"
 )
 
 Set-StrictMode -Version Latest

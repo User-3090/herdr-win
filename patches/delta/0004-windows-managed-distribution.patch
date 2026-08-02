@@ -1,4 +1,4 @@
-From 94b8bcbdf0f2039017d747580c440f682b847a5d Mon Sep 17 00:00:00 2001
+From 7273f16a734043ca8c8e4fbd4ee8937903afce6e Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 1985 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 1984 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -24,7 +24,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  170 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  556 +++++
+ scripts/test_windows_installer.py             |  557 +++++
  .../windows_install_conpty_package_test.ps1   |  144 +-
  scripts/windows_installer_fault_test.ps1      |  347 +++
  scripts/windows_installer_test.ps1            |  614 +++++
@@ -149,10 +149,10 @@ index a3726db05cd7efeb29091aaf68339e68f50c3b62..dfb681f74799c988f744d758aadeedc4
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..b90220ca42f3d75a02b413ed21c2b1454b398fc0
+index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94e8db5ecb
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,1985 @@
+@@ -0,0 +1,1984 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall")]
@@ -169,8 +169,7 @@ index 0000000000000000000000000000000000000000..b90220ca42f3d75a02b413ed21c2b145
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
 +    [ValidateSet("Keep", "Remove")]
-+    [string]$SettingsDisposition = "Keep",
-+    [switch]$Silent
++    [string]$SettingsDisposition = "Keep"
 +)
 +
 +Set-StrictMode -Version Latest
@@ -55099,10 +55098,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..7de4d1e0ef0f9bf1791c321ca672401b5ec8c293
+index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373fefc3dc99
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,557 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -55464,6 +55463,7 @@ index 0000000000000000000000000000000000000000..7de4d1e0ef0f9bf1791c321ca672401b
 +        self.assertNotIn("/PARENT_PID=", nsi)
 +        self.assertNotIn("LegacyReleasesRoot", helper)
 +        self.assertNotIn("legacy-backup", helper)
++        self.assertNotIn("[switch]$Silent", helper)
 +        self.assertIn("/TIMEOUT=120000", nsi)
 +        self.assertIn('ReadEnvStr $StartGate "${APP_START_GATE_ENV}"', nsi)
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
