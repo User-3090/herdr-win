@@ -1,4 +1,4 @@
-From 1fc4e34efebea2832bebac892785d3932f2fec14 Mon Sep 17 00:00:00 2001
+From dbebd1df8576647f65273faa7a5e2aa974b5f85e Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -16,9 +16,13 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  .../src/content/docs/zh-cn/configuration.mdx  |    4 +-
  .../content/docs/zh-cn/persistence-remote.mdx |   10 +-
  .../src/content/docs/zh-cn/windows-beta.mdx   |   14 +-
+ src/app/agent_resume.rs                       |   11 +-
+ src/app/api.rs                                |    3 +-
+ src/app/api/layouts.rs                        |    4 +-
+ src/app/api/panes.rs                          |    2 +-
  src/app/api/tabs.rs                           |    2 +-
- src/app/creation.rs                           |   60 +
- src/app/input/modal.rs                        |   38 +-
+ src/app/creation.rs                           |  121 +-
+ src/app/input/modal.rs                        |   22 +-
  src/app/state.rs                              |   11 +-
  src/cli/status.rs                             |   12 +
  src/client/mod.rs                             |  293 +-
@@ -39,10 +43,10 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/server/autodetect.rs                      |   48 +-
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
- src/server/headless.rs                        |  144 +-
+ src/server/headless.rs                        |  265 +-
  src/ui.rs                                     |   69 +-
  src/update.rs                                 |    5 +
- 37 files changed, 5550 insertions(+), 3408 deletions(-)
+ 41 files changed, 5722 insertions(+), 3422 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -366,8 +370,95 @@ index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc
  
  Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
  
+diff --git a/src/app/agent_resume.rs b/src/app/agent_resume.rs
+index 408f5983c7bb15bef43be9138cbe8e38b4ed35ed..e70abbcc85ad7a7f67dc5c2d04c55f33bfc88854 100644
+--- a/src/app/agent_resume.rs
++++ b/src/app/agent_resume.rs
+@@ -225,12 +225,13 @@ impl App {
+             );
+             return false;
+         };
+-        let Some(launch_env) = self
+-            .find_pane(pane_id)
+-            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, Vec::new()))
+-        else {
++        let Some((ws_idx, _)) = self.find_pane(pane_id) else {
+             return false;
+         };
++        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
++            return false;
++        };
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+ 
+         let runtime = match crate::terminal::TerminalRuntime::spawn(
+             pane_id,
+@@ -239,7 +240,7 @@ impl App {
+             cwd,
+             self.state.pane_scrollback_limit_bytes,
+             host_terminal_theme,
+-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
++            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+             &launch_env,
+             self.event_tx.clone(),
+             self.render_notify.clone(),
+diff --git a/src/app/api.rs b/src/app/api.rs
+index 0cf55fd5cf4558f6d93cb859f57052ceee39e71e..c0bff5f87017af5a38c63da56184c648c3423fc4 100644
+--- a/src/app/api.rs
++++ b/src/app/api.rs
+@@ -517,6 +517,7 @@ impl App {
+         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
+             return false;
+         };
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+         let runtime = match crate::terminal::TerminalRuntime::spawn(
+             pane_id,
+             rows,
+@@ -524,7 +525,7 @@ impl App {
+             cwd,
+             self.state.pane_scrollback_limit_bytes,
+             self.state.host_terminal_theme,
+-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
++            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+             &launch_env,
+             self.event_tx.clone(),
+             self.render_notify.clone(),
+diff --git a/src/app/api/layouts.rs b/src/app/api/layouts.rs
+index 0fdbaba094026270163555c0be073b6fe7991b16..135bc4570f36dcb5dae49a2626860d9a79cce3d2 100644
+--- a/src/app/api/layouts.rs
++++ b/src/app/api/layouts.rs
+@@ -90,7 +90,7 @@ impl App {
+         let root_leaf = first_layout_leaf(&params.root);
+         let first_cwd = self.layout_root_cwd(ws_idx, replace_target, root_leaf);
+         let (rows, cols) = self.state.estimate_pane_size();
+-        let default_shell = self.state.default_shell.clone();
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+         let host_terminal_theme = self.state.host_terminal_theme;
+         let extra_env = match super::env::normalize_launch_env(root_leaf.env.clone()) {
+@@ -389,7 +389,7 @@ impl App {
+         pane: &LayoutPane,
+     ) -> Result<PaneId, String> {
+         let (rows, cols) = self.state.estimate_pane_size();
+-        let default_shell = self.state.default_shell.clone();
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+         let host_terminal_theme = self.state.host_terminal_theme;
+         let cwd = pane
+diff --git a/src/app/api/panes.rs b/src/app/api/panes.rs
+index 483d73a5e532632ca166c0a965a49703f65b4bc5..542b0b71dfc0112231d481f9c471a5c3ad3eca87 100644
+--- a/src/app/api/panes.rs
++++ b/src/app/api/panes.rs
+@@ -54,7 +54,7 @@ impl App {
+             let follow_cwd = self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
+             Some(self.resolve_new_terminal_cwd(follow_cwd))
+         });
+-        let default_shell = self.state.default_shell.clone();
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+         let host_terminal_theme = self.state.host_terminal_theme;
+         let previous_focus = self.state.current_pane_focus_target();
 diff --git a/src/app/api/tabs.rs b/src/app/api/tabs.rs
-index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..fd8a45c10ea1235a335f5a1583f3b6d16a3bd6dd 100644
+index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..dff580d91cd7930c1ace2136689b9f7b5b08c9e1 100644
 --- a/src/app/api/tabs.rs
 +++ b/src/app/api/tabs.rs
 @@ -66,7 +66,7 @@ impl App {
@@ -375,19 +466,19 @@ index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..fd8a45c10ea1235a335f5a1583f3b6d1
          });
          let (rows, cols) = self.state.estimate_pane_size();
 -        let default_shell = self.state.default_shell.clone();
-+        let default_shell = self.tab_shell_for_workspace(ws_idx);
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
          let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
          let host_terminal_theme = self.state.host_terminal_theme;
          let extra_env = match super::env::normalize_launch_env(env) {
 diff --git a/src/app/creation.rs b/src/app/creation.rs
-index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..d33c1de6bab76e94711c8007e861e3c09271c8dc 100644
+index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0c25b5bb3 100644
 --- a/src/app/creation.rs
 +++ b/src/app/creation.rs
-@@ -61,6 +61,27 @@ impl App {
+@@ -61,6 +61,75 @@ impl App {
          resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
      }
  
-+    pub(super) fn tab_shell_for_workspace(&self, ws_idx: usize) -> String {
++    pub(super) fn pane_shell_for_workspace(&self, ws_idx: Option<usize>) -> String {
 +        let configured_shell = self.state.default_shell.clone();
 +        #[cfg(windows)]
 +        {
@@ -396,9 +487,12 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..d33c1de6bab76e94711c8007e861e3c0
 +            {
 +                return configured_shell;
 +            }
-+            let running_shell = self
-+                .state
-+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
++            let running_shell = ws_idx
++                .or_else(|| self.workspace_creation_source())
++                .and_then(|ws_idx| {
++                    self.state
++                        .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
++                })
 +                .and_then(crate::terminal::TerminalRuntime::child_pid)
 +                .and_then(crate::platform::process_executable);
 +            matching_running_shell_path(&configured_shell, running_shell.as_deref())
@@ -408,10 +502,109 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..d33c1de6bab76e94711c8007e861e3c0
 +        configured_shell
 +    }
 +
++    pub(super) fn show_pane_creation_error_response(
++        &mut self,
++        response: &str,
++        title: &str,
++        previous_toast: Option<crate::app::state::ToastNotification>,
++    ) -> bool {
++        let Ok(response) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
++        else {
++            return false;
++        };
++        self.show_pane_creation_error(&response.error, title, previous_toast);
++        true
++    }
++
++    pub(crate) fn show_pane_creation_error(
++        &mut self,
++        error: &crate::api::schema::ErrorBody,
++        title: &str,
++        previous_toast: Option<crate::app::state::ToastNotification>,
++    ) {
++        let configured_shell = self.state.default_shell.trim();
++        let context = if matches!(
++            error.code.as_str(),
++            "tab_create_failed" | "workspace_create_failed"
++        ) {
++            if configured_shell.is_empty() {
++                "Herdr could not start the default shell. Check PATH, then try again.".to_string()
++            } else {
++                format!(
++                    "Herdr could not start {configured_shell}. Check [terminal].default_shell and PATH, then try again."
++                )
++            }
++        } else {
++            error.message.clone()
++        };
++        self.state.toast = Some(crate::app::state::ToastNotification {
++            kind: crate::app::state::ToastKind::NeedsAttention,
++            title: title.to_string(),
++            context,
++            position: None,
++            target: None,
++        });
++        self.sync_toast_deadline(previous_toast);
++    }
++
      pub(super) fn workspace_creation_source(&self) -> Option<usize> {
          if self.state.mode == Mode::Navigate
              && self.state.workspaces.get(self.state.selected).is_some()
-@@ -495,6 +516,45 @@ impl App {
+@@ -87,7 +156,8 @@ impl App {
+             return;
+         }
+ 
+-        self.runtime_workspace_create(
++        let previous_toast = self.state.toast.clone();
++        let response = self.runtime_workspace_create(
+             request_id,
+             crate::api::schema::WorkspaceCreateParams {
+                 cwd: None,
+@@ -96,6 +166,10 @@ impl App {
+                 env: Default::default(),
+             },
+         );
++        if self.show_pane_creation_error_response(&response, "new workspace failed", previous_toast)
++        {
++            return;
++        }
+         self.state.mode = if self.state.active.is_some() {
+             Mode::Terminal
+         } else {
+@@ -169,6 +243,7 @@ impl App {
+             return self.create_workspace_with_options(initial_cwd, focus);
+         };
+         let (rows, cols) = self.state.estimate_pane_size();
++        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
+         let ws = &mut self.state.workspaces[ws_idx];
+         let (idx, terminal, runtime) = ws.create_tab(
+             rows,
+@@ -176,7 +251,7 @@ impl App {
+             initial_cwd,
+             self.state.pane_scrollback_limit_bytes,
+             self.state.host_terminal_theme,
+-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
++            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+             Vec::new(),
+         )?;
+         let root_pane = ws.tabs[idx].root_pane;
+@@ -223,13 +298,14 @@ impl App {
+         extra_env: Vec<(String, String)>,
+     ) -> std::io::Result<usize> {
+         let (rows, cols) = self.state.estimate_pane_size();
++        let default_shell = self.pane_shell_for_workspace(self.workspace_creation_source());
+         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
+             initial_cwd,
+             rows,
+             cols,
+             self.state.pane_scrollback_limit_bytes,
+             self.state.host_terminal_theme,
+-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
++            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+             self.event_tx.clone(),
+             self.render_notify.clone(),
+             self.render_dirty.clone(),
+@@ -495,6 +571,45 @@ impl App {
      }
  }
  
@@ -458,10 +651,38 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..d33c1de6bab76e94711c8007e861e3c0
      terminal: &crate::terminal::TerminalState,
  ) -> Option<crate::api::schema::AgentSessionInfo> {
 diff --git a/src/app/input/modal.rs b/src/app/input/modal.rs
-index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..20801bc7416c25949335f5be0b15e0762e0e96a6 100644
+index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a1859bf952f3 100644
 --- a/src/app/input/modal.rs
 +++ b/src/app/input/modal.rs
-@@ -973,7 +973,8 @@ impl App {
+@@ -943,10 +943,11 @@ impl App {
+ 
+         match self.state.mode {
+             Mode::RenameWorkspace => {
+-                if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
++                if let Some(cwd) = self.state.pending_workspace_create_cwd.clone() {
+                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
+                     let label = workspace_create_label(&new_name, &suggested_name);
+-                    self.runtime_workspace_create(
++                    let previous_toast = self.state.toast.clone();
++                    let response = self.runtime_workspace_create(
+                         "tui.workspace.create_named",
+                         crate::api::schema::WorkspaceCreateParams {
+                             cwd: Some(cwd.display().to_string()),
+@@ -955,6 +956,13 @@ impl App {
+                             env: Default::default(),
+                         },
+                     );
++                    if self.show_pane_creation_error_response(
++                        &response,
++                        "new workspace failed",
++                        previous_toast,
++                    ) {
++                        return;
++                    }
+                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
+                     let workspace_id = self.public_workspace_id(self.state.selected);
+                     self.runtime_workspace_rename(
+@@ -973,7 +981,8 @@ impl App {
                  } else {
                      Some(new_name)
                  };
@@ -471,55 +692,20 @@ index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..20801bc7416c25949335f5be0b15e076
                      "tui.tab.create_named",
                      crate::api::schema::TabCreateParams {
                          workspace_id: None,
-@@ -983,6 +984,9 @@ impl App {
+@@ -983,6 +992,13 @@ impl App {
                          env: Default::default(),
                      },
                  );
-+                if self.show_new_tab_creation_error(&response, previous_toast) {
++                if self.show_pane_creation_error_response(
++                    &response,
++                    "new tab failed",
++                    previous_toast,
++                ) {
 +                    return;
 +                }
              }
              Mode::RenameTab if !new_name.is_empty() => {
                  let Some(ws_idx) = self.state.active else {
-@@ -1030,6 +1034,38 @@ impl App {
-         cancel_rename_modal(&mut self.state);
-     }
- 
-+    fn show_new_tab_creation_error(
-+        &mut self,
-+        response: &str,
-+        previous_toast: Option<crate::app::state::ToastNotification>,
-+    ) -> bool {
-+        let Ok(response) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
-+        else {
-+            return false;
-+        };
-+        let configured_shell = self.state.default_shell.trim();
-+        let context = if response.error.code == "tab_create_failed" {
-+            if configured_shell.is_empty() {
-+                "Herdr could not start the default shell. Check PATH, then try again.".to_string()
-+            } else {
-+                format!(
-+                    "Herdr could not start {configured_shell}. Check [terminal].default_shell and PATH, then try again."
-+                )
-+            }
-+        } else {
-+            response.error.message
-+        };
-+        self.state.toast = Some(crate::app::state::ToastNotification {
-+            kind: crate::app::state::ToastKind::NeedsAttention,
-+            title: "new tab failed".to_string(),
-+            context,
-+            position: None,
-+            target: None,
-+        });
-+        self.sync_toast_deadline(previous_toast);
-+        true
-+    }
-+
-     pub(super) fn apply_rename_mouse_action_via_api(&mut self, action: ModalAction) {
-         match action {
-             ModalAction::Save => self.save_rename_modal_via_api(),
 diff --git a/src/app/state.rs b/src/app/state.rs
 index f8395cbdc69def7ba6e7578db83dec08aa97f09f..42c363a42b468721c2a5bce2104a65d553b8973d 100644
 --- a/src/app/state.rs
@@ -9737,10 +9923,50 @@ index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df72
  }
  
 diff --git a/src/server/headless.rs b/src/server/headless.rs
-index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a99140dfb80b6 100644
+index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818deed97d904a 100644
 --- a/src/server/headless.rs
 +++ b/src/server/headless.rs
-@@ -2702,8 +2702,10 @@ impl HeadlessServer {
+@@ -766,8 +766,11 @@ impl HeadlessServer {
+ 
+         if self.app.state.request_new_workspace {
+             self.app.state.request_new_workspace = false;
++            let previous_toast = self.app.state.toast.clone();
+             let response = self.headless_workspace_create("headless.workspace.create", None, None);
+             if let Err(error) = response {
++                self.app
++                    .show_pane_creation_error(&error, "new workspace failed", previous_toast);
+                 error!(
+                     code = %error.code,
+                     message = %error.message,
+@@ -781,8 +784,11 @@ impl HeadlessServer {
+         if self.app.state.request_new_tab {
+             self.app.state.request_new_tab = false;
+             let label = self.app.state.requested_new_tab_name.take();
++            let previous_toast = self.app.state.toast.clone();
+             let response = self.headless_tab_create("headless.tab.create", label);
+             if let Err(error) = response {
++                self.app
++                    .show_pane_creation_error(&error, "new tab failed", previous_toast);
+                 error!(
+                     code = %error.code,
+                     message = %error.message,
+@@ -806,12 +812,15 @@ impl HeadlessServer {
+         }
+ 
+         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
++            let previous_toast = self.app.state.toast.clone();
+             let response = self.headless_workspace_create(
+                 "headless.workspace.create_cwd",
+                 Some(cwd.display().to_string()),
+                 None,
+             );
+             if let Err(error) = response {
++                self.app
++                    .show_pane_creation_error(&error, "new workspace failed", previous_toast);
+                 error!(
+                     code = %error.code,
+                     message = %error.message,
+@@ -2702,8 +2711,10 @@ impl HeadlessServer {
                  if first_app_client {
                      self.app.mark_git_status_refresh_due(Instant::now());
                  }
@@ -9753,7 +9979,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
                  self.nudge_handoff_panes_on_first_client_attach();
                  true
              }
-@@ -4200,6 +4202,7 @@ pub fn run_server() -> io::Result<()> {
+@@ -4200,6 +4211,7 @@ pub fn run_server() -> io::Result<()> {
      }
  
      let loaded_config = config::Config::load();
@@ -9761,7 +9987,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
      let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
      let event_hub = api::EventHub::default();
  
-@@ -4230,7 +4233,9 @@ pub fn run_server() -> io::Result<()> {
+@@ -4230,7 +4242,9 @@ pub fn run_server() -> io::Result<()> {
              api_rx,
              event_hub,
          );
@@ -9771,7 +9997,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
  
          // The server runs headless — disable local notification side effects.
          // Sound and terminal notifications are forwarded to connected clients
-@@ -4256,6 +4261,9 @@ pub fn run_server() -> io::Result<()> {
+@@ -4256,6 +4270,9 @@ pub fn run_server() -> io::Result<()> {
              }
              Err(err) => return Err(err),
          };
@@ -9781,7 +10007,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
  
          info!(
              api_socket = %api::socket_path().display(),
-@@ -4303,6 +4311,31 @@ fn take_startup_cwd() -> Option<PathBuf> {
+@@ -4303,6 +4320,31 @@ fn take_startup_cwd() -> Option<PathBuf> {
      (!cwd.is_empty()).then(|| PathBuf::from(cwd))
  }
  
@@ -9813,7 +10039,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
  #[cfg(unix)]
  fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
      let loaded_config = config::Config::load();
-@@ -4728,6 +4761,46 @@ mod tests {
+@@ -4728,6 +4770,158 @@ mod tests {
          shutdown_test_runtimes(&mut server);
      }
  
@@ -9857,10 +10083,122 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
 +        );
 +    }
 +
++    #[tokio::test]
++    async fn headless_named_workspace_spawn_failure_keeps_dialog_actionable() {
++        let mut server = test_headless_server();
++        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
++        server.app.state.ensure_test_terminals();
++        server.app.state.active = Some(0);
++        server.app.state.selected = 0;
++        server.app.state.default_shell = "__herdr_missing_shell__".into();
++        server.app.state.mode = crate::app::Mode::RenameWorkspace;
++        let pending_cwd = std::env::temp_dir();
++        server.app.state.pending_workspace_create_cwd = Some(pending_cwd.clone());
++        server.app.state.name_input = "ops".into();
++
++        server.app.route_client_events(
++            vec![crate::raw_input::RawInputEvent::Key(
++                crate::input::TerminalKey::new(
++                    crossterm::event::KeyCode::Enter,
++                    crossterm::event::KeyModifiers::empty(),
++                ),
++            )],
++            true,
++        );
++
++        assert_eq!(server.app.state.workspaces.len(), 1);
++        assert_eq!(server.app.state.mode, crate::app::Mode::RenameWorkspace);
++        assert_eq!(
++            server.app.state.pending_workspace_create_cwd.as_ref(),
++            Some(&pending_cwd)
++        );
++        assert_eq!(server.app.state.name_input, "ops");
++        let toast = server
++            .app
++            .state
++            .toast
++            .as_ref()
++            .expect("new workspace error toast");
++        assert_eq!(toast.title, "new workspace failed");
++        assert!(
++            toast.context.contains("[terminal].default_shell"),
++            "unexpected error context: {}",
++            toast.context
++        );
++    }
++
++    #[tokio::test]
++    async fn headless_immediate_workspace_spawn_failure_is_visible() {
++        let mut server = test_headless_server();
++        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
++        server.app.state.ensure_test_terminals();
++        server.app.state.active = Some(0);
++        server.app.state.selected = 0;
++        server.app.state.default_shell = "__herdr_missing_shell__".into();
++        server.app.state.prompt_new_workspace_name = false;
++        server.app.state.mode = crate::app::Mode::Navigate;
++
++        server.app.state.request_new_workspace = true;
++        assert!(server.handle_deferred_requests_headless());
++
++        assert_eq!(server.app.state.workspaces.len(), 1);
++        assert!(!server.app.state.request_new_workspace);
++        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
++        let toast = server
++            .app
++            .state
++            .toast
++            .as_ref()
++            .expect("new workspace error toast");
++        assert_eq!(toast.title, "new workspace failed");
++        assert!(toast.context.contains("[terminal].default_shell"));
++    }
++
++    #[cfg(windows)]
++    #[tokio::test]
++    async fn headless_workspace_reuses_a_matching_running_shell_outside_path() {
++        let mut server = test_headless_server();
++        let test_root = std::env::temp_dir().join(format!(
++            "herdr-shell-recovery-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .map(|duration| duration.as_nanos())
++                .unwrap_or(0)
++        ));
++        std::fs::create_dir_all(&test_root).expect("create shell recovery test root");
++        let shell_name = "herdr-test-shell.exe";
++        let shell_path = test_root.join(shell_name);
++        let command_processor = std::env::var_os("COMSPEC").expect("COMSPEC");
++        std::fs::copy(command_processor, &shell_path).expect("copy test command processor");
++
++        server.app.state.default_shell = shell_path.display().to_string();
++        server
++            .app
++            .create_workspace_with_options(test_root.clone(), true)
++            .expect("create source workspace with absolute shell");
++        server.app.state.default_shell = shell_name.into();
++        assert!(crate::plugin_command::resolve_windows_program(shell_name).is_none());
++
++        let response = server.headless_workspace_create(
++            "headless.workspace.shell_recovery",
++            Some(test_root.display().to_string()),
++            None,
++        );
++        let workspace_count = server.app.state.workspaces.len();
++
++        shutdown_test_runtimes(&mut server);
++        let _ = std::fs::remove_file(&shell_path);
++        let _ = std::fs::remove_dir(&test_root);
++
++        assert!(response.is_ok(), "workspace creation failed: {response:?}");
++        assert_eq!(workspace_count, 2);
++    }
++
      fn test_client_writer() -> (
          ClientWriter,
          std::sync::mpsc::Receiver<Vec<u8>>,
-@@ -4871,6 +4944,72 @@ new_tab = "prefix+t"
+@@ -4871,6 +5065,72 @@ new_tab = "prefix+t"
              .any(|binding| binding.label == "prefix+c"));
      }
  
@@ -9933,7 +10271,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a9914
      #[test]
      fn local_keybinding_client_hides_server_keybinding_warnings() {
          let mut server = test_headless_server();
-@@ -7323,6 +7462,7 @@ next_tab = ""
+@@ -7323,6 +7583,7 @@ next_tab = ""
                  .current_size(),
              expected
          );

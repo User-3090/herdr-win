@@ -517,6 +517,7 @@ impl App {
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
+        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,
@@ -524,7 +525,7 @@ impl App {
             cwd,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
             &launch_env,
             self.event_tx.clone(),
             self.render_notify.clone(),

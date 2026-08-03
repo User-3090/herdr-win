@@ -943,10 +943,11 @@ impl App {
 
         match self.state.mode {
             Mode::RenameWorkspace => {
-                if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
+                if let Some(cwd) = self.state.pending_workspace_create_cwd.clone() {
                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
                     let label = workspace_create_label(&new_name, &suggested_name);
-                    self.runtime_workspace_create(
+                    let previous_toast = self.state.toast.clone();
+                    let response = self.runtime_workspace_create(
                         "tui.workspace.create_named",
                         crate::api::schema::WorkspaceCreateParams {
                             cwd: Some(cwd.display().to_string()),
@@ -955,6 +956,13 @@ impl App {
                             env: Default::default(),
                         },
                     );
+                    if self.show_pane_creation_error_response(
+                        &response,
+                        "new workspace failed",
+                        previous_toast,
+                    ) {
+                        return;
+                    }
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
                     let workspace_id = self.public_workspace_id(self.state.selected);
                     self.runtime_workspace_rename(
@@ -984,7 +992,11 @@ impl App {
                         env: Default::default(),
                     },
                 );
-                if self.show_new_tab_creation_error(&response, previous_toast) {
+                if self.show_pane_creation_error_response(
+                    &response,
+                    "new tab failed",
+                    previous_toast,
+                ) {
                     return;
                 }
             }
@@ -1032,38 +1044,6 @@ impl App {
         }
 
         cancel_rename_modal(&mut self.state);
-    }
-
-    fn show_new_tab_creation_error(
-        &mut self,
-        response: &str,
-        previous_toast: Option<crate::app::state::ToastNotification>,
-    ) -> bool {
-        let Ok(response) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
-        else {
-            return false;
-        };
-        let configured_shell = self.state.default_shell.trim();
-        let context = if response.error.code == "tab_create_failed" {
-            if configured_shell.is_empty() {
-                "Herdr could not start the default shell. Check PATH, then try again.".to_string()
-            } else {
-                format!(
-                    "Herdr could not start {configured_shell}. Check [terminal].default_shell and PATH, then try again."
-                )
-            }
-        } else {
-            response.error.message
-        };
-        self.state.toast = Some(crate::app::state::ToastNotification {
-            kind: crate::app::state::ToastKind::NeedsAttention,
-            title: "new tab failed".to_string(),
-            context,
-            position: None,
-            target: None,
-        });
-        self.sync_toast_deadline(previous_toast);
-        true
     }
 
     pub(super) fn apply_rename_mouse_action_via_api(&mut self, action: ModalAction) {

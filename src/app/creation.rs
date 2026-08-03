@@ -81,7 +81,7 @@ impl App {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
 
-    pub(super) fn tab_shell_for_workspace(&self, ws_idx: usize) -> String {
+    pub(super) fn pane_shell_for_workspace(&self, ws_idx: Option<usize>) -> String {
         let configured_shell = self.state.default_shell.clone();
         #[cfg(windows)]
         {
@@ -90,9 +90,12 @@ impl App {
             {
                 return configured_shell;
             }
-            let running_shell = self
-                .state
-                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            let running_shell = ws_idx
+                .or_else(|| self.workspace_creation_source())
+                .and_then(|ws_idx| {
+                    self.state
+                        .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+                })
                 .and_then(crate::terminal::TerminalRuntime::child_pid)
                 .and_then(crate::platform::process_executable);
             matching_running_shell_path(&configured_shell, running_shell.as_deref())
@@ -100,6 +103,51 @@ impl App {
         }
         #[cfg(not(windows))]
         configured_shell
+    }
+
+    pub(super) fn show_pane_creation_error_response(
+        &mut self,
+        response: &str,
+        title: &str,
+        previous_toast: Option<crate::app::state::ToastNotification>,
+    ) -> bool {
+        let Ok(response) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
+        else {
+            return false;
+        };
+        self.show_pane_creation_error(&response.error, title, previous_toast);
+        true
+    }
+
+    pub(crate) fn show_pane_creation_error(
+        &mut self,
+        error: &crate::api::schema::ErrorBody,
+        title: &str,
+        previous_toast: Option<crate::app::state::ToastNotification>,
+    ) {
+        let configured_shell = self.state.default_shell.trim();
+        let context = if matches!(
+            error.code.as_str(),
+            "tab_create_failed" | "workspace_create_failed"
+        ) {
+            if configured_shell.is_empty() {
+                "Herdr could not start the default shell. Check PATH, then try again.".to_string()
+            } else {
+                format!(
+                    "Herdr could not start {configured_shell}. Check [terminal].default_shell and PATH, then try again."
+                )
+            }
+        } else {
+            error.message.clone()
+        };
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: title.to_string(),
+            context,
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
@@ -128,7 +176,8 @@ impl App {
             return;
         }
 
-        self.runtime_workspace_create(
+        let previous_toast = self.state.toast.clone();
+        let response = self.runtime_workspace_create(
             request_id,
             crate::api::schema::WorkspaceCreateParams {
                 cwd: None,
@@ -137,6 +186,10 @@ impl App {
                 env: Default::default(),
             },
         );
+        if self.show_pane_creation_error_response(&response, "new workspace failed", previous_toast)
+        {
+            return;
+        }
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -210,6 +263,7 @@ impl App {
             return self.create_workspace_with_options(initial_cwd, focus);
         };
         let (rows, cols) = self.state.estimate_pane_size();
+        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
         let ws = &mut self.state.workspaces[ws_idx];
         let (idx, terminal, runtime) = ws.create_tab(
             rows,
@@ -217,7 +271,7 @@ impl App {
             initial_cwd,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
             Vec::new(),
         )?;
         let root_pane = ws.tabs[idx].root_pane;
@@ -264,13 +318,14 @@ impl App {
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
+        let default_shell = self.pane_shell_for_workspace(self.workspace_creation_source());
         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
             initial_cwd,
             rows,
             cols,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),

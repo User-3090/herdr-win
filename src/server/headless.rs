@@ -767,8 +767,11 @@ impl HeadlessServer {
 
         if self.app.state.request_new_workspace {
             self.app.state.request_new_workspace = false;
+            let previous_toast = self.app.state.toast.clone();
             let response = self.headless_workspace_create("headless.workspace.create", None, None);
             if let Err(error) = response {
+                self.app
+                    .show_pane_creation_error(&error, "new workspace failed", previous_toast);
                 error!(
                     code = %error.code,
                     message = %error.message,
@@ -782,8 +785,11 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
+            let previous_toast = self.app.state.toast.clone();
             let response = self.headless_tab_create("headless.tab.create", label);
             if let Err(error) = response {
+                self.app
+                    .show_pane_creation_error(&error, "new tab failed", previous_toast);
                 error!(
                     code = %error.code,
                     message = %error.message,
@@ -807,12 +813,15 @@ impl HeadlessServer {
         }
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
+            let previous_toast = self.app.state.toast.clone();
             let response = self.headless_workspace_create(
                 "headless.workspace.create_cwd",
                 Some(cwd.display().to_string()),
                 None,
             );
             if let Err(error) = response {
+                self.app
+                    .show_pane_creation_error(&error, "new workspace failed", previous_toast);
                 error!(
                     code = %error.code,
                     message = %error.message,
@@ -4848,6 +4857,118 @@ mod tests {
             "unexpected error context: {}",
             toast.context
         );
+    }
+
+    #[tokio::test]
+    async fn headless_named_workspace_spawn_failure_keeps_dialog_actionable() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.default_shell = "__herdr_missing_shell__".into();
+        server.app.state.mode = crate::app::Mode::RenameWorkspace;
+        let pending_cwd = std::env::temp_dir();
+        server.app.state.pending_workspace_create_cwd = Some(pending_cwd.clone());
+        server.app.state.name_input = "ops".into();
+
+        server.app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            )],
+            true,
+        );
+
+        assert_eq!(server.app.state.workspaces.len(), 1);
+        assert_eq!(server.app.state.mode, crate::app::Mode::RenameWorkspace);
+        assert_eq!(
+            server.app.state.pending_workspace_create_cwd.as_ref(),
+            Some(&pending_cwd)
+        );
+        assert_eq!(server.app.state.name_input, "ops");
+        let toast = server
+            .app
+            .state
+            .toast
+            .as_ref()
+            .expect("new workspace error toast");
+        assert_eq!(toast.title, "new workspace failed");
+        assert!(
+            toast.context.contains("[terminal].default_shell"),
+            "unexpected error context: {}",
+            toast.context
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_immediate_workspace_spawn_failure_is_visible() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.default_shell = "__herdr_missing_shell__".into();
+        server.app.state.prompt_new_workspace_name = false;
+        server.app.state.mode = crate::app::Mode::Navigate;
+
+        server.app.state.request_new_workspace = true;
+        assert!(server.handle_deferred_requests_headless());
+
+        assert_eq!(server.app.state.workspaces.len(), 1);
+        assert!(!server.app.state.request_new_workspace);
+        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
+        let toast = server
+            .app
+            .state
+            .toast
+            .as_ref()
+            .expect("new workspace error toast");
+        assert_eq!(toast.title, "new workspace failed");
+        assert!(toast.context.contains("[terminal].default_shell"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn headless_workspace_reuses_a_matching_running_shell_outside_path() {
+        let mut server = test_headless_server();
+        let test_root = std::env::temp_dir().join(format!(
+            "herdr-shell-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&test_root).expect("create shell recovery test root");
+        let shell_name = "herdr-test-shell.exe";
+        let shell_path = test_root.join(shell_name);
+        let command_processor = std::env::var_os("COMSPEC").expect("COMSPEC");
+        std::fs::copy(command_processor, &shell_path).expect("copy test command processor");
+
+        server.app.state.default_shell = shell_path.display().to_string();
+        server
+            .app
+            .create_workspace_with_options(test_root.clone(), true)
+            .expect("create source workspace with absolute shell");
+        server.app.state.default_shell = shell_name.into();
+        assert!(crate::plugin_command::resolve_windows_program(shell_name).is_none());
+
+        let response = server.headless_workspace_create(
+            "headless.workspace.shell_recovery",
+            Some(test_root.display().to_string()),
+            None,
+        );
+        let workspace_count = server.app.state.workspaces.len();
+
+        shutdown_test_runtimes(&mut server);
+        let _ = std::fs::remove_file(&shell_path);
+        let _ = std::fs::remove_dir(&test_root);
+
+        assert!(response.is_ok(), "workspace creation failed: {response:?}");
+        assert_eq!(workspace_count, 2);
     }
 
     fn test_client_writer() -> (

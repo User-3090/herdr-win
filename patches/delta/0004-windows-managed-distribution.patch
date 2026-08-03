@@ -1,4 +1,4 @@
-From eab83ca1170e404d03ba7829fb6dd497641d9d30 Mon Sep 17 00:00:00 2001
+From a14dec68509373d25766da5f24b79ddca7bacdc1 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -32,7 +32,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_windows_installer.py             |  639 +++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 +++
  .../windows_install_conpty_package_test.ps1   |   26 +
- scripts/windows_installer_fault_test.ps1      |  348 +++
+ scripts/windows_installer_fault_test.ps1      |  418 +++
  scripts/windows_installer_test.ps1            |  622 +++++
  scripts/windows_smoke_conpty_path.ps1         |   36 +-
  skills/herdr/SKILL.md                         |  195 ++
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 +-
- 57 files changed, 9859 insertions(+), 235 deletions(-)
+ 57 files changed, 9929 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -57219,10 +57219,10 @@ index 0000000000000000000000000000000000000000..331dec1946e78838302c93b9325a825c
 +}
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..7fa4a2179b02d42e7d92320f810742db719ff638
+index 0000000000000000000000000000000000000000..fcc006e1c2f9cea9042d6f8f9f68b5cc807b7eb0
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,418 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57251,7 +57251,73 @@ index 0000000000000000000000000000000000000000..7fa4a2179b02d42e7d92320f810742db
 +$originalUserProfile = $env:USERPROFILE
 +$originalLocalAppData = $env:LOCALAPPDATA
 +$originalClaudeConfigDir = $env:CLAUDE_CONFIG_DIR
++$userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
++if ($null -eq $userEnvironmentKey) {
++    throw "HKCU\\Environment is unavailable; refusing to run the installer fault matrix."
++}
++try {
++    $originalUserPathExists = @($userEnvironmentKey.GetValueNames()) -contains "Path"
++    $originalUserPath = if ($originalUserPathExists) {
++        $userEnvironmentKey.GetValue(
++            "Path",
++            $null,
++            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
++        )
++    } else {
++        $null
++    }
++    $originalUserPathKind = if ($originalUserPathExists) {
++        $userEnvironmentKey.GetValueKind("Path")
++    } else {
++        $null
++    }
++} finally {
++    $userEnvironmentKey.Dispose()
++}
++
++if (-not ("HerdrTestEnvironmentBroadcast" -as [type])) {
++    Add-Type -TypeDefinition @'
++using System;
++using System.Runtime.InteropServices;
++public static class HerdrTestEnvironmentBroadcast {
++    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
++    public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr parameter, string value, uint flags, uint timeout, out IntPtr result);
++}
++'@
++}
++
++function Restore-TestUserPath {
++    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
++    if ($null -eq $key) {
++        throw "HKCU\\Environment is unavailable while restoring the installer fault test."
++    }
++    try {
++        if ($originalUserPathExists) {
++            $key.SetValue("Path", $originalUserPath, $originalUserPathKind)
++        } else {
++            $key.DeleteValue("Path", $false)
++        }
++    } finally {
++        $key.Dispose()
++    }
++
++    $result = [IntPtr]::Zero
++    $sent = [HerdrTestEnvironmentBroadcast]::SendMessageTimeout(
++        [IntPtr]0xffff,
++        0x001A,
++        [IntPtr]::Zero,
++        "Environment",
++        0x0002,
++        5000,
++        [ref]$result
++    )
++    if ($sent -eq [IntPtr]::Zero) {
++        throw "Restored the user PATH but failed to broadcast the environment change."
++    }
++}
++
 +$ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
++try {
 +if ($ownsAgentUserProfile) {
 +    $AgentUserProfileRoot = Join-Path ([IO.Path]::GetTempPath()) ("hs-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 +    New-Item -ItemType Directory -Path $AgentUserProfileRoot | Out-Null
@@ -57562,15 +57628,19 @@ index 0000000000000000000000000000000000000000..7fa4a2179b02d42e7d92320f810742db
 +            Remove-Item -LiteralPath $installFailure -Force -ErrorAction SilentlyContinue
 +        }
 +    }
-+    $env:USERPROFILE = $originalUserProfile
-+    $env:LOCALAPPDATA = $originalLocalAppData
-+    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
-+    if ($ownsAgentUserProfile -and (Test-Path -LiteralPath $AgentUserProfileRoot)) {
-+        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
-+    }
 +}
 +
 +Write-Host "Windows installer fault matrix passed."
++} finally {
++    $env:USERPROFILE = $originalUserProfile
++    $env:LOCALAPPDATA = $originalLocalAppData
++    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
++    Restore-TestUserPath
++    if ($ownsAgentUserProfile -and -not [string]::IsNullOrWhiteSpace($AgentUserProfileRoot) -and
++        (Test-Path -LiteralPath $AgentUserProfileRoot)) {
++        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
++    }
++}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
 index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba66cf85ea

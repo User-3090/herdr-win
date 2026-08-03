@@ -90,7 +90,7 @@ impl App {
         let root_leaf = first_layout_leaf(&params.root);
         let first_cwd = self.layout_root_cwd(ws_idx, replace_target, root_leaf);
         let (rows, cols) = self.state.estimate_pane_size();
-        let default_shell = self.state.default_shell.clone();
+        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let extra_env = match super::env::normalize_launch_env(root_leaf.env.clone()) {
@@ -394,7 +394,7 @@ impl App {
         pane: &LayoutPane,
     ) -> Result<PaneId, String> {
         let (rows, cols) = self.state.estimate_pane_size();
-        let default_shell = self.state.default_shell.clone();
+        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let cwd = pane

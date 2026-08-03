@@ -26,7 +26,73 @@ $packager = Join-Path $PSScriptRoot "package_windows_installer.ps1"
 $originalUserProfile = $env:USERPROFILE
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalClaudeConfigDir = $env:CLAUDE_CONFIG_DIR
+$userEnvironmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+if ($null -eq $userEnvironmentKey) {
+    throw "HKCU\\Environment is unavailable; refusing to run the installer fault matrix."
+}
+try {
+    $originalUserPathExists = @($userEnvironmentKey.GetValueNames()) -contains "Path"
+    $originalUserPath = if ($originalUserPathExists) {
+        $userEnvironmentKey.GetValue(
+            "Path",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    } else {
+        $null
+    }
+    $originalUserPathKind = if ($originalUserPathExists) {
+        $userEnvironmentKey.GetValueKind("Path")
+    } else {
+        $null
+    }
+} finally {
+    $userEnvironmentKey.Dispose()
+}
+
+if (-not ("HerdrTestEnvironmentBroadcast" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class HerdrTestEnvironmentBroadcast {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr parameter, string value, uint flags, uint timeout, out IntPtr result);
+}
+'@
+}
+
+function Restore-TestUserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    if ($null -eq $key) {
+        throw "HKCU\\Environment is unavailable while restoring the installer fault test."
+    }
+    try {
+        if ($originalUserPathExists) {
+            $key.SetValue("Path", $originalUserPath, $originalUserPathKind)
+        } else {
+            $key.DeleteValue("Path", $false)
+        }
+    } finally {
+        $key.Dispose()
+    }
+
+    $result = [IntPtr]::Zero
+    $sent = [HerdrTestEnvironmentBroadcast]::SendMessageTimeout(
+        [IntPtr]0xffff,
+        0x001A,
+        [IntPtr]::Zero,
+        "Environment",
+        0x0002,
+        5000,
+        [ref]$result
+    )
+    if ($sent -eq [IntPtr]::Zero) {
+        throw "Restored the user PATH but failed to broadcast the environment change."
+    }
+}
+
 $ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
+try {
 if ($ownsAgentUserProfile) {
     $AgentUserProfileRoot = Join-Path ([IO.Path]::GetTempPath()) ("hs-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $AgentUserProfileRoot | Out-Null
@@ -337,12 +403,16 @@ try {
             Remove-Item -LiteralPath $installFailure -Force -ErrorAction SilentlyContinue
         }
     }
-    $env:USERPROFILE = $originalUserProfile
-    $env:LOCALAPPDATA = $originalLocalAppData
-    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
-    if ($ownsAgentUserProfile -and (Test-Path -LiteralPath $AgentUserProfileRoot)) {
-        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
 }
 
 Write-Host "Windows installer fault matrix passed."
+} finally {
+    $env:USERPROFILE = $originalUserProfile
+    $env:LOCALAPPDATA = $originalLocalAppData
+    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
+    Restore-TestUserPath
+    if ($ownsAgentUserProfile -and -not [string]::IsNullOrWhiteSpace($AgentUserProfileRoot) -and
+        (Test-Path -LiteralPath $AgentUserProfileRoot)) {
+        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

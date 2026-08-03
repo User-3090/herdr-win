@@ -54,7 +54,7 @@ impl App {
             let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
             Some(self.resolve_new_terminal_cwd(follow_cwd))
         });
-        let default_shell = self.state.default_shell.clone();
+        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let previous_focus = self.state.current_pane_focus_target();
