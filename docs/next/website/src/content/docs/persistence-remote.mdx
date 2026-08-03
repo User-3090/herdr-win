@@ -65,7 +65,7 @@ herdr --remote workbox
 
 Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
 
-Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the Herdr sandbox layout at `C:\HerdrSandbox\runtime\herdr\herdr.exe`; automatic install and live handoff remain Unix-host-only.
+Native Windows clients can attach to those Linux and macOS hosts as well as Windows hosts. On a Windows host, the SSH user's `PATH` must resolve `herdr.exe`; Herdr starts that exact executable and never installs a remote binary automatically. Live handoff remains Unix-host-only.
 
 On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or DIB clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
 

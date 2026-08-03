@@ -36,7 +36,7 @@ For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a cus
 | Plugins | preview |
 | Pane screen history | beta |
 | Nested launch override | beta |
-| `herdr --remote` to Linux/macOS and pre-provisioned Windows hosts | beta |
+| `herdr --remote` to Linux/macOS and Windows hosts with `herdr.exe` on the SSH user's `PATH` | beta |
 
 Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers. It is useful for Codex, Claude, and similar agents, but it is not the same as Unix foreground process-group detection.
 
@@ -101,13 +101,13 @@ During a remote attach, use `ctrl+v` for clipboard images. Herdr accepts registe
 | Prefix input-source switching | unsupported |
 | Signed binary / SmartScreen avoidance | unsupported |
 
-The native Windows binary can act as a thin client for Linux and macOS Herdr hosts and for this fork's pre-provisioned Windows sandbox host:
+The native Windows binary can act as a thin client for Linux and macOS Herdr hosts and for Windows hosts where the SSH user's `PATH` resolves `herdr.exe`:
 
 ```powershell
 herdr --remote workbox
 ```
 
-Herdr does not use its control-socket connection reuse path on Windows. It still adds fallback SSH keepalives, but password authentication may prompt for more than one setup command. Key or Windows `ssh-agent` authentication is recommended. Linux and macOS hosts support discovery and optional installation; Windows hosts must already contain the sandbox Herdr executable and do not support live handoff.
+Herdr does not use its control-socket connection reuse path on Windows. It still adds SSH keepalives, but password authentication may prompt for more than one setup command. Key or Windows `ssh-agent` authentication is recommended. Linux and macOS hosts support discovery and optional installation; Windows hosts start exactly the PATH-resolved `herdr.exe`, never install a remote binary automatically, and do not support live handoff.
 
 Windows updates run through the Windows installer and update the versioned install junction. Restart running Herdr sessions after updating. Live handoff is Unix-only.
 

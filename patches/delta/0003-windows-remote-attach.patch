@@ -1,19 +1,22 @@
-From 176b4a793498e5c45ff98ce39e5e108891f6b530 Mon Sep 17 00:00:00 2001
+From b959b512322b198aa2c27b3d583d5fb427f24a62 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
 
-Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection Unix-specific while providing the Windows fallback required by the shared attach path.
+Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection and automatic remote installation Unix-specific; Windows remote hosts resolve herdr.exe from the SSH user's PATH.
 ---
  Cargo.lock                                    |    1 +
  Cargo.toml                                    |    1 +
  .../src/content/docs/configuration.mdx        |    4 +-
  .../src/content/docs/ja/configuration.mdx     |    4 +-
  .../content/docs/ja/persistence-remote.mdx    |   10 +-
+ .../src/content/docs/ja/windows-beta.mdx      |   14 +-
  .../src/content/docs/persistence-remote.mdx   |    8 +-
+ .../website/src/content/docs/windows-beta.mdx |   14 +-
  .../src/content/docs/zh-cn/configuration.mdx  |    4 +-
  .../content/docs/zh-cn/persistence-remote.mdx |   10 +-
- src/cli/status.rs                             |   25 +
+ .../src/content/docs/zh-cn/windows-beta.mdx   |   14 +-
+ src/cli/status.rs                             |   12 +
  src/client/mod.rs                             |  293 +-
  src/ipc.rs                                    |  176 +-
  src/main.rs                                   |    1 -
@@ -27,11 +30,11 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/remote.rs                                 |  149 +-
  src/remote/attach.rs                          | 3622 +++++++++++++++++
  src/remote/unix.rs                            | 3081 +-------------
- src/remote/windows.rs                         |  125 +
+ src/remote/windows.rs                         |  129 +
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
  src/update.rs                                 |    5 +
- 26 files changed, 5152 insertions(+), 3342 deletions(-)
+ 29 files changed, 5156 insertions(+), 3371 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -104,7 +107,7 @@ index 4e50c675eee01ef64dd788d9a5c190086abd6988..67e07a9c70f1d1c8f31c390e2a332e9c
  ## キーバインド
  
 diff --git a/docs/next/website/src/content/docs/ja/persistence-remote.mdx b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
-index f8d3ff02f5be343971171672c9f1793384f3357d..ea500322cc1ed01d121dad06afae9c8a182636e8 100644
+index f8d3ff02f5be343971171672c9f1793384f3357d..8313d6c3ea082a2ef2009ee08bc6238757ecb604 100644
 --- a/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/ja/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -115,7 +118,7 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..ea500322cc1ed01d121dad06afae9c8a
 +リモートアタッチは x86_64 と aarch64 の Linux および macOS ホストをサポートします。Herdr はリモートのプラットフォームを確認し、リモートの `PATH` 上にある一致する `herdr` を優先してから、一般的な直接インストール、Homebrew、mise、Nix プロファイルのパスを確認します。一致するバイナリがない場合、対話的な実行では `~/.local/bin/herdr` へのインストールを提案します。非対話的な実行はホストを変更せずに失敗します。`~/.local/bin` がリモートの `PATH` にない場合、Herdr はインストール後に警告します。
  
 -ネイティブ Windows の `herdr --remote` は Windows ベータの範囲外です。Windows からはサーバーに SSH してそこで `herdr` を実行してください。
-+ネイティブ Windows クライアントは、これらの Linux および macOS ホストへアタッチできます。このフォークでは、`C:\HerdrSandbox\runtime\herdr.exe` にある Herdr サンドボックスのスタンドアロンランタイム向けに、事前プロビジョニング済み Windows ホストアダプターも維持されています。自動インストールとライブハンドオフは引き続き Unix ホスト専用です。
++ネイティブ Windows クライアントは、これらの Linux および macOS ホストに加えて Windows ホストにもアタッチできます。Windows ホストでは、SSH ユーザーの `PATH` で `herdr.exe` を解決できる必要があり、Herdr は解決したその実行ファイルを起動します。Windows ではリモートバイナリを自動インストールしません。ライブハンドオフは引き続き Unix ホスト専用です。
  
 -デフォルトでは、`herdr --remote` はあなたの SSH config を最初に include し、その後にフォールバックのキープアライブ設定を加えた一時的な SSH config を通してブリッジを実行します。既存のユーザーのキープアライブ設定が優先されます。Herdr が生成するブリッジ設定を使わず素の `ssh` を使うには `[remote].manage_ssh_config = false` を設定してください。
 +Windows からのリモートアタッチでは、既定の `ctrl+v` リモート画像バインドが登録済み PNG または DIB クリップボード画像を既存のクライアントプロトコルで送信し、リモートホストへステージして、そのリモートパスを貼り付けます。PNG、JPEG、GIF、WebP、BMP の絶対パスをひとつドラッグまたは貼り付けた場合も、同じサイズ制限付き転送を使います。対応するクリップボード画像がない場合、テキスト入力はそのまま送られます。ショートカットを変更または無効化するには `keys.remote_image_paste` を設定してください。
@@ -126,8 +129,63 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..ea500322cc1ed01d121dad06afae9c8a
  
  デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
  
+diff --git a/docs/next/website/src/content/docs/ja/windows-beta.mdx b/docs/next/website/src/content/docs/ja/windows-beta.mdx
+index fa526872336a21f22732503b6bccdb6d20b9c2d1..c6623602c12af99c285abfe0e2f4be6cd2fd51f2 100644
+--- a/docs/next/website/src/content/docs/ja/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/ja/windows-beta.mdx
+@@ -36,6 +36,7 @@ Windows ベータビルドはプレビューチャンネルでのみ提供され
+ | プラグイン | プレビュー |
+ | ペイン画面履歴 | ベータ |
+ | ネストされた起動のオーバーライド | ベータ |
++| Linux/macOS と SSH ユーザーの `PATH` に `herdr.exe` がある Windows ホストへの `herdr --remote` | ベータ |
+ 
+ Windows のエージェントプロセス検出は、ペインのシェルの子孫プロセスをスキャンし、直接のエージェントと一般的なコマンドラッパーを認識します。Codex、Claude などのエージェントには有用ですが、Unix のフォアグラウンドプロセスグループ検出と同じものではありません。
+ 
+@@ -47,14 +48,14 @@ Windows のエージェントプロセス検出は、ペインのシェルの子
+ | --- | --- |
+ | シェルで `cd` した後のライブ cwd | 部分的 |
+ | シェルインテグレーション/OSC7 によるライブ cwd | ベータ |
+-| エージェントへのクリップボード画像貼り付け | 未検証 |
++| エージェントへのリモートクリップボード画像貼り付け | ベータ |
+ | CJK IME の変換候補位置 | 部分的 |
+ | Kitty graphics のレンダリング | 未検証 |
+ | ホストカーソル描画 | 部分的 |
+ 
+ Herdr はペインを正しいディレクトリで起動でき、Herdr を起動したディレクトリから最初のワークスペースを作成できます。起動後の PowerShell のディレクトリ変更は別問題です: Herdr が調べられるプロセスのフィールドは、その後の論理的な `cd` の変化を確実には追跡しません。ライブ cwd の報告には Herdr インテグレーションかプロンプトのシェルインテグレーションを使ってください。
+ 
+-Windows Terminal は特定のエージェント向けに画像貼り付け経路をサポートしているかもしれませんが、Herdr 自身のクリップボード画像リーダーはまだ Windows に配線されていません。Windows のクリップボードブリッジが実装・テストされるまで、`alt+v` の画像貼り付けは未検証として扱ってください。リモートクリップボードの画像ブリッジは別機能で、引き続き Unix/macOS の `herdr --remote` に紐づいています。
++`herdr --remote` では、Herdr は Windows 上で登録済み PNG および DIB クリップボード形式を読み取り、サイズ制限された PNG をリモートサーバーへ送信します。既定のショートカットは `ctrl+v` です。変更または無効化するには `keys.remote_image_paste` を設定してください。貼り付けまたはドロップされた絶対画像パスも同じ方法で転送されます。このブリッジはリモート専用で、対応するクリップボード画像がない場合は通常の入力にフォールバックします。
+ 
+ Kitty graphics は実験的なままで、まだ Windows でのサポートを謳っていません。Windows Terminal での画像レンダリングを特にテストしているのでない限り、`experimental.kitty_graphics = false` のままにしてください。
+ 
+@@ -90,22 +91,19 @@ Herdr のペインテキストコピーは Windows ベータで動作します
+ | 機能 | 状況 |
+ | --- | --- |
+ | ダイレクトターミナルアタッチ | 未サポート |
+-| Windows バイナリからの `herdr --remote` | 未サポート |
+ | ライブサーバーハンドオフ | 未サポート |
+ | Unix ファイルディスクリプタのハンドオフ | 未サポート |
+ | Unix フォアグラウンドプロセスグループ | 未サポート |
+-| リモートクリップボード画像ブリッジ | 未サポート |
+ | プレフィックスによる入力ソース切り替え | 未サポート |
+ | 署名済みバイナリ / SmartScreen 回避 | 未サポート |
+ 
+-Windows からのリモート作業は、サーバーに SSH してそこで `herdr` を実行してください:
++ネイティブ Windows バイナリは、Linux と macOS の Herdr ホスト、および SSH ユーザーの `PATH` で `herdr.exe` を解決できる Windows ホストに対するシンクライアントとして動作できます:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-このモードでは Herdr はリモートホスト上で動きます。ネイティブ Windows の `herdr --remote` はベータの範囲外です。
++Windows ではコントロールソケットによる接続再利用は使用しません。SSH キープアライブは追加されますが、パスワード認証では複数のセットアップコマンドに対して入力を求められる場合があります。鍵認証または Windows の `ssh-agent` を推奨します。Linux と macOS ホストでは検出と任意のインストールをサポートします。Windows ホストでは SSH ユーザーの `PATH` で解決した `herdr.exe` だけを起動し、リモートへの自動インストールやライブハンドオフは行いません。
+ 
+ Windows のアップデートは Windows インストーラー経由で行われ、バージョン付きインストールジャンクションを更新します。アップデート後は実行中の Herdr セッションを再起動してください。ライブハンドオフは Unix 専用です。
+ 
 diff --git a/docs/next/website/src/content/docs/persistence-remote.mdx b/docs/next/website/src/content/docs/persistence-remote.mdx
-index a365ac8838673144952ce0b6dcf92d3125e27360..7c2f645f6121c2a71448fb432c74f3e5ad5d8d02 100644
+index a365ac8838673144952ce0b6dcf92d3125e27360..50b8f099a565180dc05996497c7391a2eadb3780 100644
 --- a/docs/next/website/src/content/docs/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/persistence-remote.mdx
 @@ -65,9 +65,13 @@ herdr --remote workbox
@@ -135,7 +193,7 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..7c2f645f6121c2a71448fb432c74f3e5
  Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
  
 -Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
-+Native Windows clients can attach to those Linux and macOS hosts. This fork also preserves its pre-provisioned Windows-host adapter for the standalone Herdr sandbox runtime at `C:\HerdrSandbox\runtime\herdr.exe`; automatic install and live handoff remain Unix-host-only. On Windows, `herdr status client --json` reports that exact adapter path as `windows_remote_guest_executable` so the Sandbox launcher can reject incompatible builds before provisioning.
++Native Windows clients can attach to those Linux and macOS hosts as well as Windows hosts. On a Windows host, the SSH user's `PATH` must resolve `herdr.exe`; Herdr starts that exact executable and never installs a remote binary automatically. Live handoff remains Unix-host-only.
  
 -By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and a private per-attach control socket for connection reuse. Existing user keepalive settings win. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 +On a remote attach from Windows, the default `ctrl+v` remote-image binding sends a registered PNG or DIB clipboard image through the existing client protocol, stages it on the remote host, and pastes the remote path. Dragging or pasting one absolute PNG, JPEG, GIF, WebP, or BMP path uses the same bounded transport. Text input falls through unchanged when the clipboard has no supported image. Change or disable the shortcut with `keys.remote_image_paste`.
@@ -145,6 +203,61 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..7c2f645f6121c2a71448fb432c74f3e5
 +On Windows, the generated config includes `%USERPROFILE%\.ssh\config` and the system OpenSSH config when present. Herdr does not use SSH control-socket reuse on Windows, so password authentication can prompt for multiple setup commands. Use key authentication or load the key into Windows `ssh-agent` for a one-step attach.
  
  Remote attach uses your normal OpenSSH authentication. If the target uses a passphrase-protected key in a non-interactive shell, script, CI job, or mobile terminal that cannot show the passphrase prompt, load the key into ssh-agent first:
+ 
+diff --git a/docs/next/website/src/content/docs/windows-beta.mdx b/docs/next/website/src/content/docs/windows-beta.mdx
+index 696a77be41d6669c237afa798b896960081da75d..a8bbffa8e9c7c2478a701b821b4e35c01b740f1f 100644
+--- a/docs/next/website/src/content/docs/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/windows-beta.mdx
+@@ -36,6 +36,7 @@ For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a cus
+ | Plugins | preview |
+ | Pane screen history | beta |
+ | Nested launch override | beta |
++| `herdr --remote` to Linux/macOS and Windows hosts with `herdr.exe` on the SSH user's `PATH` | beta |
+ 
+ Windows agent process detection scans descendants of the pane shell and recognizes direct agents plus common command wrappers. It is useful for Codex, Claude, and similar agents, but it is not the same as Unix foreground process-group detection.
+ 
+@@ -47,14 +48,14 @@ Plugins support `windows` as a manifest platform in preview. GitHub install, loc
+ | --- | --- |
+ | Live cwd after shell `cd` | partial |
+ | Live cwd via shell integration/OSC7 | beta |
+-| Clipboard image paste to agents | unverified |
++| Remote clipboard image paste to agents | beta |
+ | CJK IME composition anchoring | partial |
+ | Kitty graphics rendering | unverified |
+ | Host cursor rendering | partial |
+ 
+ Herdr can launch panes in the right directory and can create the initial workspace from the directory where you started Herdr. PowerShell directory changes after startup are different: the process field Herdr can inspect does not reliably track later logical `cd` changes. Use Herdr integrations or prompt shell integration for live cwd reporting.
+ 
+-Windows Terminal may support image paste paths for specific agents, but Herdr's own clipboard-image reader is not wired on Windows yet. Treat `alt+v` image paste as unverified until the Windows clipboard bridge is implemented and tested. Remote clipboard image bridging is separate and remains tied to Unix/macOS `herdr --remote`.
++For `herdr --remote`, Herdr reads registered PNG and DIB clipboard formats on Windows and sends a bounded PNG to the remote server. The default shortcut is `ctrl+v`; set `keys.remote_image_paste` to change or disable it. A pasted or dropped absolute image path is transported in the same way. This bridge is remote-only and falls back to normal input when no supported clipboard image is available.
+ 
+ Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
+ 
+@@ -90,22 +91,19 @@ For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is
+ | Capability | Status |
+ | --- | --- |
+ | Direct terminal attach | unsupported |
+-| `herdr --remote` from the Windows binary | unsupported |
+ | Live server handoff | unsupported |
+ | Unix file-descriptor handoff | unsupported |
+ | Unix foreground process groups | unsupported |
+-| Remote clipboard image bridge | unsupported |
+ | Prefix input-source switching | unsupported |
+ | Signed binary / SmartScreen avoidance | unsupported |
+ 
+-For remote work from Windows, SSH into the server and run `herdr` there:
++The native Windows binary can act as a thin client for Linux and macOS Herdr hosts and for Windows hosts where the SSH user's `PATH` resolves `herdr.exe`:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-That mode runs Herdr on the remote host. Native Windows `herdr --remote` is not part of the beta.
++Herdr does not use its control-socket connection reuse path on Windows. It still adds SSH keepalives, but password authentication may prompt for more than one setup command. Key or Windows `ssh-agent` authentication is recommended. Linux and macOS hosts support discovery and optional installation; Windows hosts start exactly the PATH-resolved `herdr.exe`, never install a remote binary automatically, and do not support live handoff.
+ 
+ Windows updates run through the Windows installer and update the versioned install junction. Restart running Herdr sessions after updating. Live handoff is Unix-only.
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/configuration.mdx b/docs/next/website/src/content/docs/zh-cn/configuration.mdx
 index ce5852b94055385831d6637c8dc5a4ddb824e5dd..d1d47dfb8daf1fe5b734a2975e19163334d41f6f 100644
@@ -168,7 +281,7 @@ index ce5852b94055385831d6637c8dc5a4ddb824e5dd..d1d47dfb8daf1fe5b734a2975e191633
  ## 按键绑定
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
-index a81a8469e54aba464c1daa01638ac651f31c7e73..9a1ec42220eb42eb30318e4463942a779198168f 100644
+index a81a8469e54aba464c1daa01638ac651f31c7e73..c88a1a17f029a902bd4da7f7346f403359bc5312 100644
 --- a/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/persistence-remote.mdx
 @@ -63,11 +63,15 @@ Host workbox
@@ -179,7 +292,7 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..9a1ec42220eb42eb30318e4463942a77
 +远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查常见的直接安装、Homebrew、mise 和 Nix profile 路径。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
  
 -Windows 原生的 `herdr --remote` 不在 Windows 测试版范围内。在 Windows 上请 SSH 到服务器并在那里运行 `herdr`。
-+原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr.exe` 沙盒独立运行时的预配置 Windows 主机适配器;自动安装和实时交接仍仅支持 Unix 主机。
++原生 Windows 客户端可以连接这些 Linux 和 macOS 主机，也可以连接 Windows 主机。在 Windows 主机上，SSH 用户的 `PATH` 必须能够解析 `herdr.exe`；Herdr 会启动该已解析的可执行文件。Windows 上不会自动安装远程二进制文件；实时交接仍仅支持 Unix 主机。
  
 -默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的桥接配置,而使用普通 `ssh`。
 +从 Windows 远程连接时,默认的 `ctrl+v` 远程图像按键会通过现有客户端协议发送已注册的 PNG 或 DIB 剪贴板图像,将其暂存在远程主机并粘贴远程路径。拖放或粘贴一个 PNG、JPEG、GIF、WebP 或 BMP 的绝对路径也会使用同样的受限传输。剪贴板中没有受支持的图像时,文本输入会原样发送。可通过 `keys.remote_image_paste` 更改或禁用此快捷键。
@@ -190,27 +303,66 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..9a1ec42220eb42eb30318e4463942a77
  
  默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
  
+diff --git a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
+index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc6278241d 100644
+--- a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
++++ b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
+@@ -36,6 +36,7 @@ Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默
+ | 插件 | 预览 |
+ | 窗格屏幕历史 | 测试版 |
+ | 嵌套启动覆盖 | 测试版 |
++| 连接 Linux/macOS 和 SSH 用户 `PATH` 中有 `herdr.exe` 的 Windows 主机的 `herdr --remote` | 测试版 |
+ 
+ Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器。它对 Codex、Claude 等智能体很有用,但和 Unix 前台进程组检测不是一回事。
+ 
+@@ -47,14 +48,14 @@ Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接
+ | --- | --- |
+ | shell `cd` 之后的实时 cwd | 部分支持 |
+ | 通过 shell 集成/OSC7 的实时 cwd | 测试版 |
+-| 向智能体粘贴剪贴板图像 | 未验证 |
++| 向智能体远程粘贴剪贴板图像 | 测试版 |
+ | CJK 输入法候选窗口定位 | 部分支持 |
+ | Kitty graphics 渲染 | 未验证 |
+ | 主机光标渲染 | 部分支持 |
+ 
+ Herdr 可以在正确的目录中启动窗格,并能从你启动 Herdr 的目录创建初始工作区。启动之后 PowerShell 的目录变化则不同: Herdr 能检查的进程字段无法可靠跟踪后续的逻辑 `cd` 变化。实时 cwd 上报请使用 Herdr 集成或提示符 shell 集成。
+ 
+-Windows Terminal 可能为特定智能体支持图像粘贴路径,但 Herdr 自己的剪贴板图像读取器尚未在 Windows 上接通。在 Windows 剪贴板桥实现并测试之前,请把 `alt+v` 图像粘贴视为未验证。远程剪贴板图像桥是独立功能,仍然绑定于 Unix/macOS 的 `herdr --remote`。
++使用 `herdr --remote` 时,Herdr 会在 Windows 上读取已注册的 PNG 和 DIB 剪贴板格式,并向远程服务器发送受大小限制的 PNG。默认快捷键是 `ctrl+v`;可通过 `keys.remote_image_paste` 更改或禁用。粘贴或拖放的绝对图像路径也会以同样方式传输。此桥接仅用于远程连接;没有受支持的剪贴板图像时会回退到普通输入。
+ 
+ Kitty graphics 仍是实验性功能,尚未宣称支持 Windows。除非你专门在 Windows Terminal 中测试图像渲染,否则保持 `experimental.kitty_graphics = false`。
+ 
+@@ -90,22 +91,19 @@ Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选
+ | 能力 | 状态 |
+ | --- | --- |
+ | 直接终端附加 | 不支持 |
+-| Windows 二进制的 `herdr --remote` | 不支持 |
+ | 实时服务器交接 | 不支持 |
+ | Unix 文件描述符交接 | 不支持 |
+ | Unix 前台进程组 | 不支持 |
+-| 远程剪贴板图像桥 | 不支持 |
+ | 前缀输入法切换 | 不支持 |
+ | 签名二进制 / 规避 SmartScreen | 不支持 |
+ 
+-在 Windows 上进行远程工作,请 SSH 到服务器并在那里运行 `herdr`:
++原生 Windows 二进制可以作为 Linux 和 macOS Herdr 主机以及 SSH 用户的 `PATH` 能解析 `herdr.exe` 的 Windows 主机的瘦客户端:
+ 
+ ```powershell
+-ssh you@server
+-herdr
++herdr --remote workbox
+ ```
+ 
+-这种模式下 Herdr 运行在远程主机上。Windows 原生的 `herdr --remote` 不在测试版范围内。
++Herdr 在 Windows 上不使用控制套接字连接复用。它仍会添加 SSH keepalive,但密码认证可能会为多个设置命令重复提示。建议使用密钥或 Windows `ssh-agent` 认证。Linux 和 macOS 主机支持检测和可选安装;Windows 主机只会启动从 SSH 用户 `PATH` 解析出的 `herdr.exe`,不会自动安装远程二进制文件,也不支持实时交接。
+ 
+ Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
+ 
 diff --git a/src/cli/status.rs b/src/cli/status.rs
-index 49b3c129f5ed807ccca6bf4989a44407ef400431..08e68724aae701f7512d47ace3827c7a669608c7 100644
+index 49b3c129f5ed807ccca6bf4989a44407ef400431..63b8da7e7e86855fe2281c013c327a31884a5cef 100644
 --- a/src/cli/status.rs
 +++ b/src/cli/status.rs
-@@ -223,6 +223,7 @@ struct ClientStatusJson {
-     protocol: u32,
-     binary: String,
-     session: Option<String>,
-+    windows_remote_guest_executable: Option<&'static str>,
- }
- 
- #[derive(Serialize)]
-@@ -256,6 +257,7 @@ fn client_status_json() -> ClientStatusJson {
-         protocol: crate::protocol::PROTOCOL_VERSION,
-         binary: current_exe_label(),
-         session: crate::session::active_name(),
-+        windows_remote_guest_executable: crate::remote::windows_remote_guest_executable(),
-     }
- }
- 
-@@ -329,3 +331,26 @@ fn print_status_help() {
+@@ -329,3 +329,15 @@ fn print_status_help() {
      eprintln!("  herdr status server [--json]  show running server status");
      eprintln!("  herdr status client [--json]  show local client binary status");
  }
@@ -220,21 +372,10 @@ index 49b3c129f5ed807ccca6bf4989a44407ef400431..08e68724aae701f7512d47ace3827c7a
 +    use super::*;
 +
 +    #[test]
-+    fn client_status_json_exposes_windows_remote_guest_executable() {
-+        let status = ClientStatusJson {
-+            version: "test".to_string(),
-+            channel: "test",
-+            protocol: 1,
-+            binary: "test".to_string(),
-+            session: None,
-+            windows_remote_guest_executable: crate::remote::windows_remote_guest_executable(),
-+        };
++    fn client_status_json_omits_windows_remote_guest_executable() {
++        let value = serde_json::to_value(client_status_json()).unwrap();
 +
-+        let value = serde_json::to_value(status).unwrap();
-+        let expected = crate::remote::windows_remote_guest_executable()
-+            .map(|path| serde_json::Value::String(path.to_string()))
-+            .unwrap_or(serde_json::Value::Null);
-+        assert_eq!(value["windows_remote_guest_executable"], expected);
++        assert!(value.get("windows_remote_guest_executable").is_none());
 +    }
 +}
 diff --git a/src/client/mod.rs b/src/client/mod.rs
@@ -2088,10 +2229,10 @@ index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c7673
 +    }
 +}
 diff --git a/src/remote.rs b/src/remote.rs
-index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a2450e7d7987 100644
+index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86bb179369e 100644
 --- a/src/remote.rs
 +++ b/src/remote.rs
-@@ -1,150 +1,23 @@
+@@ -1,151 +1,14 @@
 +mod attach;
  #[cfg(unix)]
  mod unix;
@@ -2101,7 +2242,7 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a245
 -
 -#[cfg(windows)]
 -pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
- #[cfg(windows)]
+-#[cfg(windows)]
 -pub(crate) const REMOTE_KEYBINDINGS_ENV_VAR: &str = "HERDR_REMOTE_KEYBINDINGS";
 -
 -#[cfg(windows)]
@@ -2111,7 +2252,7 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a245
 -    Server,
 -}
 -
--#[cfg(windows)]
+ #[cfg(windows)]
 -impl RemoteKeybindings {
 -    fn parse(value: &str) -> Result<Self, String> {
 -        match value {
@@ -2214,12 +2355,8 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a245
 -
 -    Ok((cleaned, remote))
 -}
-+mod windows;
- 
-+pub(crate) use attach::*;
-+#[cfg(unix)]
-+pub(crate) use unix::run_remote_client_bridge;
- #[cfg(windows)]
+-
+-#[cfg(windows)]
 -fn validate_remote_target(target: &str) -> Result<&str, String> {
 -    if target.is_empty() {
 -        return Err("missing value for --remote".to_string());
@@ -2229,30 +2366,30 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..c434b991f7db6af3b3096f6e1788a245
 -    }
 -    Ok(target)
 -}
-+pub(crate) use windows::run_remote_client_bridge;
- 
- #[cfg(windows)]
+-
+-#[cfg(windows)]
 -pub(crate) fn run_remote(_remote: RemoteLaunch) -> std::io::Result<()> {
 -    debug_assert!(!crate::platform::capabilities().remote_attach);
 -    Err(std::io::Error::other(
 -        "remote mode is not supported on Windows yet",
 -    ))
-+pub(crate) fn windows_remote_guest_executable() -> Option<&'static str> {
-+    Some(windows::REMOTE_HERDR_PATH)
- }
+-}
++mod windows;
  
--#[cfg(windows)]
++pub(crate) use attach::*;
++#[cfg(unix)]
++pub(crate) use unix::run_remote_client_bridge;
+ #[cfg(windows)]
 -pub(crate) fn run_remote_client_bridge() -> std::io::Result<()> {
 -    debug_assert!(!crate::platform::capabilities().remote_attach);
 -    Err(std::io::Error::other(
 -        "remote client bridge is not supported on Windows yet",
 -    ))
-+#[cfg(not(windows))]
-+pub(crate) fn windows_remote_guest_executable() -> Option<&'static str> {
-+    None
- }
+-}
++pub(crate) use windows::run_remote_client_bridge;
  
  pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
+     if is_remote_auth_error(err) {
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d1f2e07a5
@@ -8991,10 +9128,10 @@ index 813091ba45e7c798dfbb6ab87fe455cab9317376..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f079629004c41cbde7ed2272c51b30f4f428b77
+index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346fa0cfc00
 --- /dev/null
 +++ b/src/remote/windows.rs
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,129 @@
 +//! Windows remote-host side of the SSH stdio bridge.
 +
 +use std::io;
@@ -9003,8 +9140,6 @@ index 0000000000000000000000000000000000000000..6f079629004c41cbde7ed2272c51b30f
 +
 +use base64::Engine as _;
 +use interprocess::local_socket::traits::Stream as _;
-+
-+pub(super) const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr.exe";
 +
 +pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
 +    ensure_remote_server_running()?;
@@ -9051,7 +9186,9 @@ index 0000000000000000000000000000000000000000..6f079629004c41cbde7ed2272c51b30f
 +}
 +
 +pub(super) fn remote_bridge_command(session_name: &str) -> String {
-+    let mut script = format!("& {}", powershell_quote(REMOTE_HERDR_PATH));
++    let mut script = String::from(
++        "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
++    );
 +    if session_name != crate::session::DEFAULT_SESSION_NAME {
 +        script.push_str(" --session ");
 +        script.push_str(&powershell_quote(session_name));
@@ -9096,14 +9233,18 @@ index 0000000000000000000000000000000000000000..6f079629004c41cbde7ed2272c51b30f
 +    use super::*;
 +
 +    #[test]
-+    fn windows_remote_bridge_uses_concrete_guest_executable() {
++    fn windows_remote_bridge_resolves_path_application_for_default_session() {
 +        assert_eq!(
 +            decoded_remote_bridge_script(crate::session::DEFAULT_SESSION_NAME),
-+            "& 'C:\\HerdrSandbox\\runtime\\herdr.exe' remote-client-bridge"
++            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
 +        );
++    }
++
++    #[test]
++    fn windows_remote_bridge_resolves_path_application_for_named_session() {
 +        assert_eq!(
 +            decoded_remote_bridge_script("agent's work"),
-+            "& 'C:\\HerdrSandbox\\runtime\\herdr.exe' --session 'agent''s work' remote-client-bridge"
++            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
 +        );
 +    }
 +
@@ -9272,3 +9413,4 @@ index eac917bf6bc2e27f116dd7e674765c4f48b311d3..b874c117d472ba82f23dcee5bba652f9
          return true;
 -- 
 2.55.0.windows.3
+

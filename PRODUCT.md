@@ -62,6 +62,10 @@ tests remain the detailed implementation truth.
 ## Interaction and Status
 
 - Keyboard-first terminal operation remains complete end to end.
+- A native Windows client attaches to a Windows SSH host only through
+  `herdr.exe` resolved from that SSH user's `PATH`. It launches that resolved
+  application without a fork- or Sandbox-specific path fallback and never
+  installs Herdr on the Windows host automatically.
 - User-visible state distinguishes waiting, active, mixed, complete, failed,
   cancelled, stopped, and no-op outcomes whenever they require different user
   understanding or action.

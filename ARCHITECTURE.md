@@ -38,13 +38,12 @@ behavior; code and tests remain the detailed implementation truth.
 - Mailbox 0001 owns Windows terminal appearance, color/cursor transport, rendering,
   and Windows VTI input behavior.
 - Mailbox 0003 owns shared remote orchestration, Windows SSH/named-pipe attach,
-  bounded clipboard/drop image transport, and the narrow Sandbox adapter. That
-  adapter invokes the one pre-provisioned standalone guest payload at
-  `C:\HerdrSandbox\runtime\herdr.exe`; it never addresses a managed
-  `runtime/<build-id>` installation inside the guest. On Windows,
-  `herdr status client --json` exposes this exact path as
-  `windows_remote_guest_executable` so consumers can reject an absent or different
-  adapter contract before provisioning.
+  and bounded clipboard/drop image transport. For a Windows remote host, its
+  encoded PowerShell bridge resolves `herdr.exe` from the SSH user's `PATH` with
+  `Get-Command` restricted to `Application`, then invokes that exact result with
+  the optional session name and `remote-client-bridge`. This path has no
+  Sandbox-specific executable or status contract, compatibility fallback, live
+  handoff, or automatic Windows remote installation.
 - Mailbox 0004 owns deterministic ConPTY packaging, managed Windows distribution,
   fork update sources, and installer lifecycle.
 - Mailbox 0005 owns OpenCode retry/error lifecycle correlation. It must preserve

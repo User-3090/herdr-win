@@ -7,8 +7,6 @@ use std::time::Duration;
 use base64::Engine as _;
 use interprocess::local_socket::traits::Stream as _;
 
-const REMOTE_HERDR_PATH: &str = r"C:\HerdrSandbox\runtime\herdr\herdr.exe";
-
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     ensure_remote_server_running()?;
 
@@ -54,7 +52,9 @@ fn ensure_remote_server_running() -> io::Result<()> {
 }
 
 pub(super) fn remote_bridge_command(session_name: &str) -> String {
-    let mut script = format!("& {}", powershell_quote(REMOTE_HERDR_PATH));
+    let mut script = String::from(
+        "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
+    );
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         script.push_str(" --session ");
         script.push_str(&powershell_quote(session_name));
@@ -99,14 +99,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_remote_bridge_uses_concrete_guest_executable() {
+    fn windows_remote_bridge_resolves_path_application_for_default_session() {
         assert_eq!(
             decoded_remote_bridge_script(crate::session::DEFAULT_SESSION_NAME),
-            "& 'C:\\HerdrSandbox\\runtime\\herdr\\herdr.exe' remote-client-bridge"
+            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
         );
+    }
+
+    #[test]
+    fn windows_remote_bridge_resolves_path_application_for_named_session() {
         assert_eq!(
             decoded_remote_bridge_script("agent's work"),
-            "& 'C:\\HerdrSandbox\\runtime\\herdr\\herdr.exe' --session 'agent''s work' remote-client-bridge"
+            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
         );
     }
 

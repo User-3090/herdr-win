@@ -81,7 +81,7 @@ The release product delta is exactly the ordered mailbox queue in [`patches/delt
 | Patch | Review scope |
 | --- | --- |
 | [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
-| [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a small fork-specific Sandbox adapter. |
+| [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a PATH-resolved Windows-host bridge. |
 | [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, immutable runtimes and launcher leases, strict per-user NSIS install/update/uninstall, and fork-owned update sources. |
 | [`0005`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | **OpenCode lifecycle:** correlate errors with explicit retry and idle events so active retries stay quiet while terminal failures remain actionable. |
 
@@ -98,7 +98,7 @@ You do not need to infer product changes from fork branch history. The four mail
 3. review each mailbox's rationale, full-index diff, tests, and documentation as one responsibility-oriented unit; and
 4. use the replay and verification procedure in [`CONTRIBUTING.md`](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md) to reproduce the queue on a fresh upstream checkout.
 
-The mailboxes are review units, not a request to merge each one unchanged. Patch 0003 includes a fork-specific preinstalled-binary adapter for Herdr Sandbox, and patch 0004 contains fork-only distribution URLs; their generic remote and packaging improvements can be separated from that wiring if upstream adopts them. Repository branding, workflows, release manifests, and publication automation remain outside the product queue.
+The mailboxes are review units, not a request to merge each one unchanged. Patch 0003 combines shared remote orchestration with Windows SSH/named-pipe integration, and patch 0004 contains fork-only distribution URLs; either mailbox can be split along those ownership boundaries if upstream adopts its generic parts. Repository branding, workflows, release manifests, and publication automation remain outside the product queue.
 
 ## How manual releases work
 

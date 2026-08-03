@@ -323,3 +323,15 @@ fn print_status_help() {
     eprintln!("  herdr status server [--json]  show running server status");
     eprintln!("  herdr status client [--json]  show local client binary status");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_status_json_omits_windows_remote_guest_executable() {
+        let value = serde_json::to_value(client_status_json()).unwrap();
+
+        assert!(value.get("windows_remote_guest_executable").is_none());
+    }
+}

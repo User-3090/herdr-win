@@ -36,7 +36,7 @@ Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默�
 | 插件 | 预览 |
 | 窗格屏幕历史 | 测试版 |
 | 嵌套启动覆盖 | 测试版 |
-| 连接 Linux/macOS 和预配置 Windows 主机的 `herdr --remote` | 测试版 |
+| 连接 Linux/macOS 和 SSH 用户 `PATH` 中有 `herdr.exe` 的 Windows 主机的 `herdr --remote` | 测试版 |
 
 Windows 智能体进程检测会扫描窗格 shell 的后代进程,识别直接运行的智能体和常见的命令包装器。它对 Codex、Claude 等智能体很有用,但和 Unix 前台进程组检测不是一回事。
 
@@ -101,13 +101,13 @@ Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选�
 | 前缀输入法切换 | 不支持 |
 | 签名二进制 / 规避 SmartScreen | 不支持 |
 
-原生 Windows 二进制可以作为 Linux 和 macOS Herdr 主机以及本分支预配置 Windows 沙盒主机的瘦客户端:
+原生 Windows 二进制可以作为 Linux 和 macOS Herdr 主机以及 SSH 用户的 `PATH` 能解析 `herdr.exe` 的 Windows 主机的瘦客户端:
 
 ```powershell
 herdr --remote workbox
 ```
 
-Herdr 在 Windows 上不使用控制套接字连接复用。它仍会添加备用 SSH keepalive,但密码认证可能会为多个设置命令重复提示。建议使用密钥或 Windows `ssh-agent` 认证。Linux 和 macOS 主机支持检测和可选安装;Windows 主机必须已经包含沙盒 Herdr 可执行文件,并且不支持实时交接。
+Herdr 在 Windows 上不使用控制套接字连接复用。它仍会添加 SSH keepalive,但密码认证可能会为多个设置命令重复提示。建议使用密钥或 Windows `ssh-agent` 认证。Linux 和 macOS 主机支持检测和可选安装;Windows 主机只会启动从 SSH 用户 `PATH` 解析出的 `herdr.exe`,不会自动安装远程二进制文件,也不支持实时交接。
 
 Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
 

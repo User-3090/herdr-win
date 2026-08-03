@@ -65,7 +65,7 @@ herdr --remote workbox
 
 远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查常见的直接安装、Homebrew、mise 和 Nix profile 路径。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
 
-原生 Windows 客户端可以连接这些 Linux 和 macOS 主机。本分支还保留了面向 `C:\HerdrSandbox\runtime\herdr\herdr.exe` 沙盒布局的预配置 Windows 主机适配器;自动安装和实时交接仍仅支持 Unix 主机。
+原生 Windows 客户端可以连接这些 Linux 和 macOS 主机，也可以连接 Windows 主机。在 Windows 主机上，SSH 用户的 `PATH` 必须能够解析 `herdr.exe`；Herdr 会启动该已解析的可执行文件。Windows 上不会自动安装远程二进制文件；实时交接仍仅支持 Unix 主机。
 
 从 Windows 远程连接时,默认的 `ctrl+v` 远程图像按键会通过现有客户端协议发送已注册的 PNG 或 DIB 剪贴板图像,将其暂存在远程主机并粘贴远程路径。拖放或粘贴一个 PNG、JPEG、GIF、WebP 或 BMP 的绝对路径也会使用同样的受限传输。剪贴板中没有受支持的图像时,文本输入会原样发送。可通过 `keys.remote_image_paste` 更改或禁用此快捷键。
 
