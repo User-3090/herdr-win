@@ -204,18 +204,27 @@ Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -TimeoutMilliseconds 
     return Start-Process powershell.exe -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
 }
 
-function Complete-TestNsisCleanup {
-    param([string]$Root)
-    $state = Join-Path $Root "state"
-    Remove-Item -LiteralPath (Join-Path $state "uninstall.pending") -Force
-    Remove-Item -LiteralPath (Join-Path $state "launcher.lock") -Force
-    Remove-Item -LiteralPath (Join-Path $Root "uninstall.exe") -Force
-    Remove-Item -LiteralPath (Join-Path $state "installer-helper.ps1") -Force
-    Remove-Item -LiteralPath $state -Force
-    Remove-Item -LiteralPath $Root -Force
+function Start-TestLifecycleProbe {
+    param([string]$HelperPath, [string]$InstallRoot, [string]$ResultPath, [int]$TimeoutMilliseconds = 250)
+    $escapedHelper = $HelperPath.Replace("'", "''")
+    $escapedRoot = $InstallRoot.Replace("'", "''")
+    $escapedResult = $ResultPath.Replace("'", "''")
+    $command = @"
+`$ErrorActionPreference = 'Stop'
+. '$escapedHelper'
+try {
+    Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -TimeoutMilliseconds $TimeoutMilliseconds -Operation { }
+    [IO.File]::WriteAllText('$escapedResult', 'acquired')
+} catch {
+    [IO.File]::WriteAllText('$escapedResult', ('blocked:' + `$_.Exception.Message))
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    return Start-Process powershell.exe -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
 }
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("hi-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+$faultMarkerPrefix = "hi" + [Guid]::NewGuid().ToString("N").Substring(0, 12)
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 $childProcesses = New-Object System.Collections.Generic.List[Diagnostics.Process]
 $registryPath = "HKCU:\Software\HerdrInstallerTests\$([Guid]::NewGuid().ToString('N'))"
@@ -515,6 +524,136 @@ try {
     [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
     Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 
+    # A dead uninstall transaction is recovery evidence, not a permanent setup
+    # blocker. This reproduces the observed field state: only the exact managed
+    # bin survives while the sibling transaction retains root.manifest.
+    $deadUninstallRoot = Join-Path $tempRoot "dead-uninstall-install"
+    $deadUninstallSkillsRoot = Join-Path $tempRoot "dead-uninstall-agent-skills"
+    [void](Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallSkillsRoot)
+    $deadUninstallTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $deadUninstallTransaction.Path "root.manifest")
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "runtime") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "state") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "uninstall.exe") -Force
+    $recoveredDeadUninstall = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
+    Assert-Equal $recoveredDeadUninstall.Status "Activated" "Dead uninstall transaction did not recover into a fresh install."
+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallTransaction.Path)) "Dead uninstall transaction survived setup recovery."
+    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
+    Assert-Equal (Read-HerdrPointer -Path (Join-Path $deadUninstallRoot "state\active")) $id2 "Dead uninstall recovery selected the wrong build."
+
+    # Recovery holds the launcher's coordination gate from its final process and
+    # lease checks until bin is moved out of the install root. A concurrent
+    # launcher owner therefore blocks recovery without losing transaction state.
+    $gatedRecoveryRoot = Join-Path $tempRoot "gated-dead-uninstall"
+    $gatedRecoverySkillsRoot = Join-Path $tempRoot "gated-dead-uninstall-agent-skills"
+    [void](Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $gatedRecoverySkillsRoot)
+    $gatedRecoveryTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $gatedRecoveryRoot
+    Copy-HerdrDurableFile -Source (Join-Path $gatedRecoveryRoot "state\install.manifest") -Destination (Join-Path $gatedRecoveryTransaction.Path "root.manifest")
+    Remove-Item -LiteralPath (Join-Path $gatedRecoveryRoot "runtime") -Recurse -Force
+    $gatedRecoveryReady = Join-Path $tempRoot "gated-dead-uninstall-ready"
+    $gatedRecoveryOwner = Start-TestSharedFileHolder -Path (Join-Path $gatedRecoveryRoot "state\launcher.lock") -ReadyPath $gatedRecoveryReady -Seconds 2 -ShareMode None
+    $childProcesses.Add($gatedRecoveryOwner)
+    Wait-TestPath -Path $gatedRecoveryReady
+    Assert-Throws {
+        Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -LockTimeoutMilliseconds 250
+    } "Timed out after 250 ms.*launcher.lock" "Dead uninstall recovery entered while a launcher owned its coordination gate."
+    Assert-True (Test-Path -LiteralPath $gatedRecoveryTransaction.Path) "Blocked recovery deleted its transaction."
+    Assert-True (Test-Path -LiteralPath (Join-Path $gatedRecoveryRoot "bin\herdr.exe")) "Blocked recovery removed its launcher."
+    if (-not $gatedRecoveryOwner.WaitForExit(10000)) { throw "Gated recovery owner did not exit within 10 seconds." }
+    $recoveredGatedUninstall = Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot
+    Assert-Equal $recoveredGatedUninstall.Status "Activated" "Gated dead uninstall did not recover after launcher coordination released."
+    Assert-HerdrManagedRoot -InstallRoot $gatedRecoveryRoot
+
+    # A transaction that died before changing a complete managed root is simply
+    # discarded; setup must preserve the installation and follow normal update.
+    $preMutationTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $preMutationTransaction.Path "root.manifest")
+    $recoveredPreMutation = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
+    Assert-Equal $recoveredPreMutation.Status "AlreadyActive" "Pre-mutation uninstall transaction changed normal setup behavior."
+    Assert-True (-not (Test-Path -LiteralPath $preMutationTransaction.Path)) "Pre-mutation uninstall transaction survived setup recovery."
+    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
+
+    # An exact residual left by an older interrupted uninstaller remains
+    # resumable by setup even though current helpers finalize it under the lock.
+    $uninstallResidualRoot = Join-Path $tempRoot "uninstall-residual-install"
+    $uninstallResidualSkillsRoot = Join-Path $tempRoot "uninstall-residual-agent-skills"
+    [void](Invoke-TestInstall -Root $uninstallResidualRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $uninstallResidualSkillsRoot)
+    Write-HerdrDurableText -Path (Join-Path $uninstallResidualRoot "state\uninstall.pending") -Text $script:UninstallMarkerText
+    Remove-Item -LiteralPath (Join-Path $uninstallResidualRoot "bin") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $uninstallResidualRoot "runtime") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $uninstallResidualRoot "state\active") -Force
+    Remove-Item -LiteralPath (Join-Path $uninstallResidualRoot "state\install.manifest") -Force
+    Remove-Item -LiteralPath (Join-Path $uninstallResidualRoot "state\leases") -Force
+    Assert-HerdrUninstallResidual -InstallRoot $uninstallResidualRoot
+    $recoveredResidual = Invoke-TestInstall -Root $uninstallResidualRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $uninstallResidualSkillsRoot
+    Assert-Equal $recoveredResidual.Status "Activated" "Exact uninstall residual did not recover into a fresh install."
+    Assert-HerdrManagedRoot -InstallRoot $uninstallResidualRoot
+
+    # Final cleanup fault points now live in the embedded helper, inside the
+    # lifecycle lock. Every exact partial residual keeps its retry executable and
+    # a second pass completes idempotently.
+    foreach ($fault in @(
+        "after-uninstall-pending",
+        "after-launcher-lock",
+        "after-installer-helper",
+        "after-state-directory",
+        "before-uninstaller"
+    )) {
+        Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
+        $faultRoot = Join-Path $tempRoot "fault-$fault"
+        Write-TestFile -Path (Join-Path $faultRoot "state\installer-helper.ps1") -Text "helper"
+        Write-TestFile -Path (Join-Path $faultRoot "state\launcher.lock") -Text ""
+        Write-HerdrDurableText -Path (Join-Path $faultRoot "state\uninstall.pending") -Text $script:UninstallMarkerText
+        Write-TestFile -Path (Join-Path $faultRoot "uninstall.exe") -Text "uninstaller"
+        Assert-Throws {
+            Remove-HerdrUninstallResidual -InstallRoot $faultRoot -UninstallFault $fault -UninstallFaultMarkerPrefix $faultMarkerPrefix
+        } "Injected uninstall cleanup fault" "Helper cleanup fault '$fault' did not interrupt its first pass."
+        Assert-True (Test-Path -LiteralPath (Join-Path $faultRoot "uninstall.exe")) "Helper cleanup fault '$fault' removed its retry executable."
+        Remove-HerdrUninstallResidual -InstallRoot $faultRoot -UninstallFault $fault -UninstallFaultMarkerPrefix $faultMarkerPrefix
+        Assert-True (-not (Test-Path -LiteralPath $faultRoot)) "Helper cleanup fault '$fault' was not retryable."
+        Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
+    }
+
+    # The same dead-transaction recovery is shared by uninstall. With no running
+    # managed process, a partial current install is removed instead of wedging the
+    # uninstaller on its own abandoned transaction.
+    $deadUninstallRemovalRoot = Join-Path $tempRoot "dead-uninstall-removal"
+    $deadUninstallRemovalSkillsRoot = Join-Path $tempRoot "dead-uninstall-removal-agent-skills"
+    [void](Invoke-TestInstall -Root $deadUninstallRemovalRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallRemovalSkillsRoot)
+    $deadUninstallRemovalTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRemovalRoot
+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRemovalRoot "state\install.manifest") -Destination (Join-Path $deadUninstallRemovalTransaction.Path "root.manifest")
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "runtime") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "state") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "uninstall.exe") -Force
+    Invoke-TestUninstall -Root $deadUninstallRemovalRoot -AgentSkillsRoot $deadUninstallRemovalSkillsRoot -ProcessProvider { @() }
+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalRoot)) "Uninstall did not remove its dead-transaction partial root."
+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalTransaction.Path)) "Uninstall retained its dead transaction."
+
+    # Filesystem finalization occurs inside the outer lifecycle operation. Even
+    # after the root is gone, another setup cannot publish a new generation until
+    # the uninstall owner releases the persistent sibling lock.
+    $lockedFinalizationRoot = Join-Path $tempRoot "locked-finalization-install"
+    $lockedFinalizationSkillsRoot = Join-Path $tempRoot "locked-finalization-agent-skills"
+    [void](Invoke-TestInstall -Root $lockedFinalizationRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $lockedFinalizationSkillsRoot)
+    $knownFinalizationSkillHashes = @(Read-HerdrManagedSkillHashes -Path $script:TestSkillHashManifest)
+    $finalizationProbeResult = Join-Path $tempRoot "locked-finalization-probe"
+    Invoke-HerdrLifecycleOperation -InstallRoot $lockedFinalizationRoot -TimeoutMilliseconds 3000 -Operation {
+        [void](Invoke-HerdrUninstallLayout `
+            -InstallRoot $lockedFinalizationRoot `
+            -AgentSkillsRoot $lockedFinalizationSkillsRoot `
+            -KnownSkillHashes $knownFinalizationSkillHashes `
+            -SkillDisposition Auto `
+            -ProcessProvider { @() } `
+            -LockTimeoutMilliseconds 3000)
+        Assert-True (-not (Test-Path -LiteralPath $lockedFinalizationRoot)) "Uninstall returned before filesystem finalization."
+        $finalizationProbe = Start-TestLifecycleProbe -HelperPath $helperPath -InstallRoot $lockedFinalizationRoot -ResultPath $finalizationProbeResult
+        $childProcesses.Add($finalizationProbe)
+        if (-not $finalizationProbe.WaitForExit(10000)) { throw "Lifecycle finalization probe did not exit within 10 seconds." }
+        Assert-True (Test-Path -LiteralPath $finalizationProbeResult) "Lifecycle finalization probe produced no result."
+        Assert-True ((Read-HerdrStrictUtf8 -Path $finalizationProbeResult) -match '^blocked:Timed out after 250 ms') "Lifecycle lock released before uninstall finalization returned."
+    }
+    Invoke-HerdrLifecycleOperation -InstallRoot $lockedFinalizationRoot -TimeoutMilliseconds 3000 -Operation { }
+
     # Managed updates replace known historical SKILL.md copies while preserving
     # customized copies and foreign siblings.
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
@@ -690,10 +829,8 @@ try {
     Assert-True (Test-Path -LiteralPath $unownedUninstallDirectory) "Rejected partial-uninstall directory was deleted."
     Remove-Item -LiteralPath $unownedUninstallDirectory -Force
     Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-    Assert-HerdrUninstallResidual -InstallRoot $processRoot
+    Assert-True (-not (Test-Path -LiteralPath $processRoot)) "Dead uninstall recovery retained its partial managed root."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $processAgentSkillsRoot "herdr"))) "Uninstall retained its unchanged owned Herdr skill."
-    Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\installer-helper.ps1")) "Retry helper was removed before NSIS cleanup."
-    Complete-TestNsisCleanup -Root $processRoot
 
     # Explicit removal deletes an unknown SKILL.md while preserving extra files
     # and nested directories.
@@ -706,11 +843,10 @@ try {
     Write-TestFile -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt") -Text "preserve-nested"
     Write-TestFile -Path $extraTreeSkill -Text "customized-extra-tree-skill"
     Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -SkillDisposition Remove -ProcessProvider { @() }
-    Assert-HerdrUninstallResidual -InstallRoot $extraTreeRoot
+    Assert-True (-not (Test-Path -LiteralPath $extraTreeRoot)) "Extra-tree uninstall returned before removing its install root."
     Assert-True (-not (Test-Path -LiteralPath $extraTreeSkill)) "Extra-tree uninstall preserved SKILL.md."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "user.txt")) "preserve-file" "Extra-tree uninstall removed a user file."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt")) "preserve-nested" "Extra-tree uninstall removed nested user content."
-    Complete-TestNsisCleanup -Root $extraTreeRoot
 
     # Active lease refusal preserves the complete primary install.
     $refusalLease = [IO.File]::Open(
@@ -727,12 +863,11 @@ try {
     }
     Write-TestFile -Path $installedSkill -Text "user-modified-skill"
     $finalPreservedSkills = @(Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() })
-    Assert-HerdrUninstallResidual -InstallRoot $installRoot
+    Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Final uninstall returned before removing its install root."
     Assert-Equal $finalPreservedSkills.Count 1 "Automatic uninstall did not report one modified Herdr skill."
     Assert-True (Test-Path -LiteralPath $installedSkill -PathType Leaf) "Uninstall removed a modified Herdr skill."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "user-modified-skill" "Automatic uninstall changed a modified Herdr skill."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Uninstall removed a foreign skill sibling."
-    Complete-TestNsisCleanup -Root $installRoot
 
     Write-Host "Windows installer PowerShell tests passed."
 } finally {
@@ -750,5 +885,8 @@ try {
     }
     if (Test-Path -LiteralPath $tempRoot) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($fault in @("after-uninstall-pending", "after-launcher-lock", "after-installer-helper", "after-state-directory", "before-uninstaller")) {
+        Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
     }
 }

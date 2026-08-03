@@ -65,6 +65,7 @@
 
 Unicode true
 !define APP_LANG_ENGLISH 1033
+!define APP_ENVIRONMENT_BROADCAST_TIMEOUT_MS 100
 
 Name "${INFO_DISTRIBUTIONNAME}"
 Caption "${INFO_DISTRIBUTIONNAME} Setup"
@@ -101,9 +102,6 @@ Var PowerShellPath
 Var HelperExitCode
 Var HelperOutput
 Var StartGate
-Var ResidualValid
-Var ResidualFindHandle
-Var ResidualFindName
 Var SettingsDisposition
 Var SettingsCheckbox
 Var SkillDisposition
@@ -151,17 +149,11 @@ LangString AppSkillCheckbox ${LANG_ENGLISH} "Remove installed ${INFO_PRODUCTNAME
 LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
 LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 
-!macro AppUninstallFault Point Label
-  !ifdef TEST_UNINSTALL_FAULT
-    StrCmp "${TEST_UNINSTALL_FAULT}" "${Point}" 0 fault_done_${Label}
-    IfFileExists "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" fault_done_${Label}
-    FileOpen $0 "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${Point}.once" w
-    FileClose $0
-    SetErrors
-    Goto uninstall_cleanup_failed
-fault_done_${Label}:
-  !endif
-!macroend
+!ifdef TEST_UNINSTALL_FAULT
+  !define APP_UNINSTALL_FAULT_ARGS '-UninstallFault "${TEST_UNINSTALL_FAULT}" -UninstallFaultMarkerPrefix "${APP_TEST_MARKER_PREFIX}"'
+!else
+  !define APP_UNINSTALL_FAULT_ARGS ""
+!endif
 
 Function SetPowerShellPath
   StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
@@ -180,11 +172,14 @@ Function un.SetPowerShellPath
 FunctionEnd
 
 Function NotifyEnvironmentChange
-  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i 5000, *p .r0)'
+  ; WM_SETTINGCHANGE officially uses SendMessageTimeout with HWND_BROADCAST.
+  ; Its timeout applies to every top-level window, so keep each unrelated hung
+  ; window tightly bounded instead of delaying setup before Finish.
+  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i ${APP_ENVIRONMENT_BROADCAST_TIMEOUT_MS}, *p .r0)'
 FunctionEnd
 
 Function un.NotifyEnvironmentChange
-  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i 5000, *p .r0)'
+  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i ${APP_ENVIRONMENT_BROADCAST_TIMEOUT_MS}, *p .r0)'
 FunctionEnd
 
 Function FailInstall
@@ -326,9 +321,10 @@ un_powershell_ok:
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   ClearErrors
+  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
   File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
   IfErrors 0 un_skill_manifest_ready
-  Push "The managed skill ownership manifest could not be unpacked; uninstall was preserved."
+  Push "The managed uninstall helper or skill ownership manifest could not be unpacked; uninstall was preserved."
   Call un.FailUninstall
 un_skill_manifest_ready:
 FunctionEnd
@@ -390,96 +386,6 @@ Function un.SettingsPageLeave
 settings_page_leave_done:
 FunctionEnd
 
-Function un.ValidateResidualLayout
-  StrCpy $ResidualValid "0"
-  IfFileExists "$INSTDIR\." un_residual_root_exists un_residual_root_missing
-
-un_residual_root_missing:
-  StrCpy $ResidualValid "1"
-  Return
-
-un_residual_root_exists:
-  ClearErrors
-  ${un.GetFileAttributes} "$INSTDIR" "DIRECTORY" $0
-  IfErrors un_residual_validation_done
-  StrCmp $0 "1" 0 un_residual_validation_done
-  ${un.GetFileAttributes} "$INSTDIR" "REPARSE_POINT" $0
-  IfErrors un_residual_validation_done
-  StrCmp $0 "0" 0 un_residual_validation_done
-
-  FindFirst $ResidualFindHandle $ResidualFindName "$INSTDIR\*.*"
-  IfErrors un_residual_validation_done
-un_residual_root_entry:
-  StrCmp $ResidualFindName "." un_residual_root_next
-  StrCmp $ResidualFindName ".." un_residual_root_next
-  StrCmp $ResidualFindName "state" un_residual_root_state
-  StrCmp $ResidualFindName "uninstall.exe" un_residual_root_file un_residual_root_invalid
-
-un_residual_root_state:
-  ${un.GetFileAttributes} "$INSTDIR\state" "DIRECTORY" $0
-  IfErrors un_residual_root_invalid
-  StrCmp $0 "1" 0 un_residual_root_invalid
-  ${un.GetFileAttributes} "$INSTDIR\state" "REPARSE_POINT" $0
-  IfErrors un_residual_root_invalid
-  StrCmp $0 "0" un_residual_root_next un_residual_root_invalid
-
-un_residual_root_file:
-  ${un.GetFileAttributes} "$INSTDIR\uninstall.exe" "DIRECTORY" $0
-  IfErrors un_residual_root_invalid
-  StrCmp $0 "0" 0 un_residual_root_invalid
-  ${un.GetFileAttributes} "$INSTDIR\uninstall.exe" "REPARSE_POINT" $0
-  IfErrors un_residual_root_invalid
-  StrCmp $0 "0" un_residual_root_next un_residual_root_invalid
-
-un_residual_root_next:
-  ClearErrors
-  FindNext $ResidualFindHandle $ResidualFindName
-  IfErrors un_residual_root_complete
-  Goto un_residual_root_entry
-
-un_residual_root_invalid:
-  FindClose $ResidualFindHandle
-  Goto un_residual_validation_done
-
-un_residual_root_complete:
-  FindClose $ResidualFindHandle
-  IfFileExists "$INSTDIR\state\." un_residual_state_start un_residual_valid
-
-un_residual_state_start:
-  FindFirst $ResidualFindHandle $ResidualFindName "$INSTDIR\state\*.*"
-  IfErrors un_residual_validation_done
-un_residual_state_entry:
-  StrCmp $ResidualFindName "." un_residual_state_next
-  StrCmp $ResidualFindName ".." un_residual_state_next
-  StrCmp $ResidualFindName "installer-helper.ps1" un_residual_state_file
-  StrCmp $ResidualFindName "launcher.lock" un_residual_state_file
-  StrCmp $ResidualFindName "uninstall.pending" un_residual_state_file un_residual_state_invalid
-
-un_residual_state_file:
-  ${un.GetFileAttributes} "$INSTDIR\state\$ResidualFindName" "DIRECTORY" $0
-  IfErrors un_residual_state_invalid
-  StrCmp $0 "0" 0 un_residual_state_invalid
-  ${un.GetFileAttributes} "$INSTDIR\state\$ResidualFindName" "REPARSE_POINT" $0
-  IfErrors un_residual_state_invalid
-  StrCmp $0 "0" un_residual_state_next un_residual_state_invalid
-
-un_residual_state_next:
-  ClearErrors
-  FindNext $ResidualFindHandle $ResidualFindName
-  IfErrors un_residual_state_complete
-  Goto un_residual_state_entry
-
-un_residual_state_invalid:
-  FindClose $ResidualFindHandle
-  Goto un_residual_validation_done
-
-un_residual_state_complete:
-  FindClose $ResidualFindHandle
-un_residual_valid:
-  StrCpy $ResidualValid "1"
-un_residual_validation_done:
-FunctionEnd
-
 Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   SectionIn RO
   InitPluginsDir
@@ -516,25 +422,9 @@ SectionEnd
 
 Section "Uninstall"
   SetAutoClose true
-  Call un.ValidateResidualLayout
-  StrCmp $ResidualValid "1" un_residual_exact
-  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "The managed ${INFO_DISTRIBUTIONNAME} uninstall helper is missing; the install was preserved."
-  Call un.FailUninstall
-
-un_residual_exact:
-  ; uninstall.pending is removed only after a helper completed PATH/ARP work.
-  ; If it remains, rerun that helper instead of mistaking layout-only progress
-  ; for a completed uninstall integration lifecycle.
-  IfFileExists "$INSTDIR\state\uninstall.pending" un_residual_pending un_residual_ready
-
-un_residual_pending:
-  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "${INFO_DISTRIBUTIONNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
-  Call un.FailUninstall
-
-un_helper_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition"'
+  ; The uninstaller carries its own helper so every retry uses one validation and
+  ; lifecycle-lock owner even after an interrupted cleanup removed installed state.
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" un_helper_complete
@@ -548,48 +438,10 @@ un_helper_complete:
   ${If} $SettingsDisposition == "Remove"
     DetailPrint "$(AppDetailRemoveSettings)"
   ${EndIf}
-  Call un.ValidateResidualLayout
-  StrCmp $ResidualValid "1" un_cleanup_start
-  Push "${INFO_DISTRIBUTIONNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
-  Call un.FailUninstall
-
-un_residual_ready:
-  DetailPrint "Resuming exact ${INFO_DISTRIBUTIONNAME} residual cleanup."
-
-un_cleanup_start:
-  ClearErrors
-  ; Reaching this block proves the helper completed PATH/ARP cleanup. Remove
-  ; the retry marker first so every later exact residual resumes here instead
-  ; of re-entering a helper whose coordination file may already be gone.
-  Delete "$INSTDIR\state\uninstall.pending"
-  IfErrors uninstall_cleanup_failed
-  !insertmacro AppUninstallFault "after-uninstall-pending" after_uninstall_pending
-  Delete "$INSTDIR\state\launcher.lock"
-  IfErrors uninstall_cleanup_failed
-  !insertmacro AppUninstallFault "after-launcher-lock" after_launcher_lock
-  Delete "$INSTDIR\state\installer-helper.ps1"
-  IfErrors uninstall_cleanup_failed
-  !insertmacro AppUninstallFault "after-installer-helper" after_installer_helper
-  RMDir "$INSTDIR\state"
-  IfErrors uninstall_cleanup_failed
-  !insertmacro AppUninstallFault "after-state-directory" after_state_directory
-  !insertmacro AppUninstallFault "before-uninstaller" before_uninstaller
-  Delete "$INSTDIR\uninstall.exe"
-  IfErrors uninstall_cleanup_failed
-  ; After self-removal only the install root can remain. Preserve any racing
-  ; unowned content, but do not report an unretryable failure without an owner.
-  ClearErrors
-  RMDir "$INSTDIR"
-  IfErrors 0 uninstall_complete
-  DetailPrint "${INFO_DISTRIBUTIONNAME} was removed; a non-empty install directory was preserved."
-  ClearErrors
-  Goto uninstall_complete
+  IfFileExists "$INSTDIR\." uninstall_cleanup_failed uninstall_complete
 uninstall_cleanup_failed:
-  Push "${INFO_DISTRIBUTIONNAME} uninstall could not remove its validated residual files. Retry uninstall."
+  Push "${INFO_DISTRIBUTIONNAME} uninstall helper returned before removing its validated install root. Retry uninstall."
   Call un.FailUninstall
 uninstall_complete:
-  !ifdef TEST_UNINSTALL_FAULT
-    Delete "$TEMP\${APP_TEST_MARKER_PREFIX}-uninstall-fault-${TEST_UNINSTALL_FAULT}.once"
-  !endif
   SetErrorLevel 0
 SectionEnd

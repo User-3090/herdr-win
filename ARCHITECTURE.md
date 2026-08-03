@@ -74,12 +74,21 @@ behavior; code and tests remain the detailed implementation truth.
   every other exact runtime whose lease can be acquired exclusively. Busy,
   malformed, reparse-point, or otherwise ambiguous content is preserved and causes
   the maintenance attempt to report failure rather than broadening deletion.
-- NSIS owns the setup/uninstall executable shell, embedded inputs, user-visible
-  progress/error boundary, and final self-cleanup. The packaged PowerShell helper
-  owns filesystem lifecycle, validation, launcher publication, runtime pruning,
-  PATH/Installed Apps integration, optional user-settings removal, and recoverable
-  install/uninstall state. Rust owns runtime selection and
+- NSIS owns the setup/uninstall executable shell, embedded inputs, and user-visible
+  progress/error boundary. Uninstall runs the embedded temporary PowerShell helper
+  and never mutates the installed root directly; that helper owns final root cleanup
+  while holding the persistent lifecycle lock, plus filesystem validation, launcher
+  publication, runtime pruning, PATH/Installed Apps integration, optional
+  user-settings removal, and recoverable install/uninstall state. Rust owns runtime
+  selection and
   downloading/verifying/launching the immutable installer asset.
+- The persistent sibling lifecycle lock distinguishes a live operation from a dead
+  transaction. Once that exclusive lock is acquired, setup and uninstall validate
+  every matching transaction marker, root manifest, remaining managed tree, lease,
+  and process path before resuming deletion. A complete current root keeps the
+  normal update path; an exact partial root is removed and setup publishes a fresh
+  root. Unknown content, reparse points, active leases, and active process images
+  remain fail-closed and preserved.
 - The packager owns installer-facing product identity inputs. It passes one runtime
   product name into NSIS and the helper, plus one title-cased human distribution
   display name, a derived short UI version, and the fork and official-upstream URLs

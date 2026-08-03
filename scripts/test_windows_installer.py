@@ -200,6 +200,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
 
     def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
+        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
         self.assertIn('New-HerdrTransaction -Kind "fresh"', helper)
         self.assertIn('New-HerdrTransaction -Kind "update"', helper)
         self.assertIn('New-HerdrTransaction -Kind "uninstall"', helper)
@@ -207,6 +208,26 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertNotIn('Join-Path $RuntimeRoot (".staging.', helper)
         self.assertIn("uninstall.pending", helper)
         self.assertIn("Assert-HerdrUninstallRetryRoot", helper)
+        self.assertIn("Complete-HerdrDeadUninstallTransactions", helper)
+        self.assertIn("Remove-HerdrUninstallResidual", helper)
+        self.assertNotIn(
+            "A previous Herdr uninstall transaction is incomplete", helper
+        )
+        recovery = helper[
+            helper.index("function Complete-HerdrDeadUninstallTransactions {") : helper.index(
+                "function Test-HerdrLegacyLauncherHop {"
+            )
+        ]
+        gate = recovery.index('Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock")')
+        process_check = recovery.index("$processes = @(Get-HerdrProcessSnapshot)", gate)
+        bin_move = recovery.index('[IO.Directory]::Move($source', process_check)
+        gate_release = recovery.index("$coordination.Dispose()", bin_move)
+        self.assertLess(gate, process_check)
+        self.assertLess(process_check, bin_move)
+        self.assertLess(bin_move, gate_release)
+        self.assertIn("Dead uninstall transaction survived setup recovery", lifecycle)
+        self.assertIn("Exact uninstall residual did not recover", lifecycle)
+        self.assertIn("Uninstall retained its dead transaction", lifecycle)
 
     def test_persistent_sibling_lock_serializes_outer_lifecycle(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -294,6 +315,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('!include "nsDialogs.nsh"', nsi)
         self.assertIn('!include "WinMessages.nsh"', nsi)
         self.assertIn("SendMessageTimeoutW", nsi)
+        self.assertIn("APP_ENVIRONMENT_BROADCAST_TIMEOUT_MS 100", nsi)
+        self.assertEqual(
+            nsi.count("i ${APP_ENVIRONMENT_BROADCAST_TIMEOUT_MS}"), 2
+        )
+        self.assertNotIn("SendNotifyMessage", nsi)
         self.assertIn('-ProductName "${INFO_DISTRIBUTIONNAME}"', nsi)
         self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
         self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
@@ -494,17 +520,21 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertEqual(len(message_boxes), 2)
         for position in message_boxes:
             self.assertIn("IfSilent", nsi[max(0, position - 120) : position])
-        cleanup = nsi[nsi.index("un_cleanup_start:") :]
-        ordered_cleanup = (
+        self.assertEqual(
+            nsi.count('File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"'), 2
+        )
+        self.assertIn(
+            '-File "$PLUGINSDIR\\installer-helper.ps1" -Action Uninstall', nsi
+        )
+        for forbidden_cleanup in (
             'Delete "$INSTDIR\\state\\uninstall.pending"',
             'Delete "$INSTDIR\\state\\launcher.lock"',
             'Delete "$INSTDIR\\state\\installer-helper.ps1"',
-            'RMDir "$INSTDIR\\state"',
             'Delete "$INSTDIR\\uninstall.exe"',
             'RMDir "$INSTDIR"',
-        )
-        positions = [cleanup.index(instruction) for instruction in ordered_cleanup]
-        self.assertEqual(positions, sorted(positions))
+        ):
+            self.assertNotIn(forbidden_cleanup, nsi)
+        self.assertIn("Remove-HerdrUninstallResidual", helper)
 
     def test_helper_owns_fail_closed_optional_settings_removal(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -523,11 +553,12 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertNotIn("Remove-Item -LiteralPath $settingsRoot -Recurse", cleanup)
         self.assertIn("DisplayName = $script:ProductName", helper)
 
-    def test_nsis_residual_cleanup_is_exact_idempotent_and_fault_injected(self) -> None:
+    def test_helper_residual_cleanup_is_exact_locked_and_fault_injected(self) -> None:
         nsi = NSI.read_text(encoding="utf-8")
-        validator = nsi[
-            nsi.index("Function un.ValidateResidualLayout") : nsi.index(
-                'Section "${INFO_DISTRIBUTIONNAME}" SEC_APP'
+        helper = HELPER.read_text(encoding="utf-8")
+        cleanup = helper[
+            helper.index("function Assert-HerdrUninstallCleanupRoot {") : helper.index(
+                "function Assert-HerdrInterruptedUninstallRoot {"
             )
         ]
         for exact_name in (
@@ -537,10 +568,12 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             '"launcher.lock"',
             '"uninstall.pending"',
         ):
-            self.assertIn(exact_name, validator)
-        self.assertIn("FindFirst", validator)
-        self.assertIn('"REPARSE_POINT"', validator)
-        self.assertIn("un_residual_ready", nsi)
+            self.assertIn(exact_name, cleanup)
+        self.assertIn("Assert-HerdrUninstallCleanupRoot", cleanup)
+        self.assertIn("Remove-HerdrUninstallResidual", cleanup)
+        self.assertIn("Invoke-HerdrUninstallFault", cleanup)
+        self.assertNotIn("Function un.ValidateResidualLayout", nsi)
+        self.assertNotIn("AppUninstallFault", nsi)
         self.assertNotIn("RMDir /r", nsi)
         for stage in (
             "after-launcher-lock",
@@ -549,9 +582,15 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "after-state-directory",
             "before-uninstaller",
         ):
-            self.assertEqual(
-                nsi.count(f'!insertmacro AppUninstallFault "{stage}" '), 1
+            self.assertIn(f'"{stage}"', helper)
+        lifecycle = helper[
+            helper.index("function Invoke-HerdrUninstall {") : helper.index(
+                "if ($MyInvocation.InvocationName -ne '.')"
             )
+        ]
+        self.assertIn("Invoke-HerdrLifecycleOperation", lifecycle)
+        self.assertIn("Invoke-HerdrUninstallLayout", lifecycle)
+        self.assertIn("Remove-HerdrUninstallFaultMarker", lifecycle)
         fault_test = FAULT_TEST.read_text(encoding="utf-8")
         self.assertIn("Wait-TestCondition", fault_test)
         self.assertIn("WaitForExit", fault_test)

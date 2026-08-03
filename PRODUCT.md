@@ -58,6 +58,11 @@ tests remain the detailed implementation truth.
   and rejected with instructions to uninstall the existing **Herdr** or **Herdr Win**
   entry from Windows Installed Apps before running setup again; setup never
   migrates, backs up, or removes an incompatible layout.
+- Within the current managed layout, setup and uninstall automatically recover a
+  dead validated install/uninstall transaction after the prior lifecycle lock is
+  released and no managed process or lease remains. Exact installer-owned remnants
+  are removed and setup continues with a fresh install when necessary; unknown or
+  ambiguous content is preserved rather than deleted.
 - Snapshot updates use only the fork-owned immutable setup asset and verified
   digest through the fork-owned update feed. Existing managed sessions continue on
   their current runtime; a newer runtime may remain staged until old sessions exit,

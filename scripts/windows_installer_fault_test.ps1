@@ -83,7 +83,7 @@ function Restore-TestUserPath {
         [IntPtr]::Zero,
         "Environment",
         0x0002,
-        5000,
+        100,
         [ref]$result
     )
     if ($sent -eq [IntPtr]::Zero) {
