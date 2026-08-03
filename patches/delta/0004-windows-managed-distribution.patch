@@ -1,4 +1,4 @@
-From a14dec68509373d25766da5f24b79ddca7bacdc1 Mon Sep 17 00:00:00 2001
+From fa61e5040a9bfde710af1c22ac820dc6a6672a14 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -32,7 +32,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_windows_installer.py             |  639 +++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 +++
  .../windows_install_conpty_package_test.ps1   |   26 +
- scripts/windows_installer_fault_test.ps1      |  418 +++
+ scripts/windows_installer_fault_test.ps1      |  430 +++
  scripts/windows_installer_test.ps1            |  622 +++++
  scripts/windows_smoke_conpty_path.ps1         |   36 +-
  skills/herdr/SKILL.md                         |  195 ++
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 +-
- 57 files changed, 9929 insertions(+), 235 deletions(-)
+ 57 files changed, 9941 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -57219,10 +57219,10 @@ index 0000000000000000000000000000000000000000..331dec1946e78838302c93b9325a825c
 +}
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..fcc006e1c2f9cea9042d6f8f9f68b5cc807b7eb0
+index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bdf56e5780
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,430 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57317,6 +57317,18 @@ index 0000000000000000000000000000000000000000..fcc006e1c2f9cea9042d6f8f9f68b5cc
 +}
 +
 +$ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
++function Remove-TestOwnedUserProfile {
++    if (-not $ownsAgentUserProfile -or [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)) {
++        return
++    }
++    if (Test-Path -LiteralPath $AgentUserProfileRoot) {
++        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction Stop
++    }
++    if (Test-Path -LiteralPath $AgentUserProfileRoot) {
++        throw "Installer fault test left its temporary user profile behind: $AgentUserProfileRoot"
++    }
++}
++
 +try {
 +if ($ownsAgentUserProfile) {
 +    $AgentUserProfileRoot = Join-Path ([IO.Path]::GetTempPath()) ("hs-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -57635,10 +57647,10 @@ index 0000000000000000000000000000000000000000..fcc006e1c2f9cea9042d6f8f9f68b5cc
 +    $env:USERPROFILE = $originalUserProfile
 +    $env:LOCALAPPDATA = $originalLocalAppData
 +    $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
-+    Restore-TestUserPath
-+    if ($ownsAgentUserProfile -and -not [string]::IsNullOrWhiteSpace($AgentUserProfileRoot) -and
-+        (Test-Path -LiteralPath $AgentUserProfileRoot)) {
-+        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
++    try {
++        Restore-TestUserPath
++    } finally {
++        Remove-TestOwnedUserProfile
 +    }
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1

@@ -92,6 +92,18 @@ function Restore-TestUserPath {
 }
 
 $ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
+function Remove-TestOwnedUserProfile {
+    if (-not $ownsAgentUserProfile -or [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)) {
+        return
+    }
+    if (Test-Path -LiteralPath $AgentUserProfileRoot) {
+        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $AgentUserProfileRoot) {
+        throw "Installer fault test left its temporary user profile behind: $AgentUserProfileRoot"
+    }
+}
+
 try {
 if ($ownsAgentUserProfile) {
     $AgentUserProfileRoot = Join-Path ([IO.Path]::GetTempPath()) ("hs-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -410,9 +422,9 @@ Write-Host "Windows installer fault matrix passed."
     $env:USERPROFILE = $originalUserProfile
     $env:LOCALAPPDATA = $originalLocalAppData
     $env:CLAUDE_CONFIG_DIR = $originalClaudeConfigDir
-    Restore-TestUserPath
-    if ($ownsAgentUserProfile -and -not [string]::IsNullOrWhiteSpace($AgentUserProfileRoot) -and
-        (Test-Path -LiteralPath $AgentUserProfileRoot)) {
-        Remove-Item -LiteralPath $AgentUserProfileRoot -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+        Restore-TestUserPath
+    } finally {
+        Remove-TestOwnedUserProfile
     }
 }
