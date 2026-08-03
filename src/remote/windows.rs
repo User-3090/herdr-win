@@ -51,9 +51,10 @@ fn ensure_remote_server_running() -> io::Result<()> {
     crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(15))
 }
 
-pub(super) fn remote_bridge_command(session_name: &str) -> String {
-    let mut script = String::from(
-        "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
+pub(super) fn remote_bridge_command(session_name: &str, (cols, rows): (u16, u16)) -> String {
+    let mut script = format!(
+        "$env:{} = '{cols}x{rows}'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
+        crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR
     );
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         script.push_str(" --session ");
@@ -102,7 +103,7 @@ mod tests {
     fn windows_remote_bridge_resolves_path_application_for_default_session() {
         assert_eq!(
             decoded_remote_bridge_script(crate::session::DEFAULT_SESSION_NAME),
-            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
+            "$env:HERDR_STARTUP_TERMINAL_SIZE = '120x40'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
         );
     }
 
@@ -110,12 +111,12 @@ mod tests {
     fn windows_remote_bridge_resolves_path_application_for_named_session() {
         assert_eq!(
             decoded_remote_bridge_script("agent's work"),
-            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
+            "$env:HERDR_STARTUP_TERMINAL_SIZE = '120x40'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
         );
     }
 
     fn decoded_remote_bridge_script(session_name: &str) -> String {
-        let command = remote_bridge_command(session_name);
+        let command = remote_bridge_command(session_name, (120, 40));
         let encoded = command.split_whitespace().last().unwrap();
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)

@@ -29,11 +29,20 @@
 !ifndef INFO_PRODUCTNAME
   !error "INFO_PRODUCTNAME is required"
 !endif
+!ifndef INFO_DISTRIBUTIONNAME
+  !error "INFO_DISTRIBUTIONNAME is required"
+!endif
 !ifndef INFO_COMPANYNAME
   !error "INFO_COMPANYNAME is required"
 !endif
 !ifndef INFO_COPYRIGHT
   !error "INFO_COPYRIGHT is required"
+!endif
+!ifndef INFO_PRODUCTURL
+  !error "INFO_PRODUCTURL is required"
+!endif
+!ifndef INFO_UPSTREAMURL
+  !error "INFO_UPSTREAMURL is required"
 !endif
 !ifndef INFO_COMMANDNAME
   !error "INFO_COMMANDNAME is required"
@@ -79,6 +88,7 @@ VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFIL
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
+!include "WinMessages.nsh"
 !include "x64.nsh"
 
 Var PowerShellPath
@@ -90,6 +100,7 @@ Var ResidualFindHandle
 Var ResidualFindName
 Var SettingsDisposition
 Var SettingsCheckbox
+Var UpstreamLink
 
 !define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
 !define INSTALLER_WELCOME_BITMAP_125 "${ARG_ARTWORK_DIR}\installer-welcome-finish-205x393.bmp"
@@ -106,17 +117,18 @@ Var SettingsCheckbox
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_150}"
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
-!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_PRODUCTNAME}"
-!define MUI_WELCOMEPAGE_TEXT "Setup installs ${INFO_PRODUCTNAME} for your Windows user account in:$\r$\n$\r$\n$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}$\r$\n$\r$\nNo administrator privileges are required. Setup adds ${INFO_COMMANDNAME} to your user PATH; open a new terminal after setup before running it."
-!define MUI_LICENSEPAGE_TEXT_TOP "Review the Apache License 2.0 terms before installing ${INFO_PRODUCTNAME}."
-!define MUI_LICENSEPAGE_TEXT_BOTTOM "Select I Agree to continue."
+!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME}"
+!define MUI_WELCOMEPAGE_TEXT "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}. It advances Windows support by applying this fork's patches to the latest reviewed stable ${INFO_PRODUCTNAME} release.$\r$\n$\r$\nNo administrator access is required. Open a new terminal after setup so it can find ${INFO_COMMANDNAME} on PATH."
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
-!define MUI_FINISHPAGE_TITLE "${INFO_PRODUCTNAME} is installed"
-!define MUI_FINISHPAGE_TEXT "${INFO_PRODUCTNAME} was installed successfully.$\r$\n$\r$\n${INFO_PRODUCTNAME} runs in a terminal, so no application window will open.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n$\r$\n${INFO_COMMANDNAME}"
+!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} is installed"
+!define MUI_FINISHPAGE_TEXT "Setup completed successfully.$\r$\n$\r$\n${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME} and no application window opens.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n${INFO_COMMANDNAME}"
+!define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"
+!define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${ARG_STAGE_DIR}\LICENSE.txt"
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW PositionInstallerFinishLink
 !insertmacro MUI_PAGE_FINISH
 
 UninstPage custom un.SettingsPage un.SettingsPageLeave
@@ -126,8 +138,8 @@ UninstPage custom un.SettingsPage un.SettingsPageLeave
 
 LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
 LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-LangString AppSettingsPageText ${LANG_ENGLISH} "Settings and session data are kept by default. Select this only if you also want to delete them."
-LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
+LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
+LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
 LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 
 !macro AppUninstallFault Point Label
@@ -216,6 +228,50 @@ Function SelectInstallerWelcomeBitmap
   ${EndIf}
 FunctionEnd
 
+Function PositionInstallerFinishLink
+  System::Store "S"
+  ${NSD_GetText} $mui.FinishPage.Text $0
+  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Text, @r1)'
+  System::Call '*$1(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $4 $4 - $2
+  System::Call '*$1(i 0, i 0, i r4, i 0)'
+  System::Call 'USER32::GetDC(p $mui.FinishPage.Text) p.r6'
+  SendMessage $mui.FinishPage.Text ${WM_GETFONT} 0 0 $7
+  System::Call 'GDI32::SelectObject(p r6, p r7) p.s'
+  System::Call 'USER32::DrawTextW(p r6, w r0, i -1, p r1, i 0x00000C10)'
+  System::Call '*$1(i, i, i, i.r8)'
+  System::Call 'GDI32::SelectObject(p r6, p s)'
+  System::Call 'USER32::ReleaseDC(p $mui.FinishPage.Text, p r6)'
+
+  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Text, @r1)'
+  System::Call 'USER32::MapWindowPoints(p 0, p $mui.FinishPage, p r1, i 2)'
+  System::Call '*$1(i.r2, i.r3, i.r4, i.r5)'
+  IntOp $7 $4 - $2
+  System::Call 'USER32::SetWindowPos(p $mui.FinishPage.Text, p 0, i r2, i r3, i r7, i r8, i 0x14)'
+
+  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Link, @r1)'
+  System::Call 'USER32::MapWindowPoints(p 0, p $mui.FinishPage, p r1, i 2)'
+  System::Call '*$1(i.r2, i.r4, i.r5, i.r6)'
+  IntOp $7 $5 - $2
+  IntOp $9 $6 - $4
+  IntOp $8 $8 + $3
+  IntOp $8 $8 + $9
+  System::Call 'USER32::SetWindowPos(p $mui.FinishPage.Link, p 0, i r2, i r8, i r7, i r9, i 0x14)'
+
+  ${NSD_CreateLink} 120u 185u 195u 10u "Open official ${INFO_PRODUCTNAME} project"
+  Pop $UpstreamLink
+  SetCtlColors $UpstreamLink "000080" "FFFFFF"
+  ${NSD_OnClick} $UpstreamLink OpenInstallerUpstream
+  IntOp $8 $8 + $9
+  IntOp $8 $8 + 2
+  System::Call 'USER32::SetWindowPos(p $UpstreamLink, p 0, i r2, i r8, i r7, i r9, i 0x14)'
+  System::Store "L"
+FunctionEnd
+
+Function OpenInstallerUpstream
+  ExecShell open "${INFO_UPSTREAMURL}"
+FunctionEnd
+
 Function .onInit
   SetShellVarContext current
   ${IfNot} ${RunningX64}
@@ -255,9 +311,9 @@ Function un.SettingsPage
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 52u "$(AppSettingsPageText)"
+  ${NSD_CreateLabel} 0 0 100% 72u "$(AppSettingsPageText)"
   Pop $0
-  ${NSD_CreateCheckbox} 0 62u 100% 18u "$(AppSettingsCheckbox)"
+  ${NSD_CreateCheckbox} 0 82u 100% 14u "$(AppSettingsCheckbox)"
   Pop $SettingsCheckbox
   ${If} $SettingsDisposition == "Remove"
     ${NSD_Check} $SettingsCheckbox

@@ -31,6 +31,9 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// Private daemon-start hint used to seed a fresh headless server from the
 /// directory where the user ran `herdr`.
 pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
+/// Private daemon-start hint used to size a fresh first pane before its shell
+/// renders a width-sensitive prompt.
+pub(crate) const STARTUP_TERMINAL_SIZE_ENV_VAR: &str = "HERDR_STARTUP_TERMINAL_SIZE";
 
 // ---------------------------------------------------------------------------
 // Server detection
@@ -117,16 +120,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
         Err(err) => return Err(err),
     };
 
-    let hello = crate::protocol::ClientMessage::Hello {
-        version: crate::protocol::PROTOCOL_VERSION,
-        cols: 80,
-        rows: 24,
-        cell_width_px: 0,
-        cell_height_px: 0,
-        requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
-        keybindings: crate::protocol::ClientKeybindings::Server,
-        launch_mode: crate::protocol::ClientLaunchMode::App,
-    };
+    let hello = client_protocol_readiness_hello();
 
     match crate::protocol::write_message(&mut stream, &hello) {
         Ok(()) => Ok(true),
@@ -144,6 +138,40 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
             Ok(false)
         }
         Err(err) => Err(io::Error::other(err.to_string())),
+    }
+}
+
+#[cfg(windows)]
+fn client_protocol_readiness_hello() -> crate::protocol::ClientMessage {
+    crate::protocol::ClientMessage::Hello {
+        version: crate::protocol::PROTOCOL_VERSION,
+        cols: 80,
+        rows: 24,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
+        keybindings: crate::protocol::ClientKeybindings::Server,
+        // Readiness must validate the handshake without becoming the foreground
+        // app client or resizing a freshly seeded remote shell to this probe size.
+        launch_mode: crate::protocol::ClientLaunchMode::TerminalAttach,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_probe_cannot_become_foreground_app_client() {
+        let crate::protocol::ClientMessage::Hello { launch_mode, .. } =
+            client_protocol_readiness_hello()
+        else {
+            panic!("expected readiness hello");
+        };
+        assert_eq!(
+            launch_mode,
+            crate::protocol::ClientLaunchMode::TerminalAttach
+        );
     }
 }
 

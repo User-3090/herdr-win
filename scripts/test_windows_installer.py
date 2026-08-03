@@ -228,8 +228,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "APP_START_GATE_ENV",
             "APP_TEST_MARKER_PREFIX",
             "INFO_PRODUCTNAME",
+            "INFO_DISTRIBUTIONNAME",
             "INFO_COMPANYNAME",
             "INFO_COPYRIGHT",
+            "INFO_PRODUCTURL",
+            "INFO_UPSTREAMURL",
             "INFO_COMMANDNAME",
             "INFO_ORIGINALFILENAME",
             "INFO_PRODUCTVERSION_DISPLAY",
@@ -242,6 +245,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertNotIn("BrandingText", nsi)
         self.assertIn('!include "MUI2.nsh"', nsi)
         self.assertIn('!include "nsDialogs.nsh"', nsi)
+        self.assertIn('!include "WinMessages.nsh"', nsi)
         self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
         self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
         self.assertNotIn("LANG_GERMAN", nsi)
@@ -268,14 +272,47 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertNotIn("Function WelcomePage", nsi)
         self.assertNotIn("MUI_PAGE_DIRECTORY", nsi)
         self.assertNotIn("MUI_PAGE_COMPONENTS", nsi)
-        self.assertIn("Review the Apache License 2.0 terms", nsi)
+        self.assertNotIn("MUI_LICENSEPAGE_TEXT_TOP", nsi)
+        self.assertNotIn("MUI_LICENSEPAGE_TEXT_BOTTOM", nsi)
         self.assertNotIn("MUI_FINISHPAGE_RUN", nsi)
         self.assertNotIn("MUI_FINISHPAGE_SHOWREADME", nsi)
-        self.assertNotIn("MUI_FINISHPAGE_LINK", nsi)
         self.assertIn(
-            "Setup installs ${INFO_PRODUCTNAME} for your Windows user account", nsi
+            '!define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"',
+            nsi,
         )
-        self.assertIn("${INFO_PRODUCTNAME} was installed successfully", nsi)
+        self.assertIn(
+            '!define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"', nsi
+        )
+        self.assertIn(
+            "!define MUI_PAGE_CUSTOMFUNCTION_SHOW PositionInstallerFinishLink",
+            nsi,
+        )
+        self.assertIn("Function PositionInstallerFinishLink", nsi)
+        self.assertIn("USER32::DrawTextW", nsi)
+        self.assertIn("USER32::SetWindowPos(p $mui.FinishPage.Text", nsi)
+        self.assertIn("USER32::SetWindowPos(p $mui.FinishPage.Link", nsi)
+        self.assertIn(
+            "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}",
+            nsi,
+        )
+        welcome_text = next(
+            line for line in nsi.splitlines() if line.startswith("!define MUI_WELCOMEPAGE_TEXT")
+        )
+        self.assertNotIn("$LOCALAPPDATA", welcome_text)
+        self.assertNotIn("Programs\\${INFO_PRODUCTNAME}", welcome_text)
+        self.assertIn("latest reviewed stable ${INFO_PRODUCTNAME} release", welcome_text)
+        self.assertIn("Setup completed successfully", nsi)
+        self.assertIn(
+            "${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME}",
+            nsi,
+        )
+        self.assertIn(
+            '${NSD_CreateLink} 120u 185u 195u 10u "Open official ${INFO_PRODUCTNAME} project"',
+            nsi,
+        )
+        self.assertIn("${NSD_OnClick} $UpstreamLink OpenInstallerUpstream", nsi)
+        self.assertIn("Function OpenInstallerUpstream", nsi)
+        self.assertIn('ExecShell open "${INFO_UPSTREAMURL}"', nsi)
         self.assertNotIn(
             "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed", nsi
         )
@@ -284,6 +321,13 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
         self.assertNotIn("UninstPage uninstConfirm", nsi)
+        self.assertIn(
+            "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies",
+            nsi,
+        )
+        self.assertIn(
+            "Also delete ${INFO_PRODUCTNAME} settings and session data", nsi
+        )
         self.assertIn("SetCompressor lzma", nsi)
         self.assertIn("SetDatablockOptimize on", nsi)
         self.assertIn("SetCompressorDictSize 8", nsi)
@@ -476,8 +520,18 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
         self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
+        self.assertIn('$DistributionName = "herdr-win"', packager)
+        self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)
         self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
         self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
+        self.assertIn(
+            '$ProductUrl = "https://github.com/User-3090/herdr-win"', packager
+        )
+        self.assertIn('"/DINFO_PRODUCTURL=$ProductUrl"', packager)
+        self.assertIn(
+            '$UpstreamUrl = "https://github.com/ogulcancelik/herdr"', packager
+        )
+        self.assertIn('"/DINFO_UPSTREAMURL=$UpstreamUrl"', packager)
         self.assertIn('"/DINFO_COMMANDNAME=$CommandName"', packager)
         self.assertIn(
             '"/DINFO_ORIGINALFILENAME=$InstallerOriginalFilename"', packager

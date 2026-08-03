@@ -1,4 +1,4 @@
-From e9d20d66b0a0f680ad8dc55e335aeffdfe2af048 Mon Sep 17 00:00:00 2001
+From ad6c0cfcecef3d22465142a587d137f08743d65d Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -19,17 +19,17 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  482 ++++
+ packaging/windows/installer/project.nsi       |  538 +++++
  ...crosoft.Windows.Console.ConPTY-LICENSE.txt |  Bin 0 -> 1116 bytes
  ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
  scripts/package_windows_conpty.py             |  263 +++
- scripts/package_windows_installer.ps1         |  455 ++++
+ scripts/package_windows_installer.ps1         |  461 ++++
  scripts/preview.py                            |   80 +-
  scripts/test_package_windows_conpty.py        |  170 ++
  scripts/test_preview.py                       |  195 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
- scripts/test_windows_installer.py             |  557 +++++
+ scripts/test_windows_installer.py             |  611 +++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 ++++
  .../windows_install_conpty_package_test.ps1   |   26 +
  scripts/windows_installer_fault_test.ps1      |  347 +++
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 ++-
- 57 files changed, 9530 insertions(+), 232 deletions(-)
+ 57 files changed, 9646 insertions(+), 232 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -53709,10 +53709,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb108620de63870
+index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6fa0baa36
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,538 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -53744,11 +53744,20 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +!ifndef INFO_PRODUCTNAME
 +  !error "INFO_PRODUCTNAME is required"
 +!endif
++!ifndef INFO_DISTRIBUTIONNAME
++  !error "INFO_DISTRIBUTIONNAME is required"
++!endif
 +!ifndef INFO_COMPANYNAME
 +  !error "INFO_COMPANYNAME is required"
 +!endif
 +!ifndef INFO_COPYRIGHT
 +  !error "INFO_COPYRIGHT is required"
++!endif
++!ifndef INFO_PRODUCTURL
++  !error "INFO_PRODUCTURL is required"
++!endif
++!ifndef INFO_UPSTREAMURL
++  !error "INFO_UPSTREAMURL is required"
 +!endif
 +!ifndef INFO_COMMANDNAME
 +  !error "INFO_COMMANDNAME is required"
@@ -53794,6 +53803,7 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +!include "FileFunc.nsh"
 +!include "LogicLib.nsh"
 +!include "nsDialogs.nsh"
++!include "WinMessages.nsh"
 +!include "x64.nsh"
 +
 +Var PowerShellPath
@@ -53805,6 +53815,7 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +Var ResidualFindName
 +Var SettingsDisposition
 +Var SettingsCheckbox
++Var UpstreamLink
 +
 +!define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
 +!define INSTALLER_WELCOME_BITMAP_125 "${ARG_ARTWORK_DIR}\installer-welcome-finish-205x393.bmp"
@@ -53821,17 +53832,18 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_150}"
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
-+!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_PRODUCTNAME}"
-+!define MUI_WELCOMEPAGE_TEXT "Setup installs ${INFO_PRODUCTNAME} for your Windows user account in:$\r$\n$\r$\n$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}$\r$\n$\r$\nNo administrator privileges are required. Setup adds ${INFO_COMMANDNAME} to your user PATH; open a new terminal after setup before running it."
-+!define MUI_LICENSEPAGE_TEXT_TOP "Review the Apache License 2.0 terms before installing ${INFO_PRODUCTNAME}."
-+!define MUI_LICENSEPAGE_TEXT_BOTTOM "Select I Agree to continue."
++!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME}"
++!define MUI_WELCOMEPAGE_TEXT "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}. It advances Windows support by applying this fork's patches to the latest reviewed stable ${INFO_PRODUCTNAME} release.$\r$\n$\r$\nNo administrator access is required. Open a new terminal after setup so it can find ${INFO_COMMANDNAME} on PATH."
 +!define MUI_FINISHPAGE_NOREBOOTSUPPORT
-+!define MUI_FINISHPAGE_TITLE "${INFO_PRODUCTNAME} is installed"
-+!define MUI_FINISHPAGE_TEXT "${INFO_PRODUCTNAME} was installed successfully.$\r$\n$\r$\n${INFO_PRODUCTNAME} runs in a terminal, so no application window will open.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n$\r$\n${INFO_COMMANDNAME}"
++!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} is installed"
++!define MUI_FINISHPAGE_TEXT "Setup completed successfully.$\r$\n$\r$\n${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME} and no application window opens.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n${INFO_COMMANDNAME}"
++!define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"
++!define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"
 +
 +!insertmacro MUI_PAGE_WELCOME
 +!insertmacro MUI_PAGE_LICENSE "${ARG_STAGE_DIR}\LICENSE.txt"
 +!insertmacro MUI_PAGE_INSTFILES
++!define MUI_PAGE_CUSTOMFUNCTION_SHOW PositionInstallerFinishLink
 +!insertmacro MUI_PAGE_FINISH
 +
 +UninstPage custom un.SettingsPage un.SettingsPageLeave
@@ -53841,8 +53853,8 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +
 +LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
 +LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-+LangString AppSettingsPageText ${LANG_ENGLISH} "Settings and session data are kept by default. Select this only if you also want to delete them."
-+LangString AppSettingsCheckbox ${LANG_ENGLISH} "Remove ${INFO_PRODUCTNAME} settings and session data"
++LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
++LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
 +LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 +
 +!macro AppUninstallFault Point Label
@@ -53931,6 +53943,50 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +  ${EndIf}
 +FunctionEnd
 +
++Function PositionInstallerFinishLink
++  System::Store "S"
++  ${NSD_GetText} $mui.FinishPage.Text $0
++  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Text, @r1)'
++  System::Call '*$1(i.r2, i.r3, i.r4, i.r5)'
++  IntOp $4 $4 - $2
++  System::Call '*$1(i 0, i 0, i r4, i 0)'
++  System::Call 'USER32::GetDC(p $mui.FinishPage.Text) p.r6'
++  SendMessage $mui.FinishPage.Text ${WM_GETFONT} 0 0 $7
++  System::Call 'GDI32::SelectObject(p r6, p r7) p.s'
++  System::Call 'USER32::DrawTextW(p r6, w r0, i -1, p r1, i 0x00000C10)'
++  System::Call '*$1(i, i, i, i.r8)'
++  System::Call 'GDI32::SelectObject(p r6, p s)'
++  System::Call 'USER32::ReleaseDC(p $mui.FinishPage.Text, p r6)'
++
++  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Text, @r1)'
++  System::Call 'USER32::MapWindowPoints(p 0, p $mui.FinishPage, p r1, i 2)'
++  System::Call '*$1(i.r2, i.r3, i.r4, i.r5)'
++  IntOp $7 $4 - $2
++  System::Call 'USER32::SetWindowPos(p $mui.FinishPage.Text, p 0, i r2, i r3, i r7, i r8, i 0x14)'
++
++  System::Call 'USER32::GetWindowRect(p $mui.FinishPage.Link, @r1)'
++  System::Call 'USER32::MapWindowPoints(p 0, p $mui.FinishPage, p r1, i 2)'
++  System::Call '*$1(i.r2, i.r4, i.r5, i.r6)'
++  IntOp $7 $5 - $2
++  IntOp $9 $6 - $4
++  IntOp $8 $8 + $3
++  IntOp $8 $8 + $9
++  System::Call 'USER32::SetWindowPos(p $mui.FinishPage.Link, p 0, i r2, i r8, i r7, i r9, i 0x14)'
++
++  ${NSD_CreateLink} 120u 185u 195u 10u "Open official ${INFO_PRODUCTNAME} project"
++  Pop $UpstreamLink
++  SetCtlColors $UpstreamLink "000080" "FFFFFF"
++  ${NSD_OnClick} $UpstreamLink OpenInstallerUpstream
++  IntOp $8 $8 + $9
++  IntOp $8 $8 + 2
++  System::Call 'USER32::SetWindowPos(p $UpstreamLink, p 0, i r2, i r8, i r7, i r9, i 0x14)'
++  System::Store "L"
++FunctionEnd
++
++Function OpenInstallerUpstream
++  ExecShell open "${INFO_UPSTREAMURL}"
++FunctionEnd
++
 +Function .onInit
 +  SetShellVarContext current
 +  ${IfNot} ${RunningX64}
@@ -53970,9 +54026,9 @@ index 0000000000000000000000000000000000000000..5bda499130baf3b28147dd318eb10862
 +    Abort
 +  ${EndIf}
 +
-+  ${NSD_CreateLabel} 0 0 100% 52u "$(AppSettingsPageText)"
++  ${NSD_CreateLabel} 0 0 100% 72u "$(AppSettingsPageText)"
 +  Pop $0
-+  ${NSD_CreateCheckbox} 0 62u 100% 18u "$(AppSettingsCheckbox)"
++  ${NSD_CreateCheckbox} 0 82u 100% 14u "$(AppSettingsCheckbox)"
 +  Pop $SettingsCheckbox
 +  ${If} $SettingsDisposition == "Remove"
 +    ${NSD_Check} $SettingsCheckbox
@@ -54585,10 +54641,10 @@ index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b
 +    main()
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3d01ee9850ee8d7db4b9ed2fbd42a6b64050a9a
+index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eafb7621435
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,461 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -54635,6 +54691,9 @@ index 0000000000000000000000000000000000000000..d3d01ee9850ee8d7db4b9ed2fbd42a6b
 +$CompanyName = "herdr-win"
 +$Copyright = "Herdr contributors"
 +$CommandName = "herdr"
++$DistributionName = "herdr-win"
++$ProductUrl = "https://github.com/User-3090/herdr-win"
++$UpstreamUrl = "https://github.com/ogulcancelik/herdr"
 +$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
 +$InstallerTestMarkerPrefix = "herdr"
 +$ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
@@ -55019,8 +55078,11 @@ index 0000000000000000000000000000000000000000..d3d01ee9850ee8d7db4b9ed2fbd42a6b
 +        "/DARG_SKILL_MD=$skillSource",
 +        "/DARG_ARTWORK_DIR=$artworkDir",
 +        "/DINFO_PRODUCTNAME=$ProductName",
++        "/DINFO_DISTRIBUTIONNAME=$DistributionName",
 +        "/DINFO_COMPANYNAME=$CompanyName",
 +        "/DINFO_COPYRIGHT=$Copyright",
++        "/DINFO_PRODUCTURL=$ProductUrl",
++        "/DINFO_UPSTREAMURL=$UpstreamUrl",
 +        "/DINFO_COMMANDNAME=$CommandName",
 +        "/DINFO_ORIGINALFILENAME=$InstallerOriginalFilename",
 +        "/DAPP_BUILD_ID=$BuildId",
@@ -55668,10 +55730,10 @@ index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6
  if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373fefc3dc99
+index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c345582ba71
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,611 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -55902,8 +55964,11 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +            "APP_START_GATE_ENV",
 +            "APP_TEST_MARKER_PREFIX",
 +            "INFO_PRODUCTNAME",
++            "INFO_DISTRIBUTIONNAME",
 +            "INFO_COMPANYNAME",
 +            "INFO_COPYRIGHT",
++            "INFO_PRODUCTURL",
++            "INFO_UPSTREAMURL",
 +            "INFO_COMMANDNAME",
 +            "INFO_ORIGINALFILENAME",
 +            "INFO_PRODUCTVERSION_DISPLAY",
@@ -55916,6 +55981,7 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +        self.assertNotIn("BrandingText", nsi)
 +        self.assertIn('!include "MUI2.nsh"', nsi)
 +        self.assertIn('!include "nsDialogs.nsh"', nsi)
++        self.assertIn('!include "WinMessages.nsh"', nsi)
 +        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
 +        self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
 +        self.assertNotIn("LANG_GERMAN", nsi)
@@ -55942,14 +56008,47 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +        self.assertNotIn("Function WelcomePage", nsi)
 +        self.assertNotIn("MUI_PAGE_DIRECTORY", nsi)
 +        self.assertNotIn("MUI_PAGE_COMPONENTS", nsi)
-+        self.assertIn("Review the Apache License 2.0 terms", nsi)
++        self.assertNotIn("MUI_LICENSEPAGE_TEXT_TOP", nsi)
++        self.assertNotIn("MUI_LICENSEPAGE_TEXT_BOTTOM", nsi)
 +        self.assertNotIn("MUI_FINISHPAGE_RUN", nsi)
 +        self.assertNotIn("MUI_FINISHPAGE_SHOWREADME", nsi)
-+        self.assertNotIn("MUI_FINISHPAGE_LINK", nsi)
 +        self.assertIn(
-+            "Setup installs ${INFO_PRODUCTNAME} for your Windows user account", nsi
++            '!define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"',
++            nsi,
 +        )
-+        self.assertIn("${INFO_PRODUCTNAME} was installed successfully", nsi)
++        self.assertIn(
++            '!define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"', nsi
++        )
++        self.assertIn(
++            "!define MUI_PAGE_CUSTOMFUNCTION_SHOW PositionInstallerFinishLink",
++            nsi,
++        )
++        self.assertIn("Function PositionInstallerFinishLink", nsi)
++        self.assertIn("USER32::DrawTextW", nsi)
++        self.assertIn("USER32::SetWindowPos(p $mui.FinishPage.Text", nsi)
++        self.assertIn("USER32::SetWindowPos(p $mui.FinishPage.Link", nsi)
++        self.assertIn(
++            "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}",
++            nsi,
++        )
++        welcome_text = next(
++            line for line in nsi.splitlines() if line.startswith("!define MUI_WELCOMEPAGE_TEXT")
++        )
++        self.assertNotIn("$LOCALAPPDATA", welcome_text)
++        self.assertNotIn("Programs\\${INFO_PRODUCTNAME}", welcome_text)
++        self.assertIn("latest reviewed stable ${INFO_PRODUCTNAME} release", welcome_text)
++        self.assertIn("Setup completed successfully", nsi)
++        self.assertIn(
++            "${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME}",
++            nsi,
++        )
++        self.assertIn(
++            '${NSD_CreateLink} 120u 185u 195u 10u "Open official ${INFO_PRODUCTNAME} project"',
++            nsi,
++        )
++        self.assertIn("${NSD_OnClick} $UpstreamLink OpenInstallerUpstream", nsi)
++        self.assertIn("Function OpenInstallerUpstream", nsi)
++        self.assertIn('ExecShell open "${INFO_UPSTREAMURL}"', nsi)
 +        self.assertNotIn(
 +            "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed", nsi
 +        )
@@ -55958,6 +56057,13 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +        )
 +        self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
 +        self.assertNotIn("UninstPage uninstConfirm", nsi)
++        self.assertIn(
++            "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies",
++            nsi,
++        )
++        self.assertIn(
++            "Also delete ${INFO_PRODUCTNAME} settings and session data", nsi
++        )
 +        self.assertIn("SetCompressor lzma", nsi)
 +        self.assertIn("SetDatablockOptimize on", nsi)
 +        self.assertIn("SetCompressorDictSize 8", nsi)
@@ -56150,8 +56256,18 @@ index 0000000000000000000000000000000000000000..0acb5c7e232c902b107d05dfcf1b373f
 +        )
 +        self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
 +        self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
++        self.assertIn('$DistributionName = "herdr-win"', packager)
++        self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)
 +        self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
 +        self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
++        self.assertIn(
++            '$ProductUrl = "https://github.com/User-3090/herdr-win"', packager
++        )
++        self.assertIn('"/DINFO_PRODUCTURL=$ProductUrl"', packager)
++        self.assertIn(
++            '$UpstreamUrl = "https://github.com/ogulcancelik/herdr"', packager
++        )
++        self.assertIn('"/DINFO_UPSTREAMURL=$UpstreamUrl"', packager)
 +        self.assertIn('"/DINFO_COMMANDNAME=$CommandName"', packager)
 +        self.assertIn(
 +            '"/DINFO_ORIGINALFILENAME=$InstallerOriginalFilename"', packager
@@ -58075,7 +58191,7 @@ index 9d7389b5170af663ea70846e6fde8ab579c0631d..ee812e6bffba5f7face70a0ced2cf336
  
  fn run_config_command(args: &[String]) -> std::io::Result<i32> {
 diff --git a/src/cli/status.rs b/src/cli/status.rs
-index 08e68724aae701f7512d47ace3827c7a669608c7..f9fcf91b000776bbebc525dbbbae82016f6ba753 100644
+index 63b8da7e7e86855fe2281c013c327a31884a5cef..d8757e38690a042f9322a01e6c74cf6856873754 100644
 --- a/src/cli/status.rs
 +++ b/src/cli/status.rs
 @@ -93,10 +93,7 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
@@ -58102,7 +58218,7 @@ index 08e68724aae701f7512d47ace3827c7a669608c7..f9fcf91b000776bbebc525dbbbae8201
      println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
      println!("binary: {}", current_exe_label());
      Ok(())
-@@ -253,7 +247,7 @@ struct UpdateStatusJson {
+@@ -252,7 +246,7 @@ struct UpdateStatusJson {
  fn client_status_json() -> ClientStatusJson {
      ClientStatusJson {
          version: crate::build_info::version(),
@@ -60758,7 +60874,7 @@ index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33
 +    io::Error::new(io::ErrorKind::InvalidData, message)
 +}
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
-index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9ab8b39e1 100644
+index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f7d049a11 100644
 --- a/src/remote/attach.rs
 +++ b/src/remote/attach.rs
 @@ -23,14 +23,16 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -60780,7 +60896,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum RemoteKeybindings {
      Local,
-@@ -1508,6 +1510,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
+@@ -1516,6 +1518,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -60789,7 +60905,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
              "--retry",
              "3",
              "--connect-timeout",
-@@ -1551,7 +1555,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1559,7 +1563,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
          let build_id = crate::build_info::build_id().ok_or_else(|| {
              io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
          })?;
@@ -60798,7 +60914,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
          let manifest: RemotePreviewManifest =
              serde_json::from_slice(&manifest_bytes).map_err(|err| {
                  io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-@@ -1570,7 +1574,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1578,7 +1582,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
      }
  
      let current_version = current_version();
@@ -60807,7 +60923,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
      let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
          .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
      let release = manifest.release_for_version(&current_version).ok_or_else(|| {
-@@ -2103,7 +2107,7 @@ fn run_client_process(
+@@ -2119,7 +2123,7 @@ fn run_client_process(
      reattach_command: &str,
      keybindings: RemoteKeybindings,
  ) -> io::Result<()> {
@@ -60817,10 +60933,10 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
          .arg("client")
          .env(
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..257f1f36587a72aca1f8b59219ae1c682233bcc5 100644
+index e59014fb8be095b01d49cac06592ca799686341a..4742710eacdb6b55c6e42a5d485e06441808cb7b 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
-@@ -185,9 +185,11 @@ fn validate_running_server_compatibility() -> io::Result<()> {
+@@ -213,9 +213,11 @@ fn validate_running_server_compatibility() -> io::Result<()> {
  ///   socket overrides, etc.), except inherited socket overrides are cleared when
  ///   this CLI invocation explicitly selected a session.
  ///
@@ -60834,7 +60950,7 @@ index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..257f1f36587a72aca1f8b59219ae1c68
          io::Error::new(
              err.kind(),
              format!("failed to determine herdr executable path: {err}"),
-@@ -203,7 +205,7 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
+@@ -231,7 +233,7 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
      })?;
  
      let pid = child.id();

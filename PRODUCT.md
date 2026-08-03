@@ -10,7 +10,8 @@ tests remain the detailed implementation truth.
 ## Product Shape and Identity
 
 - herdr-win is an unofficial, upstream-first Windows distribution of Herdr, not a
-  separate product line.
+  separate product line. It exists to advance Herdr's Windows support through a
+  small patch set designed to remain reviewable and suitable for upstream.
 - Fork identity appears in repository, release, and update-channel presentation.
   The package, executable, command, configuration, state, sessions, sockets, and
   protocol remain `herdr` and stay compatible with upstream.
@@ -27,11 +28,14 @@ tests remain the detailed implementation truth.
   `%LOCALAPPDATA%\Programs\Herdr`, exposes the stable `herdr` command on user
   `PATH`, and registers Herdr in Windows Installed Apps without requiring
   administrator privileges. The installer interface is English-only. Its branded,
-  keyboard-operable Windows setup uses the Herdr product identity, clearly explains
-  the fixed per-user destination, presents the Apache-2.0 license before modifying
-  files, and ends with the exact first command. The installed payload and portable
-  ZIP include the same license as `LICENSE.txt`. A portable ZIP remains a supported
-  manual alternative.
+  keyboard-operable Windows setup identifies herdr-win as an unofficial distribution
+  built from the latest reviewed stable Herdr release plus the maintained Windows
+  patches. The destination remains fixed without displaying a path or offering a
+  directory choice on Welcome. Setup presents the Apache-2.0 license before modifying
+  files and ends with the exact first command plus separate user-invoked links to the
+  fork guide and official upstream project. It never opens Herdr or a browser
+  automatically. The installed payload and portable ZIP include the same license as
+  `LICENSE.txt`. A portable ZIP remains a supported manual alternative.
 - The managed installer copies upstream's canonical Herdr skill to
   `%USERPROFILE%\.agents\skills\herdr\SKILL.md`. When Claude Code is detected,
   it also copies the skill below `CLAUDE_CONFIG_DIR` or

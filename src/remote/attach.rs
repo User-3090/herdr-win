@@ -192,7 +192,11 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                 prepared_remote.stop_after_install_approved,
                 remote.live_handoff,
             )?;
-            remote_bridge_command(&prepared_remote.remote_herdr, &session_name)
+            remote_bridge_command(
+                &prepared_remote.remote_herdr,
+                &session_name,
+                current_remote_terminal_size(),
+            )
         }
         #[cfg(windows)]
         RemoteHostPlatform::Windows => {
@@ -202,7 +206,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                     "live handoff is not supported for Windows remote hosts",
                 ));
             }
-            super::windows::remote_bridge_command(&session_name)
+            super::windows::remote_bridge_command(&session_name, current_remote_terminal_size())
         }
     };
 
@@ -214,6 +218,10 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+}
+
+fn current_remote_terminal_size() -> (u16, u16) {
+    crossterm::terminal::size().unwrap_or((80, 24))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1660,8 +1668,16 @@ fn confirm_remote_install(
     Ok(())
 }
 
-fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
-    let mut command = format!("exec {}", remote_herdr.shell_path);
+fn remote_bridge_command(
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+    (cols, rows): (u16, u16),
+) -> String {
+    let mut command = format!(
+        "{}={cols}x{rows} exec {}",
+        crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR,
+        remote_herdr.shell_path
+    );
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
         command.push_str(&shell_quote(session_name));
@@ -2940,8 +2956,12 @@ mod tests {
             arch: "x86_64",
         });
         assert_eq!(
-            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
-            "exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
+            remote_bridge_command(
+                &remote_herdr,
+                crate::session::DEFAULT_SESSION_NAME,
+                (120, 40)
+            ),
+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
     }
 
@@ -2955,8 +2975,12 @@ mod tests {
             .expect("path binary");
 
         assert_eq!(
-            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
-            "exec /usr/bin/herdr remote-client-bridge"
+            remote_bridge_command(
+                &remote_herdr,
+                crate::session::DEFAULT_SESSION_NAME,
+                (120, 40)
+            ),
+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec /usr/bin/herdr remote-client-bridge"
         );
     }
 
@@ -2971,8 +2995,12 @@ mod tests {
                 .expect("path binary");
 
         assert_eq!(
-            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
-            "exec '/opt/herdr bin/herdr' remote-client-bridge"
+            remote_bridge_command(
+                &remote_herdr,
+                crate::session::DEFAULT_SESSION_NAME,
+                (120, 40)
+            ),
+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec '/opt/herdr bin/herdr' remote-client-bridge"
         );
     }
 
@@ -2987,8 +3015,12 @@ mod tests {
                 .expect("path binary");
 
         assert_eq!(
-            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
-            "exec /opt/homebrew/bin/herdr remote-client-bridge"
+            remote_bridge_command(
+                &remote_herdr,
+                crate::session::DEFAULT_SESSION_NAME,
+                (120, 40)
+            ),
+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec /opt/homebrew/bin/herdr remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
     }
@@ -3074,8 +3106,12 @@ mod tests {
                 .expect("path binary");
 
         assert_eq!(
-            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
-            "exec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
+            remote_bridge_command(
+                &remote_herdr,
+                crate::session::DEFAULT_SESSION_NAME,
+                (120, 40)
+            ),
+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
         );
     }
 
