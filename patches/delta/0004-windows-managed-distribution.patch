@@ -1,4 +1,4 @@
-From ac8157fc1da7bb0bcb4b42b90628c47fd0f67bcc Mon Sep 17 00:00:00 2001
+From 01f44924fd342762cc1968256aacb0e04aebf358 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -11,7 +11,7 @@ Refs ogulcancelik/herdr#1947
  build.rs                                      |    1 -
  justfile                                      |    6 +-
  packaging/windows/conpty.json                 |   48 +
- packaging/windows/herdr-installer-helper.ps1  | 2424 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 2579 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -19,21 +19,22 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  552 ++++
+ packaging/windows/installer/project.nsi       |  595 ++++
  ...crosoft.Windows.Console.ConPTY-LICENSE.txt |  Bin 0 -> 1116 bytes
  ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
+ packaging/windows/managed-skill-hashes.txt    |    2 +
  scripts/package_windows_conpty.py             |  263 ++
- scripts/package_windows_installer.ps1         |  463 ++++
+ scripts/package_windows_installer.ps1         |  486 ++++
  scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |  170 ++
  scripts/test_preview.py                       |  212 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
- scripts/test_windows_installer.py             |  642 +++++
+ scripts/test_windows_installer.py             |  688 +++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 +++
  .../windows_install_conpty_package_test.ps1   |   26 +
- scripts/windows_installer_fault_test.ps1      |  430 +++
- scripts/windows_installer_test.ps1            |  687 +++++
+ scripts/windows_installer_fault_test.ps1      |  432 +++
+ scripts/windows_installer_test.ps1            |  754 +++++
  scripts/windows_smoke_conpty_path.ps1         |   36 +-
  skills/herdr/SKILL.md                         |  195 ++
  src/app/api/plugins/panes.rs                  |    2 +-
@@ -50,7 +51,7 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  229 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  154 +-
- src/platform/windows/launcher.rs              | 1065 ++++++++
+ src/platform/windows/launcher.rs              | 1065 +++++++
  src/platform/windows/managed_install.rs       |  689 +++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
@@ -62,7 +63,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 +-
- 57 files changed, 10055 insertions(+), 235 deletions(-)
+ 58 files changed, 10393 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -76,6 +77,7 @@ Refs ogulcancelik/herdr#1947
  create mode 100644 packaging/windows/installer/project.nsi
  create mode 100644 packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-LICENSE.txt
  create mode 100644 packaging/windows/licenses/Microsoft.Windows.Console.ConPTY-NOTICE.md
+ create mode 100644 packaging/windows/managed-skill-hashes.txt
  create mode 100644 scripts/package_windows_conpty.py
  create mode 100644 scripts/package_windows_installer.ps1
  create mode 100644 scripts/test_package_windows_conpty.py
@@ -264,13 +266,13 @@ index 0000000000000000000000000000000000000000..9bb7747373f66b92060b19357602abeb
 +}
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002a2d355b9
+index 0000000000000000000000000000000000000000..1d6b073c6cbc6210a8ef85a7cdda51bb97fa53f8
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,2424 @@
+@@ -0,0 +1,2579 @@
 +[CmdletBinding()]
 +param(
-+    [ValidateSet("Install", "Uninstall", "CompleteMaintenance")]
++    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
 +    [string]$Action,
 +
 +    [string]$InstallRoot,
@@ -279,12 +281,15 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +    [string]$UninstallerPath,
 +    [string]$HelperSourcePath,
 +    [string]$SkillSourcePath,
++    [string]$SkillHashManifestPath,
 +    [string]$ProductName = "Herdr",
 +    [string]$BuildId,
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
 +    [ValidateSet("Keep", "Remove")]
 +    [string]$SettingsDisposition = "Keep",
++    [ValidateSet("Keep", "Auto", "Remove")]
++    [string]$SkillDisposition = "Auto",
 +
 +    [uint32]$ParentProcessId = 0
 +)
@@ -308,6 +313,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +$script:LauncherBuildIdArgument = "--herdr-private-launcher-build-id-v1"
 +$script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 +$script:InstallManifestHeader = "herdr-install-manifest-v1"
++$script:ManagedSkillHashesHeader = "herdr-managed-skill-hashes-v1"
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 +$script:UninstallMarkerText = "herdr-uninstall-v1`n"
 +$script:TransactionMarkerName = ".herdr-installer-transaction"
@@ -497,6 +503,41 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +        throw "Herdr agent skill frontmatter must contain exactly one 'name: herdr' entry: $Path"
 +    }
 +    return Get-HerdrSha256 -Path $Path
++}
++
++function Read-HerdrManagedSkillHashes {
++    param(
++        [Parameter(Mandatory = $true)][string]$Path,
++        [string]$CurrentSkillPath
++    )
++
++    $text = Read-HerdrStrictUtf8 -Path $Path
++    if ($text.Contains("`r") -or -not $text.EndsWith("`n", [StringComparison]::Ordinal)) {
++        throw "Herdr managed skill hash manifest must use LF line endings and end with a newline: $Path"
++    }
++    $lines = @($text.Substring(0, $text.Length - 1) -split "`n")
++    if ($lines.Count -lt 2 -or $lines[0] -cne $script:ManagedSkillHashesHeader) {
++        throw "Invalid Herdr managed skill hash manifest header: $Path"
++    }
++    $hashes = New-Object System.Collections.Generic.List[string]
++    $previous = $null
++    foreach ($hash in @($lines[1..($lines.Count - 1)])) {
++        if ($hash -cnotmatch '^[0-9a-f]{64}$') {
++            throw "Invalid SHA-256 entry in Herdr managed skill hash manifest: $Path"
++        }
++        if ($null -ne $previous -and [StringComparer]::Ordinal.Compare($previous, $hash) -ge 0) {
++            throw "Herdr managed skill hashes must be unique and sorted: $Path"
++        }
++        $hashes.Add($hash)
++        $previous = $hash
++    }
++    if (-not [string]::IsNullOrWhiteSpace($CurrentSkillPath)) {
++        $currentHash = Get-HerdrAgentSkillSha256 -Path $CurrentSkillPath
++        if ($hashes -cnotcontains $currentHash) {
++            throw "Current Herdr agent skill hash is absent from its managed hash manifest: $CurrentSkillPath"
++        }
++    }
++    return $hashes.ToArray()
 +}
 +
 +function Get-HerdrUserProfileRoot {
@@ -732,13 +773,49 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +    }
 +}
 +
++function Get-HerdrSkillFileState {
++    param(
++        [Parameter(Mandatory = $true)][string]$SkillsRoot,
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes
++    )
++
++    $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
++    $target = Join-Path $SkillsRoot "herdr"
++    $skill = Join-Path $target "SKILL.md"
++    $parent = Split-Path -Parent $SkillsRoot
++    $grandparent = Split-Path -Parent $parent
++    foreach ($component in @($grandparent, $parent, $SkillsRoot, $target)) {
++        if (-not (Test-Path -LiteralPath $component)) {
++            return [PSCustomObject]@{ State = "Absent"; Path = $skill }
++        }
++        if (-not (Test-Path -LiteralPath $component -PathType Container) -or
++            (Test-HerdrReparsePoint -Path $component)) {
++            return [PSCustomObject]@{ State = "Unsafe"; Path = $skill }
++        }
++    }
++    if (-not (Test-Path -LiteralPath $skill)) {
++        return [PSCustomObject]@{ State = "Absent"; Path = $skill }
++    }
++    if (-not (Test-Path -LiteralPath $skill -PathType Leaf) -or
++        (Test-HerdrReparsePoint -Path $skill)) {
++        return [PSCustomObject]@{ State = "Unsafe"; Path = $skill }
++    }
++    $hash = Get-HerdrSha256 -Path $skill
++    $state = if ($KnownHashes -ccontains $hash) { "Known" } else { "Unknown" }
++    return [PSCustomObject]@{ State = $state; Path = $skill; Sha256 = $hash }
++}
++
 +function Install-HerdrSkillFile {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$SourcePath,
-+        [Parameter(Mandatory = $true)][string]$SkillsRoot
++        [Parameter(Mandatory = $true)][string]$SkillsRoot,
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes
 +    )
 +
 +    $expectedHash = Get-HerdrAgentSkillSha256 -Path $SourcePath
++    if ($KnownHashes -cnotcontains $expectedHash) {
++        throw "Embedded Herdr agent skill is absent from its managed hash manifest: $SourcePath"
++    }
 +    Assert-HerdrSkillTarget -SkillsRoot $SkillsRoot
 +    $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
 +    $target = Join-Path $SkillsRoot "herdr"
@@ -750,11 +827,15 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +    $destination = Join-Path $target "SKILL.md"
 +    if (Test-Path -LiteralPath $destination) {
 +        Assert-HerdrRegularFile -Path $destination
++        if ($KnownHashes -cnotcontains (Get-HerdrSha256 -Path $destination)) {
++            return $destination
++        }
 +    }
 +    [IO.File]::Copy($SourcePath, $destination, $true)
 +    if ((Get-HerdrAgentSkillSha256 -Path $destination) -cne $expectedHash) {
 +        throw "Installed Herdr SKILL.md differs from its embedded source: $destination"
 +    }
++    return $null
 +}
 +
 +function Assert-HerdrSkillTarget {
@@ -775,61 +856,90 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +    param(
 +        [Parameter(Mandatory = $true)][string]$SourcePath,
 +        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
-+        [string]$ClaudeSkillsRoot
++        [string]$ClaudeSkillsRoot,
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes
 +    )
 +
-+    Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $AgentSkillsRoot
++    $preserved = New-Object System.Collections.Generic.List[string]
++    $agentResult = Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $AgentSkillsRoot -KnownHashes $KnownHashes
++    if (-not [string]::IsNullOrWhiteSpace($agentResult)) {
++        $preserved.Add($agentResult)
++    }
 +    if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
 +        -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
-+        Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $ClaudeSkillsRoot
++        $claudeResult = Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $ClaudeSkillsRoot -KnownHashes $KnownHashes
++        if (-not [string]::IsNullOrWhiteSpace($claudeResult)) {
++            $preserved.Add($claudeResult)
++        }
 +    }
++    return $preserved.ToArray()
 +}
 +
 +function Remove-HerdrSkillFile {
-+    param([Parameter(Mandatory = $true)][string]$SkillsRoot)
++    param(
++        [Parameter(Mandatory = $true)][string]$SkillsRoot,
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
++        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$Disposition
++    )
 +
-+    if (-not (Test-Path -LiteralPath $SkillsRoot -PathType Container)) {
-+        return
++    $state = Get-HerdrSkillFileState -SkillsRoot $SkillsRoot -KnownHashes $KnownHashes
++    if ($state.State -ceq "Absent") {
++        return $null
 +    }
-+    $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
-+    $parent = Split-Path -Parent $SkillsRoot
-+    $grandparent = Split-Path -Parent $parent
-+    foreach ($component in @($grandparent, $parent, $SkillsRoot)) {
-+        if (-not (Test-Path -LiteralPath $component -PathType Container) -or
-+            (Test-HerdrReparsePoint -Path $component)) {
-+            return
-+        }
++    if ($state.State -ceq "Unsafe" -or $Disposition -ceq "Keep") {
++        return $state.Path
 +    }
-+    $target = Join-Path $SkillsRoot "herdr"
-+    if (-not (Test-Path -LiteralPath $target -PathType Container) -or
-+        (Test-HerdrReparsePoint -Path $target)) {
-+        return
++    Assert-HerdrRegularFile -Path $state.Path
++    $isKnown = $KnownHashes -ccontains (Get-HerdrSha256 -Path $state.Path)
++    if (-not $isKnown -and $Disposition -cne "Remove") {
++        return $state.Path
 +    }
-+    $skill = Join-Path $target "SKILL.md"
-+    if (Test-Path -LiteralPath $skill) {
-+        if (-not (Test-Path -LiteralPath $skill -PathType Leaf) -or
-+            (Test-HerdrReparsePoint -Path $skill)) {
-+            return
-+        }
-+        Remove-Item -LiteralPath $skill -Force
-+    }
++    Remove-Item -LiteralPath $state.Path -Force
++    $target = Split-Path -Parent $state.Path
 +    if (@(Get-ChildItem -LiteralPath $target -Force).Count -eq 0) {
 +        Remove-Item -LiteralPath $target -Force
 +    }
++    return $null
 +}
 +
 +function Remove-HerdrSkillCopies {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
-+        [string[]]$ClaudeSkillsRoots = @()
++        [string[]]$ClaudeSkillsRoots = @(),
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
++        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$Disposition
++    )
++
++    $preserved = New-Object System.Collections.Generic.List[string]
++    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
++    foreach ($root in @($AgentSkillsRoot) + @($ClaudeSkillsRoots)) {
++        if (-not [string]::IsNullOrWhiteSpace($root) -and $seen.Add([IO.Path]::GetFullPath($root))) {
++            $result = Remove-HerdrSkillFile -SkillsRoot $root -KnownHashes $KnownHashes -Disposition $Disposition
++            if (-not [string]::IsNullOrWhiteSpace($result)) {
++                $preserved.Add($result)
++            }
++        }
++    }
++    return $preserved.ToArray()
++}
++
++function Get-HerdrSkillRemovalDefault {
++    param(
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
++        [string]$AgentSkillsRoot = (Get-HerdrAgentSkillsRoot),
++        [string[]]$ClaudeSkillsRoots = @(Get-HerdrClaudeSkillsRootsForRemoval)
 +    )
 +
 +    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 +    foreach ($root in @($AgentSkillsRoot) + @($ClaudeSkillsRoots)) {
 +        if (-not [string]::IsNullOrWhiteSpace($root) -and $seen.Add([IO.Path]::GetFullPath($root))) {
-+            Remove-HerdrSkillFile -SkillsRoot $root
++            $state = Get-HerdrSkillFileState -SkillsRoot $root -KnownHashes $KnownHashes
++            if ($state.State -cne "Absent" -and $state.State -cne "Known") {
++                return "Keep"
++            }
 +        }
 +    }
++    return "Remove"
 +}
 +
 +function Publish-HerdrStagedFile {
@@ -2295,6 +2405,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +        [Parameter(Mandatory = $true)][string]$UninstallerPath,
 +        [Parameter(Mandatory = $true)][string]$HelperSourcePath,
 +        [Parameter(Mandatory = $true)][string]$SkillSourcePath,
++        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
 +        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
 +        [string]$ClaudeSkillsRoot,
 +        [Parameter(Mandatory = $true)][string]$BuildId,
@@ -2314,7 +2425,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +    }
 +    Assert-HerdrRegularFile -Path $UninstallerPath
 +    Assert-HerdrRegularFile -Path $HelperSourcePath
-+    [void](Get-HerdrAgentSkillSha256 -Path $SkillSourcePath)
++    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath -CurrentSkillPath $SkillSourcePath)
 +    Assert-HerdrSkillTarget -SkillsRoot $AgentSkillsRoot
 +    if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
 +        -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -2371,8 +2482,18 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +            }
 +        }
 +    }
-+    Install-HerdrSkillCopies -SourcePath $SkillSourcePath -AgentSkillsRoot $AgentSkillsRoot -ClaudeSkillsRoot $ClaudeSkillsRoot
-+    return $result
++    $preservedSkillPaths = @(
++        Install-HerdrSkillCopies `
++            -SourcePath $SkillSourcePath `
++            -AgentSkillsRoot $AgentSkillsRoot `
++            -ClaudeSkillsRoot $ClaudeSkillsRoot `
++            -KnownHashes $knownSkillHashes
++    )
++    return [PSCustomObject]@{
++        Status = $result.Status
++        BuildId = $result.BuildId
++        PreservedSkillPaths = $preservedSkillPaths
++    }
 +}
 +
 +function Get-HerdrComparablePathEntry {
@@ -2511,6 +2632,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +        [Parameter(Mandatory = $true)][string]$UninstallerPath,
 +        [Parameter(Mandatory = $true)][string]$HelperSourcePath,
 +        [Parameter(Mandatory = $true)][string]$SkillSourcePath,
++        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -2529,6 +2651,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +            -UninstallerPath $UninstallerPath `
 +            -HelperSourcePath $HelperSourcePath `
 +            -SkillSourcePath $SkillSourcePath `
++            -SkillHashManifestPath $SkillHashManifestPath `
 +            -AgentSkillsRoot $agentSkillsRoot `
 +            -ClaudeSkillsRoot $claudeSkillsRoot `
 +            -BuildId $BuildId `
@@ -2545,6 +2668,8 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
 +        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
 +        [string[]]$ClaudeSkillsRoots = @(),
++        [Parameter(Mandatory = $true)][string[]]$KnownSkillHashes,
++        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition,
 +        [int]$LockTimeoutMilliseconds = 30000,
 +        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
 +    )
@@ -2585,7 +2710,13 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +            Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
 +        }
 +
-+        Remove-HerdrSkillCopies -AgentSkillsRoot $AgentSkillsRoot -ClaudeSkillsRoots $ClaudeSkillsRoots
++        $preservedSkillPaths = @(
++            Remove-HerdrSkillCopies `
++                -AgentSkillsRoot $AgentSkillsRoot `
++                -ClaudeSkillsRoots $ClaudeSkillsRoots `
++                -KnownHashes $KnownSkillHashes `
++                -Disposition $SkillDisposition
++        )
 +        $installManifestPath = Join-Path $stateDir "install.manifest"
 +
 +        $transaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
@@ -2627,28 +2758,37 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +        $coordination.Dispose()
 +    }
 +    Assert-HerdrUninstallResidual -InstallRoot $InstallRoot
++    return $preservedSkillPaths
 +}
 +
 +function Invoke-HerdrUninstall {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
 +        [ValidateSet("Keep", "Remove")][string]$SettingsDisposition = "Keep",
++        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
++        [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
 +        [string]$UserProfileRoot = $env:USERPROFILE,
 +        [int]$LifecycleLockTimeoutMilliseconds = 30000
 +    )
 +
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
-+    Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
++    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
++    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
-+        Invoke-HerdrUninstallLayout `
-+            -InstallRoot $InstallRoot `
-+            -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
-+            -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval)
++        $preservedSkillPaths = @(
++            Invoke-HerdrUninstallLayout `
++                -InstallRoot $InstallRoot `
++                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
++                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval) `
++                -KnownSkillHashes $knownSkillHashes `
++                -SkillDisposition $SkillDisposition
++        )
 +        Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
 +        Remove-HerdrArpRegistration -InstallRoot $InstallRoot
 +        if ($SettingsDisposition -ceq "Remove") {
 +            Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
 +        }
++        return $preservedSkillPaths
 +    }
 +}
 +
@@ -2663,6 +2803,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +                    -UninstallerPath $UninstallerPath `
 +                    -HelperSourcePath $HelperSourcePath `
 +                    -SkillSourcePath $SkillSourcePath `
++                    -SkillHashManifestPath $SkillHashManifestPath `
 +                    -BuildId $BuildId `
 +                    -DisplayVersion $DisplayVersion `
 +                    -NumericVersion $NumericVersion
@@ -2671,10 +2812,26 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +                } else {
 +                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): $($result.Status)")
 +                }
++                foreach ($path in @($result.PreservedSkillPaths)) {
++                    [Console]::Out.WriteLine("Warning: Existing customized Herdr skill was preserved: $path")
++                }
 +            }
 +            "Uninstall" {
-+                Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
++                $preservedSkillPaths = @(
++                    Invoke-HerdrUninstall `
++                        -InstallRoot $InstallRoot `
++                        -SettingsDisposition $SettingsDisposition `
++                        -SkillHashManifestPath $SkillHashManifestPath `
++                        -SkillDisposition $SkillDisposition
++                )
 +                [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
++                foreach ($path in $preservedSkillPaths) {
++                    [Console]::Out.WriteLine("Preserved Herdr skill: $path")
++                }
++            }
++            "GetSkillRemovalDefault" {
++                $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
++                [Console]::Out.Write((Get-HerdrSkillRemovalDefault -KnownHashes $knownSkillHashes))
 +            }
 +            "CompleteMaintenance" {
 +                $result = Invoke-HerdrCompleteMaintenance `
@@ -2683,7 +2840,7 @@ index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002
 +                [Console]::Out.WriteLine("$script:ProductName maintenance: $($result.Status)")
 +            }
 +            default {
-+                throw "Action must be Install, Uninstall, or CompleteMaintenance."
++                throw "Action must be Install, Uninstall, GetSkillRemovalDefault, or CompleteMaintenance."
 +            }
 +        }
 +        exit 0
@@ -54149,10 +54306,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141958f1dbb
+index 0000000000000000000000000000000000000000..aa57070790a6378e436b4e1cafba6b49c4573856
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,552 @@
+@@ -0,0 +1,595 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -54165,6 +54322,9 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +!endif
 +!ifndef ARG_SKILL_MD
 +  !error "ARG_SKILL_MD is required"
++!endif
++!ifndef ARG_SKILL_HASH_MANIFEST
++  !error "ARG_SKILL_HASH_MANIFEST is required"
 +!endif
 +!ifndef ARG_ARTWORK_DIR
 +  !error "ARG_ARTWORK_DIR is required"
@@ -54258,6 +54418,8 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +Var ResidualFindName
 +Var SettingsDisposition
 +Var SettingsCheckbox
++Var SkillDisposition
++Var SkillCheckbox
 +Var UpstreamLink
 +
 +!define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
@@ -54296,7 +54458,8 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +
 +LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_DISTRIBUTIONNAME} data"
 +LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-+LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
++LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall always removes the managed program, user PATH entry, and Windows Installed Apps registration. Unmodified skill copies are selected for removal; customized copies are kept unless you select skill removal. Other files in those skill folders are never removed. Settings and session data are also kept unless selected."
++LangString AppSkillCheckbox ${LANG_ENGLISH} "Remove installed ${INFO_PRODUCTNAME} skill copies, including customized SKILL.md files"
 +LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
 +LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 +
@@ -54455,21 +54618,46 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +Function un.onInit
 +  SetShellVarContext current
 +  StrCpy $SettingsDisposition "Keep"
++  StrCpy $SkillDisposition "Auto"
 +  ${GetParameters} $0
 +  ClearErrors
 +  ${GetOptions} "$0" "/REMOVE_SETTINGS" $1
 +  ${IfNot} ${Errors}
 +    StrCpy $SettingsDisposition "Remove"
 +  ${EndIf}
++  ClearErrors
++  ${GetOptions} "$0" "/REMOVE_SKILL" $1
++  ${IfNot} ${Errors}
++    StrCpy $SkillDisposition "Remove"
++  ${EndIf}
 +  Call un.SetPowerShellPath
 +  IfFileExists "$PowerShellPath" un_powershell_ok
 +  Push "Windows PowerShell is required to uninstall ${INFO_DISTRIBUTIONNAME}."
 +  Call un.FailUninstall
 +un_powershell_ok:
++  InitPluginsDir
++  SetOutPath "$PLUGINSDIR"
++  ClearErrors
++  File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
++  IfErrors 0 un_skill_manifest_ready
++  Push "The managed skill ownership manifest could not be unpacked; uninstall was preserved."
++  Call un.FailUninstall
++un_skill_manifest_ready:
 +FunctionEnd
 +
 +Function un.SettingsPage
 +  IfSilent settings_page_done 0
++  ${If} $SkillDisposition == "Auto"
++    StrCpy $SkillDisposition "Keep"
++    IfFileExists "$INSTDIR\state\installer-helper.ps1" 0 skill_default_done
++    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
++    Pop $HelperExitCode
++    Pop $HelperOutput
++    StrCmp $HelperExitCode "0" 0 skill_default_done
++    StrCmp $HelperOutput "Remove" 0 skill_default_done
++    StrCpy $SkillDisposition "Remove"
++skill_default_done:
++  ${EndIf}
 +  !insertmacro MUI_HEADER_TEXT "$(AppSettingsPageTitle)" "$(AppSettingsPageSubtitle)"
 +  nsDialogs::Create 1018
 +  Pop $0
@@ -54477,9 +54665,14 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +    Abort
 +  ${EndIf}
 +
-+  ${NSD_CreateLabel} 0 0 100% 72u "$(AppSettingsPageText)"
++  ${NSD_CreateLabel} 0 0 100% 66u "$(AppSettingsPageText)"
 +  Pop $0
-+  ${NSD_CreateCheckbox} 0 82u 100% 14u "$(AppSettingsCheckbox)"
++  ${NSD_CreateCheckbox} 0 70u 100% 18u "$(AppSkillCheckbox)"
++  Pop $SkillCheckbox
++  ${If} $SkillDisposition == "Remove"
++    ${NSD_Check} $SkillCheckbox
++  ${EndIf}
++  ${NSD_CreateCheckbox} 0 92u 100% 14u "$(AppSettingsCheckbox)"
 +  Pop $SettingsCheckbox
 +  ${If} $SettingsDisposition == "Remove"
 +    ${NSD_Check} $SettingsCheckbox
@@ -54494,6 +54687,12 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +    Goto settings_page_leave_done
 +  ${EndIf}
 +
++  ${NSD_GetState} $SkillCheckbox $0
++  ${If} $0 == ${BST_CHECKED}
++    StrCpy $SkillDisposition "Remove"
++  ${Else}
++    StrCpy $SkillDisposition "Keep"
++  ${EndIf}
 +  ${NSD_GetState} $SettingsCheckbox $0
 +  ${If} $0 == ${BST_CHECKED}
 +    StrCpy $SettingsDisposition "Remove"
@@ -54604,6 +54803,7 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
 +  SetOutPath "$PLUGINSDIR\skill"
 +  File /oname=SKILL.md "${ARG_SKILL_MD}"
++  File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
 +  SetOutPath "$PLUGINSDIR"
 +  WriteUninstaller "$PLUGINSDIR\uninstall.exe"
 +  IfErrors 0 installer_inputs_ready
@@ -54612,7 +54812,7 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +
 +installer_inputs_ready:
 +  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -SkillHashManifestPath "$PLUGINSDIR\skill\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -54646,7 +54846,7 @@ index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141
 +  Call un.FailUninstall
 +
 +un_helper_ready:
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" un_helper_complete
@@ -54824,6 +55024,14 @@ txt&Z*FoM(*u#`cw^<lS1az67tx4mK`J-%~z{!>18xmRp^#kO6s{SSZpifI4<
 literal 0
 HcmV?d00001
 
+diff --git a/packaging/windows/managed-skill-hashes.txt b/packaging/windows/managed-skill-hashes.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ab18a9ffff00212c29ed096c503e2842afc45fe
+--- /dev/null
++++ b/packaging/windows/managed-skill-hashes.txt
+@@ -0,0 +1,2 @@
++herdr-managed-skill-hashes-v1
++0786182f02ebf92708e09d82d79e4614d1a9c30bfc337643cc2af1d0fb9db29f
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b04df1106
@@ -55095,10 +55303,10 @@ index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b
 +    main()
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379b223bbb5
+index 0000000000000000000000000000000000000000..f5bd68958ea5dae757d86bfb80b2d7019e269be8
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,486 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -55437,6 +55645,7 @@ index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379
 +$installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 +$helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
 +$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
++$skillHashManifest = Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"
 +$artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
 +$artworkFiles = @(
 +    "installer-welcome-finish-164x314.bmp",
@@ -55457,7 +55666,7 @@ index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379
 +if (Test-Path -LiteralPath $OutputPath) {
 +    throw "Refusing to overwrite an existing installer output: $OutputPath"
 +}
-+$requiredSources = @($packager, $installerScript, $helperScript, $skillSource)
++$requiredSources = @($packager, $installerScript, $helperScript, $skillSource, $skillHashManifest)
 +foreach ($artworkFile in $artworkFiles) {
 +    $requiredSources += Join-Path $artworkDir $artworkFile
 +}
@@ -55475,6 +55684,27 @@ index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379
 +    -not $skillValidationText.StartsWith("---`n", [StringComparison]::Ordinal) -or
 +    $skillValidationText -cnotmatch '(?m)^name: herdr$') {
 +    throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
++}
++$skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
++if ($skillHashManifestText.Contains("`r") -or
++    -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
++    throw "Managed skill hash manifest must use LF line endings and end with a newline."
++}
++$skillHashManifestLines = @($skillHashManifestText.Substring(0, $skillHashManifestText.Length - 1) -split "`n")
++if ($skillHashManifestLines.Count -lt 2 -or $skillHashManifestLines[0] -cne "herdr-managed-skill-hashes-v1") {
++    throw "Managed skill hash manifest has an invalid header."
++}
++$managedSkillHashes = @($skillHashManifestLines[1..($skillHashManifestLines.Count - 1)])
++$previousManagedSkillHash = $null
++foreach ($managedSkillHash in $managedSkillHashes) {
++    if ($managedSkillHash -cnotmatch '^[0-9a-f]{64}$' -or
++        ($null -ne $previousManagedSkillHash -and [StringComparer]::Ordinal.Compare($previousManagedSkillHash, $managedSkillHash) -ge 0)) {
++        throw "Managed skill hashes must be lowercase SHA-256 values in unique sorted order."
++    }
++    $previousManagedSkillHash = $managedSkillHash
++}
++if ($managedSkillHashes -cnotcontains (Get-Sha256 -Path $skillSource)) {
++    throw "Current skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
 +}
 +Assert-X64Pe -Path $LauncherExe
 +$payloadExe = Join-Path $StageDir "herdr.exe"
@@ -55531,6 +55761,7 @@ index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379
 +        "/DARG_LAUNCHER_EXE=$LauncherExe",
 +        "/DARG_HELPER_PS1=$helperScript",
 +        "/DARG_SKILL_MD=$skillSource",
++        "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
 +        "/DARG_ARTWORK_DIR=$artworkDir",
 +        "/DINFO_PRODUCTNAME=$ProductName",
 +        "/DINFO_DISTRIBUTIONNAME=$DistributionName",
@@ -56219,10 +56450,10 @@ index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6
  if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0639bbde5
+index 0000000000000000000000000000000000000000..929adc33a2832f2c3964fa4fda046cfec9be7382
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,642 @@
+@@ -0,0 +1,688 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56244,6 +56475,7 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +WINDOWS_PLATFORM = PROJECT_ROOT / "src/platform/windows.rs"
 +UPDATE = PROJECT_ROOT / "src/update.rs"
 +SKILL = PROJECT_ROOT / "skills" / "herdr" / "SKILL.md"
++MANAGED_SKILL_HASHES = PROJECT_ROOT / "packaging/windows/managed-skill-hashes.txt"
 +ARTWORK = NSI.parent / "artwork"
 +ARTWORK_SOURCE = ARTWORK / "installer-welcome-finish-source.png"
 +ARTWORK_DERIVATIVES = {
@@ -56284,10 +56516,22 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +            POWERSHELL_TEST,
 +            FAULT_TEST,
 +            SKILL,
++            MANAGED_SKILL_HASHES,
 +        ):
 +            self.assertTrue(path.is_file(), path)
 +        justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
 +        self.assertIn("scripts.test_windows_installer", justfile)
++
++    def test_managed_skill_hash_manifest_is_exact_and_contains_current_payload(
++        self,
++    ) -> None:
++        lines = MANAGED_SKILL_HASHES.read_text(encoding="utf-8").splitlines()
++        self.assertGreaterEqual(len(lines), 2)
++        self.assertEqual(lines[0], "herdr-managed-skill-hashes-v1")
++        hashes = lines[1:]
++        self.assertEqual(hashes, sorted(set(hashes)))
++        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes))
++        self.assertIn(hashlib.sha256(SKILL.read_bytes()).hexdigest(), hashes)
 +
 +    def test_helper_owns_exact_markers_and_managed_layout(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
@@ -56335,6 +56579,9 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +        self.assertIn("Install-HerdrSkillCopies", helper)
 +        self.assertIn("Remove-HerdrSkillFile", helper)
 +        self.assertIn("Remove-HerdrSkillCopies", helper)
++        self.assertIn("Read-HerdrManagedSkillHashes", helper)
++        self.assertIn("Get-HerdrSkillFileState", helper)
++        self.assertIn("Get-HerdrSkillRemovalDefault", helper)
 +        install_skill = helper[
 +            helper.index("function Install-HerdrSkillFile {") : helper.index(
 +                "function Assert-HerdrSkillTarget {"
@@ -56347,8 +56594,10 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +        ]
 +        self.assertIn("[IO.File]::Copy($SourcePath, $destination, $true)", install_skill)
 +        self.assertIn("Assert-HerdrRegularFile -Path $destination", install_skill)
-+        self.assertIn("Remove-Item -LiteralPath $skill -Force", remove_skill)
++        self.assertIn("Remove-Item -LiteralPath $state.Path -Force", remove_skill)
 +        self.assertIn("Get-ChildItem -LiteralPath $target -Force", remove_skill)
++        self.assertIn('$KnownHashes -cnotcontains (Get-HerdrSha256 -Path $destination)', install_skill)
++        self.assertIn('$Disposition -cne "Remove"', remove_skill)
 +        self.assertNotIn("-Recurse", install_skill + remove_skill)
 +        for removed in (
 +            "AgentSkillTransaction",
@@ -56365,22 +56614,35 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +            3,
 +        )
 +        self.assertIn("ARG_SKILL_MD", nsi)
++        self.assertIn("ARG_SKILL_HASH_MANIFEST", nsi)
 +        self.assertIn('/oname=SKILL.md "${ARG_SKILL_MD}"', nsi)
++        self.assertIn(
++            '/oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"', nsi
++        )
 +        self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
++        self.assertIn(
++            '-SkillHashManifestPath "$PLUGINSDIR\\skill\\managed-skill-hashes.txt"',
++            nsi,
++        )
 +        self.assertIn(
 +            '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
 +            packager,
 +        )
 +        self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
++        self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
 +        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
-+        self.assertIn("Universal skill install removed a foreign sibling", lifecycle)
++        self.assertIn("Unknown universal SKILL.md was overwritten", lifecycle)
++        self.assertIn("Known universal SKILL.md was not updated", lifecycle)
++        self.assertIn("Mixed skill state did not keep interactive removal unchecked", lifecycle)
++        self.assertIn("Known-or-absent skill state did not select interactive removal", lifecycle)
 +        self.assertIn("Claude skill install removed a foreign sibling", lifecycle)
-+        self.assertIn("Uninstall preserved an edited universal SKILL.md", lifecycle)
++        self.assertIn("Automatic uninstall removed an unknown SKILL.md", lifecycle)
++        self.assertIn("Explicit skill removal preserved an unknown SKILL.md", lifecycle)
 +        self.assertIn("Uninstall retained an empty Herdr skill directory", lifecycle)
 +        self.assertIn("Claude uninstall did not inspect configured and default roots", lifecycle)
 +        self.assertIn("Managed update removed a foreign skill sibling", lifecycle)
 +        self.assertIn("Extra-tree uninstall preserved SKILL.md", lifecycle)
-+        self.assertIn("Uninstall preserved a modified Herdr skill", lifecycle)
++        self.assertIn("Uninstall removed a modified Herdr skill", lifecycle)
 +        fault_test = FAULT_TEST.read_text(encoding="utf-8")
 +        self.assertIn("Assert-TestSkillInstalled", fault_test)
 +        self.assertIn("retained universal SKILL.md", fault_test)
@@ -56461,6 +56723,7 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +            "ARG_LAUNCHER_EXE",
 +            "ARG_HELPER_PS1",
 +            "ARG_SKILL_MD",
++            "ARG_SKILL_HASH_MANIFEST",
 +            "ARG_ARTWORK_DIR",
 +            "APP_BUILD_ID",
 +            "APP_OUTPUT_PATH",
@@ -56576,7 +56839,11 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +        self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
 +        self.assertNotIn("UninstPage uninstConfirm", nsi)
 +        self.assertIn(
-+            "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies",
++            "Uninstall always removes the managed program, user PATH entry, and Windows Installed Apps registration",
++            nsi,
++        )
++        self.assertIn(
++            "Remove installed ${INFO_PRODUCTNAME} skill copies, including customized SKILL.md files",
 +            nsi,
 +        )
 +        self.assertIn(
@@ -56663,12 +56930,18 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +        self.assertIn("Call WaitForUpdaterStartGate", nsi)
 +        self.assertIn("IntCmp $0 600", nsi)
 +        self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
++        self.assertIn('StrCpy $SkillDisposition "Auto"', nsi)
 +        self.assertIn('${GetOptions} "$0" "/REMOVE_SETTINGS" $1', nsi)
++        self.assertIn('${GetOptions} "$0" "/REMOVE_SKILL" $1', nsi)
 +        self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
 +        self.assertNotIn("/KEEP_SETTINGS", nsi)
 +        self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
++        self.assertIn('${NSD_Check} $SkillCheckbox', nsi)
++        self.assertIn("-Action GetSkillRemovalDefault", nsi)
 +        self.assertIn('-SettingsDisposition "$SettingsDisposition"', nsi)
++        self.assertIn('-SkillDisposition "$SkillDisposition"', nsi)
 +        self.assertIn('SettingsDisposition = "Keep"', helper)
++        self.assertIn('SkillDisposition = "Auto"', helper)
 +        self.assertIn('if ($SettingsDisposition -ceq "Remove")', helper)
 +        self.assertIn("SetErrorLevel 1", nsi)
 +        self.assertIn("SetErrorLevel 0", nsi)
@@ -56773,6 +57046,10 @@ index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0
 +            packager,
 +        )
 +        self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
++        self.assertIn(
++            '$skillHashManifest = Join-Path $projectRoot "packaging\\windows\\managed-skill-hashes.txt"',
++            packager,
++        )
 +        self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
 +        self.assertIn('$DistributionName = "Herdr Win"', packager)
 +        self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)
@@ -57323,10 +57600,10 @@ index 0000000000000000000000000000000000000000..331dec1946e78838302c93b9325a825c
 +}
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bdf56e5780
+index 0000000000000000000000000000000000000000..a346068ec5d31612da1f345cb6a9c99e29e7b515
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,432 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57590,10 +57867,10 @@ index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bd
 +            Remove-Item -LiteralPath $installer -Force
 +        }
 +        New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
-+        [IO.File]::WriteAllText($skillPath, "previous skill")
++        [IO.File]::Copy($skillSource, $skillPath, $true)
 +        [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
 +        New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
-+        [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
++        [IO.File]::Copy($skillSource, $claudeSkillPath, $true)
 +        [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
 +
 +        & $packager `
@@ -57668,10 +57945,10 @@ index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bd
 +        Remove-Item -LiteralPath $modifiedInstaller -Force
 +    }
 +    New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
-+    [IO.File]::WriteAllText($skillPath, "previous skill")
++    [IO.File]::Copy($skillSource, $skillPath, $true)
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
 +    New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
-+    [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
++    [IO.File]::Copy($skillSource, $claudeSkillPath, $true)
 +    [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
 +    & $packager `
 +        -StageDir $StageDir `
@@ -57690,13 +57967,15 @@ index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bd
 +            (Test-Path -LiteralPath $arpKey)
 +    }
 +    Assert-TestSkillInstalled
++    [IO.File]::WriteAllText($skillPath, "customized universal skill")
++    [IO.File]::WriteAllText($claudeSkillPath, "customized Claude skill")
 +    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-explicitly")
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
 +    New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
 +    $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
++    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS", "/REMOVE_SKILL")
 +    if ($modifiedUninstallExit -ne 0) {
 +        throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
 +    }
@@ -57759,10 +58038,10 @@ index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bd
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483a01e23aa
+index 0000000000000000000000000000000000000000..7a193e4e9fc3fc7a00032e6351ac5e0a95c5b536
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,687 @@
+@@ -0,0 +1,754 @@
 +[CmdletBinding()]
 +param()
 +
@@ -57878,6 +58157,7 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +        [string]$DisplayVersion,
 +        [string]$NumericVersion,
 +        [string]$SkillSource = $script:TestSkillSource,
++        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
 +        [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
 +        [string]$ClaudeSkillsRoot,
 +        [int]$LockTimeoutMilliseconds = 3000
@@ -57890,6 +58170,7 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +            -UninstallerPath $Uninstaller `
 +            -HelperSourcePath $helperPath `
 +            -SkillSourcePath $SkillSource `
++            -SkillHashManifestPath $SkillHashManifestPath `
 +            -AgentSkillsRoot $AgentSkillsRoot `
 +            -ClaudeSkillsRoot $ClaudeSkillsRoot `
 +            -BuildId $BuildId `
@@ -57904,14 +58185,19 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +        [string]$Root,
 +        [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
 +        [string[]]$ClaudeSkillsRoots = @(),
++        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
++        [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
 +        [scriptblock]$ProcessProvider = { @() },
 +        [int]$LockTimeoutMilliseconds = 3000
 +    )
++    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
 +    Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
 +        Invoke-HerdrUninstallLayout `
 +            -InstallRoot $Root `
 +            -AgentSkillsRoot $AgentSkillsRoot `
 +            -ClaudeSkillsRoots $ClaudeSkillsRoots `
++            -KnownSkillHashes $knownSkillHashes `
++            -SkillDisposition $SkillDisposition `
 +            -ProcessProvider $ProcessProvider `
 +            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    }
@@ -58000,6 +58286,24 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    $script:TestClaudeSkillsRoot = Join-Path $tempRoot ".claude\skills"
 +    Write-TestFile -Path $script:TestSkillSource -Text "---`nname: herdr`ndescription: first`n---`n`n# Herdr one`n"
 +    Write-TestFile -Path $skillSource2 -Text "---`nname: herdr`ndescription: second`n---`n`n# Herdr two`n"
++    $script:TestSkillHashManifest = Join-Path $tempRoot "managed-skill-hashes.txt"
++    $testSkillHashes = @(
++        (Get-HerdrSha256 -Path $script:TestSkillSource),
++        (Get-HerdrSha256 -Path $skillSource2)
++    ) | Sort-Object
++    Write-TestFile -Path $script:TestSkillHashManifest -Text ("herdr-managed-skill-hashes-v1`n" + ($testSkillHashes -join "`n") + "`n")
++    $parsedTestSkillHashes = @(Read-HerdrManagedSkillHashes -Path $script:TestSkillHashManifest -CurrentSkillPath $script:TestSkillSource)
++    Assert-Equal $parsedTestSkillHashes.Count 2 "Managed skill hash manifest did not retain both known versions."
++    $unsortedSkillHashManifest = Join-Path $tempRoot "unsorted-managed-skill-hashes.txt"
++    Write-TestFile -Path $unsortedSkillHashManifest -Text ("herdr-managed-skill-hashes-v1`n" + (@($testSkillHashes[1], $testSkillHashes[0]) -join "`n") + "`n")
++    Assert-Throws {
++        Read-HerdrManagedSkillHashes -Path $unsortedSkillHashManifest
++    } "unique and sorted" "Unsorted managed skill hashes were accepted."
++    $missingCurrentSkillHashManifest = Join-Path $tempRoot "missing-current-managed-skill-hashes.txt"
++    Write-TestFile -Path $missingCurrentSkillHashManifest -Text "herdr-managed-skill-hashes-v1`n$('0' * 64)`n"
++    Assert-Throws {
++        Read-HerdrManagedSkillHashes -Path $missingCurrentSkillHashManifest -CurrentSkillPath $script:TestSkillSource
++    } "current Herdr agent skill hash is absent" "A manifest without the current skill payload was accepted."
 +    # A persistent sibling lifecycle lock protects a live transaction from a
 +    # second real PowerShell process before any recovery/classification runs.
 +    $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
@@ -58084,28 +58388,61 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +        }
 +    }
 +
-+    # Skill install/update overwrites only SKILL.md in universal and Claude
-+    # locations. Uninstall always removes that file and preserves all siblings.
++    # Skill install/update changes only known SKILL.md versions. Unknown copies
++    # survive with a warning, while foreign siblings always remain untouched.
 +    $agentForeign = Join-Path $script:TestAgentSkillsRoot "herdr\user.txt"
 +    $claudeForeign = Join-Path $script:TestClaudeSkillsRoot "herdr\resources\nested.txt"
 +    Write-TestFile -Path $agentForeign -Text "preserve-agent"
 +    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "old-agent-skill"
 +    Write-TestFile -Path $claudeForeign -Text "preserve-claude"
-+    Install-HerdrSkillCopies -SourcePath $script:TestSkillSource -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoot $script:TestClaudeSkillsRoot
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Universal skill copy differs from its source."
++    $preservedUnknownInstall = @(
++        Install-HerdrSkillCopies `
++            -SourcePath $script:TestSkillSource `
++            -AgentSkillsRoot $script:TestAgentSkillsRoot `
++            -ClaudeSkillsRoot $script:TestClaudeSkillsRoot `
++            -KnownHashes $parsedTestSkillHashes
++    )
++    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) "old-agent-skill" "Unknown universal SKILL.md was overwritten."
++    Assert-Equal $preservedUnknownInstall.Count 1 "Unknown universal SKILL.md did not produce one preservation warning."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Claude skill copy differs from its source."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill install removed a foreign sibling."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill install removed a foreign sibling."
-+    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "edited-agent-skill"
-+    Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)
-+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved an edited universal SKILL.md."
-+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved Claude SKILL.md."
++    Assert-Equal (Get-HerdrSkillRemovalDefault -KnownHashes $parsedTestSkillHashes -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)) "Keep" "Mixed skill state did not keep interactive removal unchecked."
++
++    [IO.File]::Copy($script:TestSkillSource, (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"), $true)
++    Assert-Equal (Get-HerdrSkillRemovalDefault -KnownHashes $parsedTestSkillHashes -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)) "Remove" "Known-or-absent skill state did not select interactive removal."
++    $knownUpdatePreserved = @(
++        Install-HerdrSkillCopies `
++            -SourcePath $skillSource2 `
++            -AgentSkillsRoot $script:TestAgentSkillsRoot `
++            -ClaudeSkillsRoot $script:TestClaudeSkillsRoot `
++            -KnownHashes $parsedTestSkillHashes
++    )
++    Assert-Equal $knownUpdatePreserved.Count 0 "Known skill update reported a customized copy."
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $skillSource2) "Known universal SKILL.md was not updated."
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $skillSource2) "Known Claude SKILL.md was not updated."
++
++    $keptByChoice = @(Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot) -KnownHashes $parsedTestSkillHashes -Disposition Keep)
++    Assert-Equal $keptByChoice.Count 2 "Interactive keep did not preserve both skill copies."
++    $automaticRemovalPreserved = @(Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot) -KnownHashes $parsedTestSkillHashes -Disposition Auto)
++    Assert-Equal $automaticRemovalPreserved.Count 0 "Automatic uninstall preserved a known SKILL.md."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"))) "Automatic uninstall retained a known universal SKILL.md."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md"))) "Automatic uninstall retained a known Claude SKILL.md."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill uninstall removed a foreign sibling."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill uninstall removed a foreign sibling."
 +
++    $unknownAgentSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
++    Write-TestFile -Path $unknownAgentSkill -Text "edited-agent-skill"
++    $automaticUnknownPreserved = @(Remove-HerdrSkillFile -SkillsRoot $script:TestAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto)
++    Assert-True (Test-Path -LiteralPath $unknownAgentSkill -PathType Leaf) "Automatic uninstall removed an unknown SKILL.md."
++    Assert-Equal $automaticUnknownPreserved.Count 1 "Automatic unknown preservation was not reported."
++    Remove-HerdrSkillFile -SkillsRoot $script:TestAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Remove
++    Assert-True (-not (Test-Path -LiteralPath $unknownAgentSkill)) "Explicit skill removal preserved an unknown SKILL.md."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Explicit skill removal deleted a foreign sibling."
++
 +    $emptySkillsRoot = Join-Path $tempRoot "empty-skill-root\skills"
-+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $emptySkillsRoot
-+    Remove-HerdrSkillFile -SkillsRoot $emptySkillsRoot
++    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $emptySkillsRoot -KnownHashes $parsedTestSkillHashes
++    Remove-HerdrSkillFile -SkillsRoot $emptySkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $emptySkillsRoot "herdr"))) "Uninstall retained an empty Herdr skill directory."
 +
 +    $savedClaudeConfig = $env:CLAUDE_CONFIG_DIR
@@ -58135,7 +58472,7 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    $ancestorJunction = Join-Path $junctionHome ".agents"
 +    New-Item -ItemType Junction -Path $ancestorJunction -Target $externalAgents | Out-Null
 +    try {
-+        Remove-HerdrSkillFile -SkillsRoot (Join-Path $ancestorJunction "skills")
++        [void](Remove-HerdrSkillFile -SkillsRoot (Join-Path $ancestorJunction "skills") -KnownHashes $parsedTestSkillHashes -Disposition Auto)
 +        Assert-True (Test-Path -LiteralPath $externalSkill) "Agent skill cleanup traversed an ancestor junction."
 +    } finally {
 +        if (Test-Path -LiteralPath $ancestorJunction) {
@@ -58222,7 +58559,8 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
 +    Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 +
-+    # Every managed update overwrites SKILL.md while preserving foreign siblings.
++    # Managed updates replace known historical SKILL.md copies while preserving
++    # customized copies and foreign siblings.
 +    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
 +    New-Item -ItemType Directory -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources") | Out-Null
 +    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt") -Text "old-resource"
@@ -58257,8 +58595,9 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
 +    Write-TestFile -Path $installedSkill -Text "modified-after-update"
 +    $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
-+    Assert-Equal $repairedSkill.Status "Pending" "Skill repair changed the busy managed update outcome."
-+    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed reinstall did not overwrite a modified prior skill."
++    Assert-Equal $repairedSkill.Status "Pending" "Customized-skill preservation changed the busy managed update outcome."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "modified-after-update" "Managed reinstall overwrote a customized skill."
++    Assert-Equal @($repairedSkill.PreservedSkillPaths).Count 1 "Managed reinstall did not report its preserved customized skill."
 +    if (-not $leaseProcess.WaitForExit(15000)) { throw "Lease holder did not exit within 15 seconds." }
 +    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
@@ -58340,18 +58679,21 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    Assert-HerdrManagedRoot -InstallRoot $processRoot
 +    if (-not $busyProcess.WaitForExit(10000)) { throw "Managed process did not exit within 10 seconds." }
 +
-+    # Direct removal deletes SKILL.md even after edits, preserves siblings, and
-+    # leaves no transaction or marker state to recover.
++    # Automatic direct removal preserves unknown SKILL.md content; explicit
++    # removal deletes that exact file while preserving siblings.
 +    $processSkillRoot = Join-Path $processAgentSkillsRoot "herdr"
 +    $processSkill = Join-Path $processSkillRoot "SKILL.md"
 +    Write-TestFile -Path $processSkill -Text "user-edited-skill"
 +    $processSkillSibling = Join-Path $processSkillRoot "user.txt"
 +    Write-TestFile -Path $processSkillSibling -Text "preserve"
-+    Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot
-+    Assert-True (-not (Test-Path -LiteralPath $processSkill)) "Direct removal preserved an edited SKILL.md."
++    $directUnknownPreserved = @(Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto)
++    Assert-True (Test-Path -LiteralPath $processSkill -PathType Leaf) "Automatic direct removal deleted an edited SKILL.md."
++    Assert-Equal $directUnknownPreserved.Count 1 "Automatic direct removal did not report an edited SKILL.md."
++    Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Remove
++    Assert-True (-not (Test-Path -LiteralPath $processSkill)) "Explicit direct removal preserved an edited SKILL.md."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $processSkillSibling) "preserve" "Direct removal deleted a foreign sibling."
 +    Remove-Item -LiteralPath $processSkillSibling -Force
-+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot
++    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes
 +
 +    # An unchanged but temporarily locked owned skill keeps uninstall retryable
 +    # and preserves the install manifest until cleanup can succeed.
@@ -58397,7 +58739,8 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\installer-helper.ps1")) "Retry helper was removed before NSIS cleanup."
 +    Complete-TestNsisCleanup -Root $processRoot
 +
-+    # Extra files and nested directories survive while SKILL.md is removed.
++    # Explicit removal deletes an unknown SKILL.md while preserving extra files
++    # and nested directories.
 +    $extraTreeRoot = Join-Path $tempRoot "extra-tree-install"
 +    $extraTreeSkillsRoot = Join-Path $tempRoot "extra-tree-agent-skills"
 +    [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot)
@@ -58405,7 +58748,8 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +    $extraTreeSkill = Join-Path $extraTreeSkillRoot "SKILL.md"
 +    Write-TestFile -Path (Join-Path $extraTreeSkillRoot "user.txt") -Text "preserve-file"
 +    Write-TestFile -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt") -Text "preserve-nested"
-+    Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -ProcessProvider { @() }
++    Write-TestFile -Path $extraTreeSkill -Text "customized-extra-tree-skill"
++    Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -SkillDisposition Remove -ProcessProvider { @() }
 +    Assert-HerdrUninstallResidual -InstallRoot $extraTreeRoot
 +    Assert-True (-not (Test-Path -LiteralPath $extraTreeSkill)) "Extra-tree uninstall preserved SKILL.md."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "user.txt")) "preserve-file" "Extra-tree uninstall removed a user file."
@@ -58426,9 +58770,11 @@ index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483
 +        $refusalLease.Dispose()
 +    }
 +    Write-TestFile -Path $installedSkill -Text "user-modified-skill"
-+    Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() }
++    $finalPreservedSkills = @(Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() })
 +    Assert-HerdrUninstallResidual -InstallRoot $installRoot
-+    Assert-True (-not (Test-Path -LiteralPath $installedSkill)) "Uninstall preserved a modified Herdr skill."
++    Assert-Equal $finalPreservedSkills.Count 1 "Automatic uninstall did not report one modified Herdr skill."
++    Assert-True (Test-Path -LiteralPath $installedSkill -PathType Leaf) "Uninstall removed a modified Herdr skill."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "user-modified-skill" "Automatic uninstall changed a modified Herdr skill."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Uninstall removed a foreign skill sibling."
 +    Complete-TestNsisCleanup -Root $installRoot
 +

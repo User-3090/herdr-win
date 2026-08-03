@@ -44,8 +44,10 @@ tests remain the detailed implementation truth.
 - The managed installer copies upstream's canonical Herdr skill to
   `%USERPROFILE%\.agents\skills\herdr\SKILL.md`. When Claude Code is detected,
   it also copies the skill below `CLAUDE_CONFIG_DIR` or
-  `%USERPROFILE%\.claude`. Install/update overwrites only `SKILL.md` and
-  preserves every sibling file and directory.
+  `%USERPROFILE%\.claude`. Install/update creates a missing copy and replaces only
+  a `SKILL.md` whose bytes match a current or historical installer-delivered
+  version. A customized or otherwise unknown copy is preserved and setup reports a
+  visible warning; every sibling file and directory is always preserved.
 - The managed installation has exactly one launcher at `bin\herdr.exe`. It starts
   the selected immutable runtime payload directly; runtime directories never carry
   a second launcher. Setup replaces the launcher immediately when idle or stages a
@@ -66,14 +68,19 @@ tests remain the detailed implementation truth.
   safe launch or setup. Update never terminates active Herdr sessions.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, only its own user `PATH` entry, **Herdr Win** Installed
-  Apps registration, and `SKILL.md` at its managed universal and Claude locations
-  even when that file was edited after installation. Other PATH entries and
-  skill-directory content are preserved, so a previously shadowed upstream/native
-  `herdr` becomes visible to new processes again. An empty `herdr` skill directory
-  is removed. The interactive uninstaller preserves configuration and session data
-  under `%USERPROFILE%\.herdr` by default; users must explicitly select the removal
-  checkbox to delete it. Silent uninstall uses the same preserve-by-default policy
-  and accepts `/REMOVE_SETTINGS` as the explicit deletion choice.
+  Apps registration, and installer-known `SKILL.md` copies at its managed universal
+  and Claude locations. Its single skill-removal checkbox covers both locations and
+  starts selected only when every existing copy is installer-known or absent; any
+  unknown copy leaves it clear. Selecting it explicitly authorizes removal of the
+  exact `SKILL.md` files even when customized. Silent uninstall removes known copies
+  automatically, preserves unknown copies by default, and accepts `/REMOVE_SKILL`
+  as explicit authorization. Other PATH entries and skill-directory content are
+  preserved, so a previously shadowed upstream/native `herdr` becomes visible to
+  new processes again. A `herdr` skill directory is removed only immediately after
+  its authorized `SKILL.md` removal proves it empty. The separate interactive
+  settings checkbox preserves configuration and session data under
+  `%USERPROFILE%\.herdr` by default; silent uninstall accepts `/REMOVE_SETTINGS` as
+  the explicit settings-deletion choice.
 - The executable and setup are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.

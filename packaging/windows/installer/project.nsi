@@ -11,6 +11,9 @@
 !ifndef ARG_SKILL_MD
   !error "ARG_SKILL_MD is required"
 !endif
+!ifndef ARG_SKILL_HASH_MANIFEST
+  !error "ARG_SKILL_HASH_MANIFEST is required"
+!endif
 !ifndef ARG_ARTWORK_DIR
   !error "ARG_ARTWORK_DIR is required"
 !endif
@@ -103,6 +106,8 @@ Var ResidualFindHandle
 Var ResidualFindName
 Var SettingsDisposition
 Var SettingsCheckbox
+Var SkillDisposition
+Var SkillCheckbox
 Var UpstreamLink
 
 !define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
@@ -141,7 +146,8 @@ UninstPage custom un.SettingsPage un.SettingsPageLeave
 
 LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_DISTRIBUTIONNAME} data"
 LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
-LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
+LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall always removes the managed program, user PATH entry, and Windows Installed Apps registration. Unmodified skill copies are selected for removal; customized copies are kept unless you select skill removal. Other files in those skill folders are never removed. Settings and session data are also kept unless selected."
+LangString AppSkillCheckbox ${LANG_ENGLISH} "Remove installed ${INFO_PRODUCTNAME} skill copies, including customized SKILL.md files"
 LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
 LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 
@@ -300,21 +306,46 @@ FunctionEnd
 Function un.onInit
   SetShellVarContext current
   StrCpy $SettingsDisposition "Keep"
+  StrCpy $SkillDisposition "Auto"
   ${GetParameters} $0
   ClearErrors
   ${GetOptions} "$0" "/REMOVE_SETTINGS" $1
   ${IfNot} ${Errors}
     StrCpy $SettingsDisposition "Remove"
   ${EndIf}
+  ClearErrors
+  ${GetOptions} "$0" "/REMOVE_SKILL" $1
+  ${IfNot} ${Errors}
+    StrCpy $SkillDisposition "Remove"
+  ${EndIf}
   Call un.SetPowerShellPath
   IfFileExists "$PowerShellPath" un_powershell_ok
   Push "Windows PowerShell is required to uninstall ${INFO_DISTRIBUTIONNAME}."
   Call un.FailUninstall
 un_powershell_ok:
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  ClearErrors
+  File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
+  IfErrors 0 un_skill_manifest_ready
+  Push "The managed skill ownership manifest could not be unpacked; uninstall was preserved."
+  Call un.FailUninstall
+un_skill_manifest_ready:
 FunctionEnd
 
 Function un.SettingsPage
   IfSilent settings_page_done 0
+  ${If} $SkillDisposition == "Auto"
+    StrCpy $SkillDisposition "Keep"
+    IfFileExists "$INSTDIR\state\installer-helper.ps1" 0 skill_default_done
+    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
+    Pop $HelperExitCode
+    Pop $HelperOutput
+    StrCmp $HelperExitCode "0" 0 skill_default_done
+    StrCmp $HelperOutput "Remove" 0 skill_default_done
+    StrCpy $SkillDisposition "Remove"
+skill_default_done:
+  ${EndIf}
   !insertmacro MUI_HEADER_TEXT "$(AppSettingsPageTitle)" "$(AppSettingsPageSubtitle)"
   nsDialogs::Create 1018
   Pop $0
@@ -322,9 +353,14 @@ Function un.SettingsPage
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 72u "$(AppSettingsPageText)"
+  ${NSD_CreateLabel} 0 0 100% 66u "$(AppSettingsPageText)"
   Pop $0
-  ${NSD_CreateCheckbox} 0 82u 100% 14u "$(AppSettingsCheckbox)"
+  ${NSD_CreateCheckbox} 0 70u 100% 18u "$(AppSkillCheckbox)"
+  Pop $SkillCheckbox
+  ${If} $SkillDisposition == "Remove"
+    ${NSD_Check} $SkillCheckbox
+  ${EndIf}
+  ${NSD_CreateCheckbox} 0 92u 100% 14u "$(AppSettingsCheckbox)"
   Pop $SettingsCheckbox
   ${If} $SettingsDisposition == "Remove"
     ${NSD_Check} $SettingsCheckbox
@@ -339,6 +375,12 @@ Function un.SettingsPageLeave
     Goto settings_page_leave_done
   ${EndIf}
 
+  ${NSD_GetState} $SkillCheckbox $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $SkillDisposition "Remove"
+  ${Else}
+    StrCpy $SkillDisposition "Keep"
+  ${EndIf}
   ${NSD_GetState} $SettingsCheckbox $0
   ${If} $0 == ${BST_CHECKED}
     StrCpy $SettingsDisposition "Remove"
@@ -449,6 +491,7 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
   SetOutPath "$PLUGINSDIR\skill"
   File /oname=SKILL.md "${ARG_SKILL_MD}"
+  File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
   SetOutPath "$PLUGINSDIR"
   WriteUninstaller "$PLUGINSDIR\uninstall.exe"
   IfErrors 0 installer_inputs_ready
@@ -457,7 +500,7 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
 
 installer_inputs_ready:
   DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -SkillHashManifestPath "$PLUGINSDIR\skill\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete
@@ -491,7 +534,7 @@ un_residual_pending:
   Call un.FailUninstall
 
 un_helper_ready:
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" un_helper_complete

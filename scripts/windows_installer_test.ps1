@@ -113,6 +113,7 @@ function Invoke-TestInstall {
         [string]$DisplayVersion,
         [string]$NumericVersion,
         [string]$SkillSource = $script:TestSkillSource,
+        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
         [string]$ClaudeSkillsRoot,
         [int]$LockTimeoutMilliseconds = 3000
@@ -125,6 +126,7 @@ function Invoke-TestInstall {
             -UninstallerPath $Uninstaller `
             -HelperSourcePath $helperPath `
             -SkillSourcePath $SkillSource `
+            -SkillHashManifestPath $SkillHashManifestPath `
             -AgentSkillsRoot $AgentSkillsRoot `
             -ClaudeSkillsRoot $ClaudeSkillsRoot `
             -BuildId $BuildId `
@@ -139,14 +141,19 @@ function Invoke-TestUninstall {
         [string]$Root,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
         [string[]]$ClaudeSkillsRoots = @(),
+        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
+        [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
         [scriptblock]$ProcessProvider = { @() },
         [int]$LockTimeoutMilliseconds = 3000
     )
+    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
     Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
         Invoke-HerdrUninstallLayout `
             -InstallRoot $Root `
             -AgentSkillsRoot $AgentSkillsRoot `
             -ClaudeSkillsRoots $ClaudeSkillsRoots `
+            -KnownSkillHashes $knownSkillHashes `
+            -SkillDisposition $SkillDisposition `
             -ProcessProvider $ProcessProvider `
             -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     }
@@ -235,6 +242,24 @@ try {
     $script:TestClaudeSkillsRoot = Join-Path $tempRoot ".claude\skills"
     Write-TestFile -Path $script:TestSkillSource -Text "---`nname: herdr`ndescription: first`n---`n`n# Herdr one`n"
     Write-TestFile -Path $skillSource2 -Text "---`nname: herdr`ndescription: second`n---`n`n# Herdr two`n"
+    $script:TestSkillHashManifest = Join-Path $tempRoot "managed-skill-hashes.txt"
+    $testSkillHashes = @(
+        (Get-HerdrSha256 -Path $script:TestSkillSource),
+        (Get-HerdrSha256 -Path $skillSource2)
+    ) | Sort-Object
+    Write-TestFile -Path $script:TestSkillHashManifest -Text ("herdr-managed-skill-hashes-v1`n" + ($testSkillHashes -join "`n") + "`n")
+    $parsedTestSkillHashes = @(Read-HerdrManagedSkillHashes -Path $script:TestSkillHashManifest -CurrentSkillPath $script:TestSkillSource)
+    Assert-Equal $parsedTestSkillHashes.Count 2 "Managed skill hash manifest did not retain both known versions."
+    $unsortedSkillHashManifest = Join-Path $tempRoot "unsorted-managed-skill-hashes.txt"
+    Write-TestFile -Path $unsortedSkillHashManifest -Text ("herdr-managed-skill-hashes-v1`n" + (@($testSkillHashes[1], $testSkillHashes[0]) -join "`n") + "`n")
+    Assert-Throws {
+        Read-HerdrManagedSkillHashes -Path $unsortedSkillHashManifest
+    } "unique and sorted" "Unsorted managed skill hashes were accepted."
+    $missingCurrentSkillHashManifest = Join-Path $tempRoot "missing-current-managed-skill-hashes.txt"
+    Write-TestFile -Path $missingCurrentSkillHashManifest -Text "herdr-managed-skill-hashes-v1`n$('0' * 64)`n"
+    Assert-Throws {
+        Read-HerdrManagedSkillHashes -Path $missingCurrentSkillHashManifest -CurrentSkillPath $script:TestSkillSource
+    } "current Herdr agent skill hash is absent" "A manifest without the current skill payload was accepted."
     # A persistent sibling lifecycle lock protects a live transaction from a
     # second real PowerShell process before any recovery/classification runs.
     $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
@@ -319,28 +344,61 @@ try {
         }
     }
 
-    # Skill install/update overwrites only SKILL.md in universal and Claude
-    # locations. Uninstall always removes that file and preserves all siblings.
+    # Skill install/update changes only known SKILL.md versions. Unknown copies
+    # survive with a warning, while foreign siblings always remain untouched.
     $agentForeign = Join-Path $script:TestAgentSkillsRoot "herdr\user.txt"
     $claudeForeign = Join-Path $script:TestClaudeSkillsRoot "herdr\resources\nested.txt"
     Write-TestFile -Path $agentForeign -Text "preserve-agent"
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "old-agent-skill"
     Write-TestFile -Path $claudeForeign -Text "preserve-claude"
-    Install-HerdrSkillCopies -SourcePath $script:TestSkillSource -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoot $script:TestClaudeSkillsRoot
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Universal skill copy differs from its source."
+    $preservedUnknownInstall = @(
+        Install-HerdrSkillCopies `
+            -SourcePath $script:TestSkillSource `
+            -AgentSkillsRoot $script:TestAgentSkillsRoot `
+            -ClaudeSkillsRoot $script:TestClaudeSkillsRoot `
+            -KnownHashes $parsedTestSkillHashes
+    )
+    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) "old-agent-skill" "Unknown universal SKILL.md was overwritten."
+    Assert-Equal $preservedUnknownInstall.Count 1 "Unknown universal SKILL.md did not produce one preservation warning."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $script:TestSkillSource) "Claude skill copy differs from its source."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill install removed a foreign sibling."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill install removed a foreign sibling."
-    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md") -Text "edited-agent-skill"
-    Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved an edited universal SKILL.md."
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md"))) "Uninstall preserved Claude SKILL.md."
+    Assert-Equal (Get-HerdrSkillRemovalDefault -KnownHashes $parsedTestSkillHashes -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)) "Keep" "Mixed skill state did not keep interactive removal unchecked."
+
+    [IO.File]::Copy($script:TestSkillSource, (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"), $true)
+    Assert-Equal (Get-HerdrSkillRemovalDefault -KnownHashes $parsedTestSkillHashes -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot)) "Remove" "Known-or-absent skill state did not select interactive removal."
+    $knownUpdatePreserved = @(
+        Install-HerdrSkillCopies `
+            -SourcePath $skillSource2 `
+            -AgentSkillsRoot $script:TestAgentSkillsRoot `
+            -ClaudeSkillsRoot $script:TestClaudeSkillsRoot `
+            -KnownHashes $parsedTestSkillHashes
+    )
+    Assert-Equal $knownUpdatePreserved.Count 0 "Known skill update reported a customized copy."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $skillSource2) "Known universal SKILL.md was not updated."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md")) (Get-HerdrSha256 -Path $skillSource2) "Known Claude SKILL.md was not updated."
+
+    $keptByChoice = @(Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot) -KnownHashes $parsedTestSkillHashes -Disposition Keep)
+    Assert-Equal $keptByChoice.Count 2 "Interactive keep did not preserve both skill copies."
+    $automaticRemovalPreserved = @(Remove-HerdrSkillCopies -AgentSkillsRoot $script:TestAgentSkillsRoot -ClaudeSkillsRoots @($script:TestClaudeSkillsRoot) -KnownHashes $parsedTestSkillHashes -Disposition Auto)
+    Assert-Equal $automaticRemovalPreserved.Count 0 "Automatic uninstall preserved a known SKILL.md."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"))) "Automatic uninstall retained a known universal SKILL.md."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:TestClaudeSkillsRoot "herdr\SKILL.md"))) "Automatic uninstall retained a known Claude SKILL.md."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Universal skill uninstall removed a foreign sibling."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $claudeForeign) "preserve-claude" "Claude skill uninstall removed a foreign sibling."
 
+    $unknownAgentSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
+    Write-TestFile -Path $unknownAgentSkill -Text "edited-agent-skill"
+    $automaticUnknownPreserved = @(Remove-HerdrSkillFile -SkillsRoot $script:TestAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto)
+    Assert-True (Test-Path -LiteralPath $unknownAgentSkill -PathType Leaf) "Automatic uninstall removed an unknown SKILL.md."
+    Assert-Equal $automaticUnknownPreserved.Count 1 "Automatic unknown preservation was not reported."
+    Remove-HerdrSkillFile -SkillsRoot $script:TestAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Remove
+    Assert-True (-not (Test-Path -LiteralPath $unknownAgentSkill)) "Explicit skill removal preserved an unknown SKILL.md."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Explicit skill removal deleted a foreign sibling."
+
     $emptySkillsRoot = Join-Path $tempRoot "empty-skill-root\skills"
-    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $emptySkillsRoot
-    Remove-HerdrSkillFile -SkillsRoot $emptySkillsRoot
+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $emptySkillsRoot -KnownHashes $parsedTestSkillHashes
+    Remove-HerdrSkillFile -SkillsRoot $emptySkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $emptySkillsRoot "herdr"))) "Uninstall retained an empty Herdr skill directory."
 
     $savedClaudeConfig = $env:CLAUDE_CONFIG_DIR
@@ -370,7 +428,7 @@ try {
     $ancestorJunction = Join-Path $junctionHome ".agents"
     New-Item -ItemType Junction -Path $ancestorJunction -Target $externalAgents | Out-Null
     try {
-        Remove-HerdrSkillFile -SkillsRoot (Join-Path $ancestorJunction "skills")
+        [void](Remove-HerdrSkillFile -SkillsRoot (Join-Path $ancestorJunction "skills") -KnownHashes $parsedTestSkillHashes -Disposition Auto)
         Assert-True (Test-Path -LiteralPath $externalSkill) "Agent skill cleanup traversed an ancestor junction."
     } finally {
         if (Test-Path -LiteralPath $ancestorJunction) {
@@ -457,7 +515,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
     Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 
-    # Every managed update overwrites SKILL.md while preserving foreign siblings.
+    # Managed updates replace known historical SKILL.md copies while preserving
+    # customized copies and foreign siblings.
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
     New-Item -ItemType Directory -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources") | Out-Null
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt") -Text "old-resource"
@@ -492,8 +551,9 @@ try {
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
     Write-TestFile -Path $installedSkill -Text "modified-after-update"
     $repairedSkill = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
-    Assert-Equal $repairedSkill.Status "Pending" "Skill repair changed the busy managed update outcome."
-    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed reinstall did not overwrite a modified prior skill."
+    Assert-Equal $repairedSkill.Status "Pending" "Customized-skill preservation changed the busy managed update outcome."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "modified-after-update" "Managed reinstall overwrote a customized skill."
+    Assert-Equal @($repairedSkill.PreservedSkillPaths).Count 1 "Managed reinstall did not report its preserved customized skill."
     if (-not $leaseProcess.WaitForExit(15000)) { throw "Lease holder did not exit within 15 seconds." }
     $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
@@ -575,18 +635,21 @@ try {
     Assert-HerdrManagedRoot -InstallRoot $processRoot
     if (-not $busyProcess.WaitForExit(10000)) { throw "Managed process did not exit within 10 seconds." }
 
-    # Direct removal deletes SKILL.md even after edits, preserves siblings, and
-    # leaves no transaction or marker state to recover.
+    # Automatic direct removal preserves unknown SKILL.md content; explicit
+    # removal deletes that exact file while preserving siblings.
     $processSkillRoot = Join-Path $processAgentSkillsRoot "herdr"
     $processSkill = Join-Path $processSkillRoot "SKILL.md"
     Write-TestFile -Path $processSkill -Text "user-edited-skill"
     $processSkillSibling = Join-Path $processSkillRoot "user.txt"
     Write-TestFile -Path $processSkillSibling -Text "preserve"
-    Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot
-    Assert-True (-not (Test-Path -LiteralPath $processSkill)) "Direct removal preserved an edited SKILL.md."
+    $directUnknownPreserved = @(Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Auto)
+    Assert-True (Test-Path -LiteralPath $processSkill -PathType Leaf) "Automatic direct removal deleted an edited SKILL.md."
+    Assert-Equal $directUnknownPreserved.Count 1 "Automatic direct removal did not report an edited SKILL.md."
+    Remove-HerdrSkillFile -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes -Disposition Remove
+    Assert-True (-not (Test-Path -LiteralPath $processSkill)) "Explicit direct removal preserved an edited SKILL.md."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $processSkillSibling) "preserve" "Direct removal deleted a foreign sibling."
     Remove-Item -LiteralPath $processSkillSibling -Force
-    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot
+    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes
 
     # An unchanged but temporarily locked owned skill keeps uninstall retryable
     # and preserves the install manifest until cleanup can succeed.
@@ -632,7 +695,8 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\installer-helper.ps1")) "Retry helper was removed before NSIS cleanup."
     Complete-TestNsisCleanup -Root $processRoot
 
-    # Extra files and nested directories survive while SKILL.md is removed.
+    # Explicit removal deletes an unknown SKILL.md while preserving extra files
+    # and nested directories.
     $extraTreeRoot = Join-Path $tempRoot "extra-tree-install"
     $extraTreeSkillsRoot = Join-Path $tempRoot "extra-tree-agent-skills"
     [void](Invoke-TestInstall -Root $extraTreeRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $extraTreeSkillsRoot)
@@ -640,7 +704,8 @@ try {
     $extraTreeSkill = Join-Path $extraTreeSkillRoot "SKILL.md"
     Write-TestFile -Path (Join-Path $extraTreeSkillRoot "user.txt") -Text "preserve-file"
     Write-TestFile -Path (Join-Path $extraTreeSkillRoot "resources\nested.txt") -Text "preserve-nested"
-    Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -ProcessProvider { @() }
+    Write-TestFile -Path $extraTreeSkill -Text "customized-extra-tree-skill"
+    Invoke-TestUninstall -Root $extraTreeRoot -AgentSkillsRoot $extraTreeSkillsRoot -SkillDisposition Remove -ProcessProvider { @() }
     Assert-HerdrUninstallResidual -InstallRoot $extraTreeRoot
     Assert-True (-not (Test-Path -LiteralPath $extraTreeSkill)) "Extra-tree uninstall preserved SKILL.md."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $extraTreeSkillRoot "user.txt")) "preserve-file" "Extra-tree uninstall removed a user file."
@@ -661,9 +726,11 @@ try {
         $refusalLease.Dispose()
     }
     Write-TestFile -Path $installedSkill -Text "user-modified-skill"
-    Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() }
+    $finalPreservedSkills = @(Invoke-TestUninstall -Root $installRoot -ProcessProvider { @() })
     Assert-HerdrUninstallResidual -InstallRoot $installRoot
-    Assert-True (-not (Test-Path -LiteralPath $installedSkill)) "Uninstall preserved a modified Herdr skill."
+    Assert-Equal $finalPreservedSkills.Count 1 "Automatic uninstall did not report one modified Herdr skill."
+    Assert-True (Test-Path -LiteralPath $installedSkill -PathType Leaf) "Uninstall removed a modified Herdr skill."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $installedSkill) "user-modified-skill" "Automatic uninstall changed a modified Herdr skill."
     Assert-Equal (Read-HerdrStrictUtf8 -Path $agentForeign) "preserve-agent" "Uninstall removed a foreign skill sibling."
     Complete-TestNsisCleanup -Root $installRoot
 

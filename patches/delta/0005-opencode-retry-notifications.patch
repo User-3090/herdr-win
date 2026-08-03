@@ -1,4 +1,4 @@
-From 9c86a407aefa95e3b89102d66252b57a34ab2f5a Mon Sep 17 00:00:00 2001
+From dbad29d9313cbeb83be267c72c27f89761454afd Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 19:41:54 +0200
 Subject: [PATCH 4/4] fix(opencode): correlate retry error lifecycle

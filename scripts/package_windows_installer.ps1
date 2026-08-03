@@ -336,6 +336,7 @@ $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
 $helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
 $skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
+$skillHashManifest = Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"
 $artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
 $artworkFiles = @(
     "installer-welcome-finish-164x314.bmp",
@@ -356,7 +357,7 @@ if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
 if (Test-Path -LiteralPath $OutputPath) {
     throw "Refusing to overwrite an existing installer output: $OutputPath"
 }
-$requiredSources = @($packager, $installerScript, $helperScript, $skillSource)
+$requiredSources = @($packager, $installerScript, $helperScript, $skillSource, $skillHashManifest)
 foreach ($artworkFile in $artworkFiles) {
     $requiredSources += Join-Path $artworkDir $artworkFile
 }
@@ -374,6 +375,27 @@ if ($skillValidationText.Contains("`r") -or
     -not $skillValidationText.StartsWith("---`n", [StringComparison]::Ordinal) -or
     $skillValidationText -cnotmatch '(?m)^name: herdr$') {
     throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
+}
+$skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
+if ($skillHashManifestText.Contains("`r") -or
+    -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
+    throw "Managed skill hash manifest must use LF line endings and end with a newline."
+}
+$skillHashManifestLines = @($skillHashManifestText.Substring(0, $skillHashManifestText.Length - 1) -split "`n")
+if ($skillHashManifestLines.Count -lt 2 -or $skillHashManifestLines[0] -cne "herdr-managed-skill-hashes-v1") {
+    throw "Managed skill hash manifest has an invalid header."
+}
+$managedSkillHashes = @($skillHashManifestLines[1..($skillHashManifestLines.Count - 1)])
+$previousManagedSkillHash = $null
+foreach ($managedSkillHash in $managedSkillHashes) {
+    if ($managedSkillHash -cnotmatch '^[0-9a-f]{64}$' -or
+        ($null -ne $previousManagedSkillHash -and [StringComparer]::Ordinal.Compare($previousManagedSkillHash, $managedSkillHash) -ge 0)) {
+        throw "Managed skill hashes must be lowercase SHA-256 values in unique sorted order."
+    }
+    $previousManagedSkillHash = $managedSkillHash
+}
+if ($managedSkillHashes -cnotcontains (Get-Sha256 -Path $skillSource)) {
+    throw "Current skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
 }
 Assert-X64Pe -Path $LauncherExe
 $payloadExe = Join-Path $StageDir "herdr.exe"
@@ -430,6 +452,7 @@ try {
         "/DARG_LAUNCHER_EXE=$LauncherExe",
         "/DARG_HELPER_PS1=$helperScript",
         "/DARG_SKILL_MD=$skillSource",
+        "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
         "/DARG_ARTWORK_DIR=$artworkDir",
         "/DINFO_PRODUCTNAME=$ProductName",
         "/DINFO_DISTRIBUTIONNAME=$DistributionName",

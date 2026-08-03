@@ -211,9 +211,11 @@ class DeltaPatchTests(unittest.TestCase):
             readme,
         )
         self.assertIn("configured or default `.claude\\skills\\herdr\\SKILL.md`", readme)
-        self.assertIn("overwrite only `SKILL.md`", readme)
-        self.assertIn("even if that file was edited", readme)
-        self.assertIn("removed only when empty", readme)
+        self.assertIn("known from the current or a historical installer", readme)
+        self.assertIn("A customized copy stays in place", readme)
+        self.assertIn("One skill-removal checkbox", readme)
+        self.assertIn("`/REMOVE_SKILL`", readme)
+        self.assertIn("only after its `SKILL.md` was removed", readme)
         workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         self.assertFalse(

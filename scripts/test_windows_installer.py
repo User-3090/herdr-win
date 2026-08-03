@@ -19,6 +19,7 @@ MANAGED_INSTALL = PROJECT_ROOT / "src/managed_install.rs"
 WINDOWS_PLATFORM = PROJECT_ROOT / "src/platform/windows.rs"
 UPDATE = PROJECT_ROOT / "src/update.rs"
 SKILL = PROJECT_ROOT / "skills" / "herdr" / "SKILL.md"
+MANAGED_SKILL_HASHES = PROJECT_ROOT / "packaging/windows/managed-skill-hashes.txt"
 ARTWORK = NSI.parent / "artwork"
 ARTWORK_SOURCE = ARTWORK / "installer-welcome-finish-source.png"
 ARTWORK_DERIVATIVES = {
@@ -59,10 +60,22 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             POWERSHELL_TEST,
             FAULT_TEST,
             SKILL,
+            MANAGED_SKILL_HASHES,
         ):
             self.assertTrue(path.is_file(), path)
         justfile = (PROJECT_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("scripts.test_windows_installer", justfile)
+
+    def test_managed_skill_hash_manifest_is_exact_and_contains_current_payload(
+        self,
+    ) -> None:
+        lines = MANAGED_SKILL_HASHES.read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertEqual(lines[0], "herdr-managed-skill-hashes-v1")
+        hashes = lines[1:]
+        self.assertEqual(hashes, sorted(set(hashes)))
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes))
+        self.assertIn(hashlib.sha256(SKILL.read_bytes()).hexdigest(), hashes)
 
     def test_helper_owns_exact_markers_and_managed_layout(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -110,6 +123,9 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("Install-HerdrSkillCopies", helper)
         self.assertIn("Remove-HerdrSkillFile", helper)
         self.assertIn("Remove-HerdrSkillCopies", helper)
+        self.assertIn("Read-HerdrManagedSkillHashes", helper)
+        self.assertIn("Get-HerdrSkillFileState", helper)
+        self.assertIn("Get-HerdrSkillRemovalDefault", helper)
         install_skill = helper[
             helper.index("function Install-HerdrSkillFile {") : helper.index(
                 "function Assert-HerdrSkillTarget {"
@@ -122,8 +138,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         ]
         self.assertIn("[IO.File]::Copy($SourcePath, $destination, $true)", install_skill)
         self.assertIn("Assert-HerdrRegularFile -Path $destination", install_skill)
-        self.assertIn("Remove-Item -LiteralPath $skill -Force", remove_skill)
+        self.assertIn("Remove-Item -LiteralPath $state.Path -Force", remove_skill)
         self.assertIn("Get-ChildItem -LiteralPath $target -Force", remove_skill)
+        self.assertIn('$KnownHashes -cnotcontains (Get-HerdrSha256 -Path $destination)', install_skill)
+        self.assertIn('$Disposition -cne "Remove"', remove_skill)
         self.assertNotIn("-Recurse", install_skill + remove_skill)
         for removed in (
             "AgentSkillTransaction",
@@ -140,22 +158,35 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             3,
         )
         self.assertIn("ARG_SKILL_MD", nsi)
+        self.assertIn("ARG_SKILL_HASH_MANIFEST", nsi)
         self.assertIn('/oname=SKILL.md "${ARG_SKILL_MD}"', nsi)
+        self.assertIn(
+            '/oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"', nsi
+        )
         self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
+        self.assertIn(
+            '-SkillHashManifestPath "$PLUGINSDIR\\skill\\managed-skill-hashes.txt"',
+            nsi,
+        )
         self.assertIn(
             '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
             packager,
         )
         self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
+        self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
         self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
-        self.assertIn("Universal skill install removed a foreign sibling", lifecycle)
+        self.assertIn("Unknown universal SKILL.md was overwritten", lifecycle)
+        self.assertIn("Known universal SKILL.md was not updated", lifecycle)
+        self.assertIn("Mixed skill state did not keep interactive removal unchecked", lifecycle)
+        self.assertIn("Known-or-absent skill state did not select interactive removal", lifecycle)
         self.assertIn("Claude skill install removed a foreign sibling", lifecycle)
-        self.assertIn("Uninstall preserved an edited universal SKILL.md", lifecycle)
+        self.assertIn("Automatic uninstall removed an unknown SKILL.md", lifecycle)
+        self.assertIn("Explicit skill removal preserved an unknown SKILL.md", lifecycle)
         self.assertIn("Uninstall retained an empty Herdr skill directory", lifecycle)
         self.assertIn("Claude uninstall did not inspect configured and default roots", lifecycle)
         self.assertIn("Managed update removed a foreign skill sibling", lifecycle)
         self.assertIn("Extra-tree uninstall preserved SKILL.md", lifecycle)
-        self.assertIn("Uninstall preserved a modified Herdr skill", lifecycle)
+        self.assertIn("Uninstall removed a modified Herdr skill", lifecycle)
         fault_test = FAULT_TEST.read_text(encoding="utf-8")
         self.assertIn("Assert-TestSkillInstalled", fault_test)
         self.assertIn("retained universal SKILL.md", fault_test)
@@ -236,6 +267,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "ARG_LAUNCHER_EXE",
             "ARG_HELPER_PS1",
             "ARG_SKILL_MD",
+            "ARG_SKILL_HASH_MANIFEST",
             "ARG_ARTWORK_DIR",
             "APP_BUILD_ID",
             "APP_OUTPUT_PATH",
@@ -351,7 +383,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("!insertmacro MUI_UNPAGE_INSTFILES", nsi)
         self.assertNotIn("UninstPage uninstConfirm", nsi)
         self.assertIn(
-            "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies",
+            "Uninstall always removes the managed program, user PATH entry, and Windows Installed Apps registration",
+            nsi,
+        )
+        self.assertIn(
+            "Remove installed ${INFO_PRODUCTNAME} skill copies, including customized SKILL.md files",
             nsi,
         )
         self.assertIn(
@@ -438,12 +474,18 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("Call WaitForUpdaterStartGate", nsi)
         self.assertIn("IntCmp $0 600", nsi)
         self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
+        self.assertIn('StrCpy $SkillDisposition "Auto"', nsi)
         self.assertIn('${GetOptions} "$0" "/REMOVE_SETTINGS" $1', nsi)
+        self.assertIn('${GetOptions} "$0" "/REMOVE_SKILL" $1', nsi)
         self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
         self.assertNotIn("/KEEP_SETTINGS", nsi)
         self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
+        self.assertIn('${NSD_Check} $SkillCheckbox', nsi)
+        self.assertIn("-Action GetSkillRemovalDefault", nsi)
         self.assertIn('-SettingsDisposition "$SettingsDisposition"', nsi)
+        self.assertIn('-SkillDisposition "$SkillDisposition"', nsi)
         self.assertIn('SettingsDisposition = "Keep"', helper)
+        self.assertIn('SkillDisposition = "Auto"', helper)
         self.assertIn('if ($SettingsDisposition -ceq "Remove")', helper)
         self.assertIn("SetErrorLevel 1", nsi)
         self.assertIn("SetErrorLevel 0", nsi)
@@ -548,6 +590,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             packager,
         )
         self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
+        self.assertIn(
+            '$skillHashManifest = Join-Path $projectRoot "packaging\\windows\\managed-skill-hashes.txt"',
+            packager,
+        )
         self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
         self.assertIn('$DistributionName = "Herdr Win"', packager)
         self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)

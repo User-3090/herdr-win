@@ -116,17 +116,21 @@ behavior; code and tests remain the detailed implementation truth.
   before repair, PATH, or ARP mutation. The user removes its existing **Herdr** entry
   before a fresh **Herdr Win** install, so setup never co-owns duplicate package
   registrations.
-- NSIS embeds upstream's canonical `skills/herdr/SKILL.md` and delegates skill
-  filesystem work to the existing PowerShell installation boundary. The helper
-  always copies it to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and also to
-  `CLAUDE_CONFIG_DIR\skills\herdr\SKILL.md` or the default `.claude` equivalent
-  when Claude Code is detected from that upstream-owned configuration shape or
-  `claude` on `PATH`.
-- Skill installation and removal are direct and stateless: install/update
-  overwrites only regular `SKILL.md` files; uninstall removes those files even
-  after edits and removes `herdr` only when empty. Foreign siblings are never
-  recursively deleted. Reparse points and ambiguous file/directory collisions
-  fail closed, without skill transactions, ownership hashes, markers, or locks.
+- `packaging/windows/managed-skill-hashes.txt` is the one append-only ownership
+  manifest for the current and every historically installer-delivered
+  `skills/herdr/SKILL.md` byte hash. The packager validates that the current payload
+  is present; NSIS embeds the payload and the same manifest into setup and uninstall
+  without adding either to the persistent managed-root layout. The existing
+  PowerShell boundary copies a missing skill, replaces a known hash, and preserves
+  an unknown regular file while returning a visible setup warning.
+- Skill inspection is pure. Across the universal root and configured/default Claude
+  roots, only all-known-or-absent state selects the interactive removal checkbox;
+  unknown or ambiguous state leaves it clear. Interactive selection or
+  `/REMOVE_SKILL` authorizes exact unknown `SKILL.md` removal, while silent automatic
+  cleanup removes only known hashes. A skill directory is removed only after an
+  authorized file removal and an empty-directory check. Foreign siblings are never
+  recursively deleted, and reparse points or ambiguous collisions remain preserved
+  without per-install skill markers, transactions, or locks.
 - Future installer work uses the global ordinary-local-application threat model
   unless the user explicitly chooses stronger guarantees. Prefer failing closed
   and preserving benign residue over adding custom recovery/deletion state.

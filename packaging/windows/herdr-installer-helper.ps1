@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Install", "Uninstall", "CompleteMaintenance")]
+    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
     [string]$Action,
 
     [string]$InstallRoot,
@@ -9,12 +9,15 @@ param(
     [string]$UninstallerPath,
     [string]$HelperSourcePath,
     [string]$SkillSourcePath,
+    [string]$SkillHashManifestPath,
     [string]$ProductName = "Herdr",
     [string]$BuildId,
     [string]$DisplayVersion,
     [string]$NumericVersion,
     [ValidateSet("Keep", "Remove")]
     [string]$SettingsDisposition = "Keep",
+    [ValidateSet("Keep", "Auto", "Remove")]
+    [string]$SkillDisposition = "Auto",
 
     [uint32]$ParentProcessId = 0
 )
@@ -38,6 +41,7 @@ $script:LauncherReplacementName = "herdr.exe.new"
 $script:LauncherBuildIdArgument = "--herdr-private-launcher-build-id-v1"
 $script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 $script:InstallManifestHeader = "herdr-install-manifest-v1"
+$script:ManagedSkillHashesHeader = "herdr-managed-skill-hashes-v1"
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 $script:UninstallMarkerText = "herdr-uninstall-v1`n"
 $script:TransactionMarkerName = ".herdr-installer-transaction"
@@ -227,6 +231,41 @@ function Get-HerdrAgentSkillSha256 {
         throw "Herdr agent skill frontmatter must contain exactly one 'name: herdr' entry: $Path"
     }
     return Get-HerdrSha256 -Path $Path
+}
+
+function Read-HerdrManagedSkillHashes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$CurrentSkillPath
+    )
+
+    $text = Read-HerdrStrictUtf8 -Path $Path
+    if ($text.Contains("`r") -or -not $text.EndsWith("`n", [StringComparison]::Ordinal)) {
+        throw "Herdr managed skill hash manifest must use LF line endings and end with a newline: $Path"
+    }
+    $lines = @($text.Substring(0, $text.Length - 1) -split "`n")
+    if ($lines.Count -lt 2 -or $lines[0] -cne $script:ManagedSkillHashesHeader) {
+        throw "Invalid Herdr managed skill hash manifest header: $Path"
+    }
+    $hashes = New-Object System.Collections.Generic.List[string]
+    $previous = $null
+    foreach ($hash in @($lines[1..($lines.Count - 1)])) {
+        if ($hash -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Invalid SHA-256 entry in Herdr managed skill hash manifest: $Path"
+        }
+        if ($null -ne $previous -and [StringComparer]::Ordinal.Compare($previous, $hash) -ge 0) {
+            throw "Herdr managed skill hashes must be unique and sorted: $Path"
+        }
+        $hashes.Add($hash)
+        $previous = $hash
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CurrentSkillPath)) {
+        $currentHash = Get-HerdrAgentSkillSha256 -Path $CurrentSkillPath
+        if ($hashes -cnotcontains $currentHash) {
+            throw "Current Herdr agent skill hash is absent from its managed hash manifest: $CurrentSkillPath"
+        }
+    }
+    return $hashes.ToArray()
 }
 
 function Get-HerdrUserProfileRoot {
@@ -462,13 +501,49 @@ function Remove-HerdrUserSettings {
     }
 }
 
+function Get-HerdrSkillFileState {
+    param(
+        [Parameter(Mandatory = $true)][string]$SkillsRoot,
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes
+    )
+
+    $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
+    $target = Join-Path $SkillsRoot "herdr"
+    $skill = Join-Path $target "SKILL.md"
+    $parent = Split-Path -Parent $SkillsRoot
+    $grandparent = Split-Path -Parent $parent
+    foreach ($component in @($grandparent, $parent, $SkillsRoot, $target)) {
+        if (-not (Test-Path -LiteralPath $component)) {
+            return [PSCustomObject]@{ State = "Absent"; Path = $skill }
+        }
+        if (-not (Test-Path -LiteralPath $component -PathType Container) -or
+            (Test-HerdrReparsePoint -Path $component)) {
+            return [PSCustomObject]@{ State = "Unsafe"; Path = $skill }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $skill)) {
+        return [PSCustomObject]@{ State = "Absent"; Path = $skill }
+    }
+    if (-not (Test-Path -LiteralPath $skill -PathType Leaf) -or
+        (Test-HerdrReparsePoint -Path $skill)) {
+        return [PSCustomObject]@{ State = "Unsafe"; Path = $skill }
+    }
+    $hash = Get-HerdrSha256 -Path $skill
+    $state = if ($KnownHashes -ccontains $hash) { "Known" } else { "Unknown" }
+    return [PSCustomObject]@{ State = $state; Path = $skill; Sha256 = $hash }
+}
+
 function Install-HerdrSkillFile {
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
-        [Parameter(Mandatory = $true)][string]$SkillsRoot
+        [Parameter(Mandatory = $true)][string]$SkillsRoot,
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes
     )
 
     $expectedHash = Get-HerdrAgentSkillSha256 -Path $SourcePath
+    if ($KnownHashes -cnotcontains $expectedHash) {
+        throw "Embedded Herdr agent skill is absent from its managed hash manifest: $SourcePath"
+    }
     Assert-HerdrSkillTarget -SkillsRoot $SkillsRoot
     $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
     $target = Join-Path $SkillsRoot "herdr"
@@ -480,11 +555,15 @@ function Install-HerdrSkillFile {
     $destination = Join-Path $target "SKILL.md"
     if (Test-Path -LiteralPath $destination) {
         Assert-HerdrRegularFile -Path $destination
+        if ($KnownHashes -cnotcontains (Get-HerdrSha256 -Path $destination)) {
+            return $destination
+        }
     }
     [IO.File]::Copy($SourcePath, $destination, $true)
     if ((Get-HerdrAgentSkillSha256 -Path $destination) -cne $expectedHash) {
         throw "Installed Herdr SKILL.md differs from its embedded source: $destination"
     }
+    return $null
 }
 
 function Assert-HerdrSkillTarget {
@@ -505,61 +584,90 @@ function Install-HerdrSkillCopies {
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
         [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
-        [string]$ClaudeSkillsRoot
+        [string]$ClaudeSkillsRoot,
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes
     )
 
-    Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $AgentSkillsRoot
+    $preserved = New-Object System.Collections.Generic.List[string]
+    $agentResult = Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $AgentSkillsRoot -KnownHashes $KnownHashes
+    if (-not [string]::IsNullOrWhiteSpace($agentResult)) {
+        $preserved.Add($agentResult)
+    }
     if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
         -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $ClaudeSkillsRoot
+        $claudeResult = Install-HerdrSkillFile -SourcePath $SourcePath -SkillsRoot $ClaudeSkillsRoot -KnownHashes $KnownHashes
+        if (-not [string]::IsNullOrWhiteSpace($claudeResult)) {
+            $preserved.Add($claudeResult)
+        }
     }
+    return $preserved.ToArray()
 }
 
 function Remove-HerdrSkillFile {
-    param([Parameter(Mandatory = $true)][string]$SkillsRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$SkillsRoot,
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
+        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$Disposition
+    )
 
-    if (-not (Test-Path -LiteralPath $SkillsRoot -PathType Container)) {
-        return
+    $state = Get-HerdrSkillFileState -SkillsRoot $SkillsRoot -KnownHashes $KnownHashes
+    if ($state.State -ceq "Absent") {
+        return $null
     }
-    $SkillsRoot = Get-HerdrFullPath -Path $SkillsRoot
-    $parent = Split-Path -Parent $SkillsRoot
-    $grandparent = Split-Path -Parent $parent
-    foreach ($component in @($grandparent, $parent, $SkillsRoot)) {
-        if (-not (Test-Path -LiteralPath $component -PathType Container) -or
-            (Test-HerdrReparsePoint -Path $component)) {
-            return
-        }
+    if ($state.State -ceq "Unsafe" -or $Disposition -ceq "Keep") {
+        return $state.Path
     }
-    $target = Join-Path $SkillsRoot "herdr"
-    if (-not (Test-Path -LiteralPath $target -PathType Container) -or
-        (Test-HerdrReparsePoint -Path $target)) {
-        return
+    Assert-HerdrRegularFile -Path $state.Path
+    $isKnown = $KnownHashes -ccontains (Get-HerdrSha256 -Path $state.Path)
+    if (-not $isKnown -and $Disposition -cne "Remove") {
+        return $state.Path
     }
-    $skill = Join-Path $target "SKILL.md"
-    if (Test-Path -LiteralPath $skill) {
-        if (-not (Test-Path -LiteralPath $skill -PathType Leaf) -or
-            (Test-HerdrReparsePoint -Path $skill)) {
-            return
-        }
-        Remove-Item -LiteralPath $skill -Force
-    }
+    Remove-Item -LiteralPath $state.Path -Force
+    $target = Split-Path -Parent $state.Path
     if (@(Get-ChildItem -LiteralPath $target -Force).Count -eq 0) {
         Remove-Item -LiteralPath $target -Force
     }
+    return $null
 }
 
 function Remove-HerdrSkillCopies {
     param(
         [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
-        [string[]]$ClaudeSkillsRoots = @()
+        [string[]]$ClaudeSkillsRoots = @(),
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
+        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$Disposition
+    )
+
+    $preserved = New-Object System.Collections.Generic.List[string]
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($root in @($AgentSkillsRoot) + @($ClaudeSkillsRoots)) {
+        if (-not [string]::IsNullOrWhiteSpace($root) -and $seen.Add([IO.Path]::GetFullPath($root))) {
+            $result = Remove-HerdrSkillFile -SkillsRoot $root -KnownHashes $KnownHashes -Disposition $Disposition
+            if (-not [string]::IsNullOrWhiteSpace($result)) {
+                $preserved.Add($result)
+            }
+        }
+    }
+    return $preserved.ToArray()
+}
+
+function Get-HerdrSkillRemovalDefault {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
+        [string]$AgentSkillsRoot = (Get-HerdrAgentSkillsRoot),
+        [string[]]$ClaudeSkillsRoots = @(Get-HerdrClaudeSkillsRootsForRemoval)
     )
 
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($root in @($AgentSkillsRoot) + @($ClaudeSkillsRoots)) {
         if (-not [string]::IsNullOrWhiteSpace($root) -and $seen.Add([IO.Path]::GetFullPath($root))) {
-            Remove-HerdrSkillFile -SkillsRoot $root
+            $state = Get-HerdrSkillFileState -SkillsRoot $root -KnownHashes $KnownHashes
+            if ($state.State -cne "Absent" -and $state.State -cne "Known") {
+                return "Keep"
+            }
         }
     }
+    return "Remove"
 }
 
 function Publish-HerdrStagedFile {
@@ -2025,6 +2133,7 @@ function Install-HerdrLayout {
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
         [Parameter(Mandatory = $true)][string]$SkillSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
         [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
         [string]$ClaudeSkillsRoot,
         [Parameter(Mandatory = $true)][string]$BuildId,
@@ -2044,7 +2153,7 @@ function Install-HerdrLayout {
     }
     Assert-HerdrRegularFile -Path $UninstallerPath
     Assert-HerdrRegularFile -Path $HelperSourcePath
-    [void](Get-HerdrAgentSkillSha256 -Path $SkillSourcePath)
+    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath -CurrentSkillPath $SkillSourcePath)
     Assert-HerdrSkillTarget -SkillsRoot $AgentSkillsRoot
     if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
         -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -2101,8 +2210,18 @@ function Install-HerdrLayout {
             }
         }
     }
-    Install-HerdrSkillCopies -SourcePath $SkillSourcePath -AgentSkillsRoot $AgentSkillsRoot -ClaudeSkillsRoot $ClaudeSkillsRoot
-    return $result
+    $preservedSkillPaths = @(
+        Install-HerdrSkillCopies `
+            -SourcePath $SkillSourcePath `
+            -AgentSkillsRoot $AgentSkillsRoot `
+            -ClaudeSkillsRoot $ClaudeSkillsRoot `
+            -KnownHashes $knownSkillHashes
+    )
+    return [PSCustomObject]@{
+        Status = $result.Status
+        BuildId = $result.BuildId
+        PreservedSkillPaths = $preservedSkillPaths
+    }
 }
 
 function Get-HerdrComparablePathEntry {
@@ -2241,6 +2360,7 @@ function Invoke-HerdrInstall {
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
         [Parameter(Mandatory = $true)][string]$SkillSourcePath,
+        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -2259,6 +2379,7 @@ function Invoke-HerdrInstall {
             -UninstallerPath $UninstallerPath `
             -HelperSourcePath $HelperSourcePath `
             -SkillSourcePath $SkillSourcePath `
+            -SkillHashManifestPath $SkillHashManifestPath `
             -AgentSkillsRoot $agentSkillsRoot `
             -ClaudeSkillsRoot $claudeSkillsRoot `
             -BuildId $BuildId `
@@ -2275,6 +2396,8 @@ function Invoke-HerdrUninstallLayout {
         [Parameter(Mandatory = $true)][string]$InstallRoot,
         [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
         [string[]]$ClaudeSkillsRoots = @(),
+        [Parameter(Mandatory = $true)][string[]]$KnownSkillHashes,
+        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition,
         [int]$LockTimeoutMilliseconds = 30000,
         [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
     )
@@ -2315,7 +2438,13 @@ function Invoke-HerdrUninstallLayout {
             Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
         }
 
-        Remove-HerdrSkillCopies -AgentSkillsRoot $AgentSkillsRoot -ClaudeSkillsRoots $ClaudeSkillsRoots
+        $preservedSkillPaths = @(
+            Remove-HerdrSkillCopies `
+                -AgentSkillsRoot $AgentSkillsRoot `
+                -ClaudeSkillsRoots $ClaudeSkillsRoots `
+                -KnownHashes $KnownSkillHashes `
+                -Disposition $SkillDisposition
+        )
         $installManifestPath = Join-Path $stateDir "install.manifest"
 
         $transaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
@@ -2357,28 +2486,37 @@ function Invoke-HerdrUninstallLayout {
         $coordination.Dispose()
     }
     Assert-HerdrUninstallResidual -InstallRoot $InstallRoot
+    return $preservedSkillPaths
 }
 
 function Invoke-HerdrUninstall {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
         [ValidateSet("Keep", "Remove")][string]$SettingsDisposition = "Keep",
+        [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
+        [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
         [string]$UserProfileRoot = $env:USERPROFILE,
         [int]$LifecycleLockTimeoutMilliseconds = 30000
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
-    Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
+    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
+    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
-        Invoke-HerdrUninstallLayout `
-            -InstallRoot $InstallRoot `
-            -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
-            -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval)
+        $preservedSkillPaths = @(
+            Invoke-HerdrUninstallLayout `
+                -InstallRoot $InstallRoot `
+                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
+                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval) `
+                -KnownSkillHashes $knownSkillHashes `
+                -SkillDisposition $SkillDisposition
+        )
         Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
         if ($SettingsDisposition -ceq "Remove") {
             Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
         }
+        return $preservedSkillPaths
     }
 }
 
@@ -2393,6 +2531,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -UninstallerPath $UninstallerPath `
                     -HelperSourcePath $HelperSourcePath `
                     -SkillSourcePath $SkillSourcePath `
+                    -SkillHashManifestPath $SkillHashManifestPath `
                     -BuildId $BuildId `
                     -DisplayVersion $DisplayVersion `
                     -NumericVersion $NumericVersion
@@ -2401,10 +2540,26 @@ if ($MyInvocation.InvocationName -ne '.') {
                 } else {
                     [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): $($result.Status)")
                 }
+                foreach ($path in @($result.PreservedSkillPaths)) {
+                    [Console]::Out.WriteLine("Warning: Existing customized Herdr skill was preserved: $path")
+                }
             }
             "Uninstall" {
-                Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
+                $preservedSkillPaths = @(
+                    Invoke-HerdrUninstall `
+                        -InstallRoot $InstallRoot `
+                        -SettingsDisposition $SettingsDisposition `
+                        -SkillHashManifestPath $SkillHashManifestPath `
+                        -SkillDisposition $SkillDisposition
+                )
                 [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
+                foreach ($path in $preservedSkillPaths) {
+                    [Console]::Out.WriteLine("Preserved Herdr skill: $path")
+                }
+            }
+            "GetSkillRemovalDefault" {
+                $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
+                [Console]::Out.Write((Get-HerdrSkillRemovalDefault -KnownHashes $knownSkillHashes))
             }
             "CompleteMaintenance" {
                 $result = Invoke-HerdrCompleteMaintenance `
@@ -2413,7 +2568,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 [Console]::Out.WriteLine("$script:ProductName maintenance: $($result.Status)")
             }
             default {
-                throw "Action must be Install, Uninstall, or CompleteMaintenance."
+                throw "Action must be Install, Uninstall, GetSkillRemovalDefault, or CompleteMaintenance."
             }
         }
         exit 0

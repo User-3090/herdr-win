@@ -261,10 +261,10 @@ try {
             Remove-Item -LiteralPath $installer -Force
         }
         New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
-        [IO.File]::WriteAllText($skillPath, "previous skill")
+        [IO.File]::Copy($skillSource, $skillPath, $true)
         [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
         New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
-        [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
+        [IO.File]::Copy($skillSource, $claudeSkillPath, $true)
         [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
 
         & $packager `
@@ -339,10 +339,10 @@ try {
         Remove-Item -LiteralPath $modifiedInstaller -Force
     }
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "previous-resources") -Force | Out-Null
-    [IO.File]::WriteAllText($skillPath, "previous skill")
+    [IO.File]::Copy($skillSource, $skillPath, $true)
     [IO.File]::WriteAllText((Join-Path $skillRoot "previous-resources\old.txt"), "previous resource")
     New-Item -ItemType Directory -Path (Join-Path $claudeSkillRoot "previous-resources") -Force | Out-Null
-    [IO.File]::WriteAllText($claudeSkillPath, "previous skill")
+    [IO.File]::Copy($skillSource, $claudeSkillPath, $true)
     [IO.File]::WriteAllText((Join-Path $claudeSkillRoot "previous-resources\old.txt"), "previous resource")
     & $packager `
         -StageDir $StageDir `
@@ -361,13 +361,15 @@ try {
             (Test-Path -LiteralPath $arpKey)
     }
     Assert-TestSkillInstalled
+    [IO.File]::WriteAllText($skillPath, "customized universal skill")
+    [IO.File]::WriteAllText($claudeSkillPath, "customized Claude skill")
     New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "remove-explicitly")
     [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
     [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
     $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
-    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
+    $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS", "/REMOVE_SKILL")
     if ($modifiedUninstallExit -ne 0) {
         throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
     }
