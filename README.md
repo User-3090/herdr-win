@@ -2,7 +2,7 @@
 
 **An unofficial, upstream-first Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr).**
 
-[![Patch replay](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml) [![Windows release](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/windows-nightly.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/User-3090/herdr-win/blob/master/rust-toolchain.toml) [![Upstream](https://img.shields.io/badge/upstream-ogulcancelik%2Fherdr-181717?logo=github)](https://github.com/ogulcancelik/herdr) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/User-3090/herdr-win/blob/master/LICENSE)
+[![Patch replay](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml) [![Manual release](https://github.com/User-3090/herdr-win/actions/workflows/release.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/User-3090/herdr-win/blob/master/rust-toolchain.toml) [![Upstream](https://img.shields.io/badge/upstream-ogulcancelik%2Fherdr-181717?logo=github)](https://github.com/ogulcancelik/herdr) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/User-3090/herdr-win/blob/master/LICENSE)
 
 `herdr-win` exists to advance Herdr's Windows support. It publishes native snapshots by replaying a small, explicit patch queue on the latest reviewed stable Herdr release selected during each manual refresh and recorded in `patches/delta/BASE`; between refreshes that stable base remains pinned. Windows x86_64 is the first supported target; other upstream-supported platforms are planned. Upstream refreshes and releases are both manual, and no scheduled workflow rebases, tests, or publishes current upstream. It is an unofficial distribution and patch control plane—not a separate product line—and keeps the delta reviewable, replayable, and suitable for upstream integration.
 
@@ -102,18 +102,20 @@ The mailboxes are review units, not a request to merge each one unchanged. Patch
 
 ## How manual releases work
 
-The manually dispatched workflow takes one herdr-win CalVer `YYYY.MM.DD.N`, then:
+The **Build and promote herdr-win release** workflow has two explicit manual operations.
+
+Choose `build` and supply one herdr-win CalVer `YYYY.MM.DD.N`. That operation:
 
 1. checks out the reviewed upstream stable-release commit recorded in `BASE` and verifies its `v<Cargo version>` tag;
 2. applies `patches/delta/series` without resolving conflicts automatically;
-3. runs pre-publication Windows formatting, lint, focused tests, ConPTY, installer, and runtime probes;
-4. publishes immutable `herdr-win_v<CalVer>_windows_amd64.zip` and `herdr-win_v<CalVer>_windows_amd64_setup.exe` assets identified by both the upstream and herdr-win control revisions, with release title `herdr-win v<CalVer> (Herdr v<upstream-version>)`;
-5. generates and pushes the preview manifest only after that release is verified; and
-6. independently verifies that the public update feed exposes the tested build.
+3. runs the Windows formatting, lint, focused tests, ConPTY, installer, and runtime probes plus the Linux/macOS target builds and machine checks; and
+4. retains the complete six-target candidate, checksum sidecars, and provenance metadata for 14 days without creating a tag, release, or manifest commit.
+
+After reviewing the successful candidate, choose `promote` and supply its workflow run ID. Promotion verifies that the run succeeded in this workflow on the still-current control commit and that its provenance, complete file set, and every digest agree. It then publishes those exact retained bytes without replaying source, compiling, or packaging, generates the preview manifest, and independently verifies that the public update feed exposes the tested build. If the candidate expired or `master` advanced, build a new candidate instead.
 
 CalVer is the human herdr-win release identity; the release title, notes, and setup metadata visibly pair it with the stable upstream Herdr version while machine-consumed filenames remain compatible. Source/control hashes remain exact provenance. The workflow never selects current upstream `master`, updates `BASE`, or rewrites the maintained queue. Selecting the latest stable release and refreshing the queue is a separate explicit manual maintenance operation.
 
-A replay, build, package, or publication failure prevents the subsequent release state. The final public-feed check can fail after the immutable prerelease and manifest commit already exist; that leaves the workflow failed for diagnosis rather than mutating published artifacts. Ordinary pushes do not build or publish binaries. For release purposes this repository is the control plane; every manual release builds a fresh checkout of recorded `BASE` rather than treating a long-lived integration branch as release source.
+A replay, build, package, candidate-validation, or publication failure prevents the subsequent release state. The final public-feed check can fail after the immutable prerelease and manifest commit already exist; that leaves the workflow failed for diagnosis rather than mutating published artifacts. Ordinary pushes do not build or publish binaries. For release purposes this repository is the control plane; every candidate builds a fresh checkout of recorded `BASE` rather than treating a long-lived integration branch as release source.
 
 ## Documentation and issue routing
 

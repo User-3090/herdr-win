@@ -1,15 +1,32 @@
-name: herdr-win release
+name: Build and promote herdr-win release
+
+run-name: >-
+  ${{ inputs.operation == 'build'
+      && format('Build herdr-win v{0}', inputs.release_version)
+      || format('Promote herdr-win build {0}', inputs.build_run_id) }}
 
 on:
   workflow_dispatch:
     inputs:
-      release_version:
-        description: "herdr-win CalVer without v (YYYY.MM.DD.N)"
+      operation:
+        description: "Build a candidate or promote a successful build run"
         required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - promote
+      release_version:
+        description: "Build only: herdr-win CalVer without v (YYYY.MM.DD.N)"
+        required: false
+        type: string
+      build_run_id:
+        description: "Promote only: successful build workflow run ID"
+        required: false
         type: string
 
 concurrency:
-  group: herdr-win-release
+  group: herdr-win-manual-release
   cancel-in-progress: false
 
 permissions:
@@ -23,6 +40,7 @@ env:
 jobs:
   build:
     name: Replay, test, and package Windows
+    if: inputs.operation == 'build'
     runs-on: windows-2022
     timeout-minutes: 40
     outputs:
@@ -38,16 +56,6 @@ jobs:
       archive_asset_name: ${{ steps.release_identity.outputs.archive_asset_name }}
       installer_asset_name: ${{ steps.release_identity.outputs.installer_asset_name }}
     steps:
-      - name: Require immutable release policy
-        shell: pwsh
-        env:
-          RELEASE_IMMUTABILITY_ATTESTED: ${{ vars.HERDR_RELEASE_IMMUTABILITY_ENABLED }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if ($env:RELEASE_IMMUTABILITY_ATTESTED -cne "true") {
-            throw "HERDR_RELEASE_IMMUTABILITY_ENABLED must attest that repository release immutability is enabled"
-          }
-
       - name: Checkout herdr-win control repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -61,8 +69,12 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION_INPUT: ${{ inputs.release_version }}
+          BUILD_RUN_ID_INPUT: ${{ inputs.build_run_id }}
         run: |
           $ErrorActionPreference = "Stop"
+          if (-not [string]::IsNullOrEmpty($env:BUILD_RUN_ID_INPUT)) {
+            throw "Candidate builds do not accept a promotion build run ID"
+          }
           $releaseVersion = $env:RELEASE_VERSION_INPUT.Trim()
           $assetJson = & python control\scripts\preview.py herdr-win-asset-names `
             --release-version $releaseVersion
@@ -113,7 +125,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF -ne "refs/heads/master") {
-            throw "Release publication must run from master, not $env:GITHUB_REF"
+            throw "Candidate builds must run from master, not $env:GITHUB_REF"
           }
           $upstream = (git -C source rev-parse HEAD).Trim()
           Push-Location control
@@ -511,24 +523,72 @@ jobs:
             throw "replayed preview generator differs from the selected control revision"
           }
 
+      - name: Record immutable release candidate metadata
+        shell: pwsh
+        env:
+          UPSTREAM_SHA: ${{ steps.source.outputs.upstream_sha }}
+          CONTROL_SHA: ${{ steps.source.outputs.control_sha }}
+          BUILD_ID: ${{ steps.source.outputs.build_id }}
+          REPLAY_TREE: ${{ steps.replay.outputs.replay_tree }}
+          BASE_VERSION: ${{ steps.replay.outputs.base_version }}
+          PROTOCOL: ${{ steps.replay.outputs.protocol }}
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.release_version }}
+          ASSET_NAMES_JSON: ${{ steps.release_identity.outputs.asset_names_json }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = [ordered]@{
+            schema_version = 1
+            repository = $env:GITHUB_REPOSITORY
+            workflow = ".github/workflows/release.yml"
+            operation = "build"
+            workflow_run_id = [long] $env:GITHUB_RUN_ID
+            workflow_run_attempt = [int] $env:GITHUB_RUN_ATTEMPT
+            workflow_sha = $env:GITHUB_SHA
+            upstream_sha = $env:UPSTREAM_SHA
+            control_sha = $env:CONTROL_SHA
+            replay_tree = $env:REPLAY_TREE
+            build_id = $env:BUILD_ID
+            base_version = $env:BASE_VERSION
+            protocol = [int] $env:PROTOCOL
+            release_version = $env:RELEASE_VERSION
+            asset_names = ($env:ASSET_NAMES_JSON | ConvertFrom-Json)
+          }
+          $path = Join-Path $PWD "artifact\RELEASE_CANDIDATE.json"
+          $json = $metadata | ConvertTo-Json -Depth 5
+          [IO.File]::WriteAllText($path, "$json`n", [Text.UTF8Encoding]::new($false))
+          $roundTrip = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+          if ([long] $roundTrip.workflow_run_id -ne [long] $env:GITHUB_RUN_ID -or
+              [string] $roundTrip.build_id -cne $env:BUILD_ID -or
+              [string] $roundTrip.release_version -cne $env:RELEASE_VERSION) {
+            throw "release candidate metadata did not round-trip exactly"
+          }
+          @(
+            "## Release candidate ready after this workflow succeeds"
+            ""
+            "Promote build run ID ``$env:GITHUB_RUN_ID`` from the **Build and promote herdr-win release** workflow."
+            "Candidate artifacts are retained for 14 days."
+          ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
       - name: Upload tested package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: herdr-win-windows-release-${{ github.run_id }}
+          name: herdr-win-candidate-windows-${{ github.run_id }}
           path: |
             artifact/${{ steps.release_identity.outputs.archive_asset_name }}
             artifact/${{ steps.release_identity.outputs.archive_asset_name }}.sha256
             artifact/${{ steps.release_identity.outputs.installer_asset_name }}
             artifact/${{ steps.release_identity.outputs.installer_asset_name }}.sha256
             artifact/PATCH_SERIES.txt
+            artifact/RELEASE_CANDIDATE.json
           if-no-files-found: error
-          retention-days: 2
+          retention-days: 14
           compression-level: 0
           overwrite: true
 
   build-portable:
     name: Build ${{ matrix.asset_key }}
     needs: build
+    if: inputs.operation == 'build'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     permissions:
@@ -759,28 +819,79 @@ jobs:
             artifact/${{ steps.asset.outputs.name }}
             artifact/${{ steps.asset.outputs.name }}.sha256
           if-no-files-found: error
-          retention-days: 2
+          retention-days: 14
           compression-level: 0
           overwrite: true
 
   publish:
     name: Publish immutable cross-platform prerelease
-    needs: [build, build-portable]
+    if: inputs.operation == 'promote'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    outputs:
+      build_id: ${{ steps.candidate.outputs.build_id }}
+      base_version: ${{ steps.candidate.outputs.base_version }}
+      release_version: ${{ steps.candidate.outputs.release_version }}
+      asset_names_json: ${{ steps.candidate.outputs.asset_names_json }}
+      artifact_name: ${{ steps.candidate.outputs.artifact_name }}
+      installer_asset_name: ${{ steps.candidate.outputs.installer_asset_name }}
     permissions:
+      actions: read
       contents: write
-    env:
-      UPSTREAM_SHA: ${{ needs.build.outputs.upstream_sha }}
-      CONTROL_SHA: ${{ needs.build.outputs.control_sha }}
-      BUILD_ID: ${{ needs.build.outputs.build_id }}
-      BASE_VERSION: ${{ needs.build.outputs.base_version }}
-      PROTOCOL: ${{ needs.build.outputs.protocol }}
-      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
-      ASSET_NAMES_JSON: ${{ needs.build.outputs.asset_names_json }}
-      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
-      INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
     steps:
+      - name: Require immutable release policy
+        shell: bash
+        env:
+          RELEASE_IMMUTABILITY_ATTESTED: ${{ vars.HERDR_RELEASE_IMMUTABILITY_ENABLED }}
+          RELEASE_VERSION_INPUT: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "Release promotion must run from master, not ${GITHUB_REF}." >&2
+            exit 1
+          fi
+          if [[ -n "$RELEASE_VERSION_INPUT" ]]; then
+            echo "Release promotion does not accept a CalVer override; select a candidate build run ID." >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_IMMUTABILITY_ATTESTED" != "true" ]]; then
+            echo "HERDR_RELEASE_IMMUTABILITY_ENABLED must attest that repository release immutability is enabled." >&2
+            exit 1
+          fi
+
+      - name: Validate selected successful build run
+        id: build_run
+        shell: bash
+        env:
+          BUILD_RUN_ID_INPUT: ${{ inputs.build_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_run_id="$BUILD_RUN_ID_INPUT"
+          if [[ ! "$build_run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Promotion requires a positive build workflow run ID." >&2
+            exit 1
+          fi
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${build_run_id}")"
+          jq -e \
+            --argjson run_id "$build_run_id" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg workflow ".github/workflows/release.yml" \
+            '.id == $run_id
+             and .repository.full_name == $repo
+             and .path == $workflow
+             and .event == "workflow_dispatch"
+             and .status == "completed"
+             and .conclusion == "success"
+             and .head_branch == "master"
+             and (.head_sha | test("^[0-9a-f]{40}$"))
+             and ((.run_attempt | type) == "number")
+             and (.run_attempt >= 1)' \
+            <<<"$run_json" >/dev/null
+          echo "run_id=$build_run_id" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$(jq -r .run_attempt <<<"$run_json")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .head_sha <<<"$run_json")" >> "$GITHUB_OUTPUT"
+
       - name: Checkout manifest owner
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -789,18 +900,171 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download tested package
+      - name: Download selected Windows candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: herdr-win-windows-release-${{ github.run_id }}
+          name: herdr-win-candidate-windows-${{ steps.build_run.outputs.run_id }}
           path: release-assets
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.build_run.outputs.run_id }}
 
-      - name: Download tested portable executables
+      - name: Download selected portable candidates
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: herdr-win-portable-*
+          pattern: herdr-win-portable-*-${{ steps.build_run.outputs.run_id }}
           path: release-assets
           merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.build_run.outputs.run_id }}
+
+      - name: Validate immutable release candidate
+        id: candidate
+        shell: bash
+        env:
+          BUILD_RUN_ID: ${{ steps.build_run.outputs.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ steps.build_run.outputs.run_attempt }}
+          BUILD_HEAD_SHA: ${{ steps.build_run.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          metadata="release-assets/RELEASE_CANDIDATE.json"
+          if [[ ! -f "$metadata" ]]; then
+            echo "Selected build has no release candidate metadata." >&2
+            exit 1
+          fi
+          asset_keys='["linux-aarch64","linux-x86_64","macos-aarch64","macos-x86_64","windows-x86_64","windows-x86_64-installer"]'
+          jq -e \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg workflow ".github/workflows/release.yml" \
+            --argjson run_id "$BUILD_RUN_ID" \
+            --argjson run_attempt "$BUILD_RUN_ATTEMPT" \
+            --arg workflow_sha "$BUILD_HEAD_SHA" \
+            --argjson asset_keys "$asset_keys" \
+            '.schema_version == 1
+             and .repository == $repo
+             and .workflow == $workflow
+             and .operation == "build"
+             and .workflow_run_id == $run_id
+             and ((.workflow_run_attempt | type) == "number")
+             and (.workflow_run_attempt >= 1)
+             and (.workflow_run_attempt <= $run_attempt)
+             and .workflow_sha == $workflow_sha
+             and (.upstream_sha | test("^[0-9a-f]{40}$"))
+             and (.control_sha | test("^[0-9a-f]{40}$"))
+             and (.replay_tree | test("^[0-9a-f]{40}$"))
+             and (.build_id | test("^[0-9a-f]{12}\\.[0-9a-f]{12}$"))
+             and (.base_version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+             and ((.protocol | type) == "number")
+             and (.protocol >= 0)
+             and ((.protocol | floor) == .protocol)
+             and (.release_version | test("^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[1-9][0-9]*$"))
+             and ((.asset_names | type) == "object")
+             and (.asset_names | keys) == $asset_keys
+             and ([.asset_names[] | ((type == "string") and (length > 0))] | all)' \
+            "$metadata" >/dev/null
+
+          release_version="$(jq -er .release_version "$metadata")"
+          asset_names_json="$(jq -cS .asset_names "$metadata")"
+          expected_names="$(python3 control/scripts/preview.py herdr-win-asset-names \
+            --release-version "$release_version" | jq -cS .)"
+          if [[ "$asset_names_json" != "$expected_names" ]]; then
+            echo "Candidate asset names do not match the tested herdr-win naming owner." >&2
+            exit 1
+          fi
+
+          upstream_sha="$(jq -er .upstream_sha "$metadata")"
+          control_sha="$(jq -er .control_sha "$metadata")"
+          build_id="$(jq -er .build_id "$metadata")"
+          replay_tree="$(jq -er .replay_tree "$metadata")"
+          base_version="$(jq -er .base_version "$metadata")"
+          protocol="$(jq -er .protocol "$metadata")"
+          portable_keys=(linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64)
+          zip="$(jq -er '.asset_names["windows-x86_64"]' "$metadata")"
+          installer="$(jq -er '.asset_names["windows-x86_64-installer"]' "$metadata")"
+          artifact_name="${zip%.zip}"
+          if [[ "$zip" != "${artifact_name}.zip" ]]; then
+            echo "Candidate Windows archive is not a ZIP." >&2
+            exit 1
+          fi
+          expected_files=(
+            PATCH_SERIES.txt
+            RELEASE_CANDIDATE.json
+            "$zip"
+            "${zip}.sha256"
+            "$installer"
+            "${installer}.sha256"
+          )
+          for key in "${portable_keys[@]}"; do
+            asset="$(jq -er --arg key "$key" '.asset_names[$key]' "$metadata")"
+            if [[ "$asset" == */* || "$asset" == *\\* || "$asset" == .* ]]; then
+              echo "Invalid candidate asset name for ${key}: ${asset}" >&2
+              exit 1
+            fi
+            expected_files+=("$asset" "${asset}.sha256")
+          done
+          if find release-assets -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            echo "Candidate download contains an unexpected directory or special file." >&2
+            exit 1
+          fi
+          expected_list="$(printf '%s\n' "${expected_files[@]}" | sort)"
+          actual_list="$(find release-assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "$actual_list" != "$expected_list" ]]; then
+            echo "Candidate file set is incomplete or contains unexpected files." >&2
+            diff -u <(printf '%s\n' "$expected_list") <(printf '%s\n' "$actual_list") || true
+            exit 1
+          fi
+          (
+            cd release-assets
+            sha256sum --check "${zip}.sha256"
+            sha256sum --check "${installer}.sha256"
+            for key in "${portable_keys[@]}"; do
+              asset="$(jq -er --arg key "$key" '.asset_names[$key]' RELEASE_CANDIDATE.json)"
+              sha256sum --check "${asset}.sha256"
+            done
+          )
+
+          git -C control fetch --no-tags origin master
+          if ! git -C control merge-base --is-ancestor "$control_sha" origin/master; then
+            echo "Candidate control revision ${control_sha} is no longer on master." >&2
+            exit 1
+          fi
+          selected="$(cd control && python3 scripts/preview.py select-commit --ref origin/master)"
+          if [[ "$selected" != "$control_sha" ]]; then
+            echo "master advanced to untested control revision ${selected}; refusing stale candidate promotion." >&2
+            exit 1
+          fi
+          unexpected_paths="$(git -C control diff --name-only "$control_sha..origin/master" | grep -vxF 'website/preview.json' || true)"
+          if [[ -n "$unexpected_paths" ]]; then
+            echo "Skipped manifest commits changed release inputs:" >&2
+            echo "$unexpected_paths" >&2
+            exit 1
+          fi
+          if [[ "${upstream_sha:0:12}.${control_sha:0:12}" != "$build_id" ]]; then
+            echo "Candidate build ID does not match its source identities." >&2
+            exit 1
+          fi
+
+          {
+            echo "UPSTREAM_SHA=$upstream_sha"
+            echo "CONTROL_SHA=$control_sha"
+            echo "BUILD_ID=$build_id"
+            echo "REPLAY_TREE=$replay_tree"
+            echo "BASE_VERSION=$base_version"
+            echo "PROTOCOL=$protocol"
+            echo "RELEASE_VERSION=$release_version"
+            echo "ASSET_NAMES_JSON=$asset_names_json"
+            echo "ARTIFACT_NAME=$artifact_name"
+            echo "INSTALLER_ASSET_NAME=$installer"
+          } >> "$GITHUB_ENV"
+          {
+            echo "build_id=$build_id"
+            echo "base_version=$base_version"
+            echo "release_version=$release_version"
+            echo "asset_names_json=$asset_names_json"
+            echo "artifact_name=$artifact_name"
+            echo "installer_asset_name=$installer"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify and publish prerelease
         id: release
@@ -899,7 +1163,7 @@ jobs:
             local digest
             digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
             if [[ "$digest" != "$expected_digest" ]]; then
-              echo "Newly published release asset ${name} does not match the tested package." >&2
+              echo "Release asset ${name} does not match the selected candidate." >&2
               exit 1
             fi
           }
@@ -988,14 +1252,15 @@ jobs:
               exit 1
             fi
             verify_release "$release_json"
-            verify_asset_matches "$release_json" "$zip" "$zip_digest"
-            verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
-            verify_asset_matches "$release_json" "$installer" "$installer_digest"
-            for key in "${portable_keys[@]}"; do
-              asset="$(jq -er --arg key "$key" '.[$key]' <<<"$ASSET_NAMES_JSON")"
-              verify_asset_matches "$release_json" "$asset" "${tested_portable_digests[$key]}"
-            done
           fi
+
+          verify_asset_matches "$release_json" "$zip" "$zip_digest"
+          verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
+          verify_asset_matches "$release_json" "$installer" "$installer_digest"
+          for key in "${portable_keys[@]}"; do
+            asset="$(jq -er --arg key "$key" '.[$key]' <<<"$ASSET_NAMES_JSON")"
+            verify_asset_matches "$release_json" "$asset" "${tested_portable_digests[$key]}"
+          done
 
           built_at="$(jq -r .published_at <<<"$release_json")"
           if [[ ! "$built_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
@@ -1173,7 +1438,7 @@ jobs:
           unstaged_paths="$(git diff --name-only)"
           untracked_paths="$(git ls-files --others --exclude-standard)"
           if [[ "$staged_paths" != "website/preview.json" || -n "$unstaged_paths" || -n "$untracked_paths" ]]; then
-            echo "Only website/preview.json may be committed by the manual release workflow." >&2
+            echo "Only website/preview.json may be committed by release promotion." >&2
             git status --short >&2
             exit 1
           fi
@@ -1212,18 +1477,18 @@ jobs:
 
   verify-update-feed:
     name: Verify published update feed
-    needs: [build, publish]
+    needs: publish
     runs-on: windows-2022
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
-      BUILD_ID: ${{ needs.build.outputs.build_id }}
-      BASE_VERSION: ${{ needs.build.outputs.base_version }}
-      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
-      ASSET_NAMES_JSON: ${{ needs.build.outputs.asset_names_json }}
-      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
-      INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
+      BUILD_ID: ${{ needs.publish.outputs.build_id }}
+      BASE_VERSION: ${{ needs.publish.outputs.base_version }}
+      RELEASE_VERSION: ${{ needs.publish.outputs.release_version }}
+      ASSET_NAMES_JSON: ${{ needs.publish.outputs.asset_names_json }}
+      ARTIFACT_NAME: ${{ needs.publish.outputs.artifact_name }}
+      INSTALLER_ASSET_NAME: ${{ needs.publish.outputs.installer_asset_name }}
     steps:
       - name: Confirm updater sees the published build
         shell: pwsh

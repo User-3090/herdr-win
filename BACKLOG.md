@@ -15,7 +15,7 @@ product rules belong in `PRODUCT.md`; stable technical design belongs in
 
 ## Items
 
-- Dispatch the first cross-platform release, verify every native package boundary
-  and the coherent six-target manifest, then project Linux/macOS availability into
-  `PRODUCT.md` and the mirrored public README. Do not advertise those targets before
-  that real-build evidence exists.
+- Dispatch the first cross-platform candidate build, verify every native package
+  boundary and the coherent six-target candidate, then promote that exact workflow
+  run and verify its manifest. Only after that real-build evidence exists, project
+  Linux/macOS availability into `PRODUCT.md` and the mirrored public README.

@@ -179,7 +179,7 @@ class DeltaPatchTests(unittest.TestCase):
             )
         )
         workflow = (
-            PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
+            PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
         for variable in FORBIDDEN_DISTRIBUTION_ENV:
             self.assertNotIn(variable, product_sources)
@@ -199,7 +199,7 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("https://herdr.dev/preview.json", added)
         self.assertNotIn("https://herdr.dev/install.ps1", added)
 
-    def test_public_readme_mirror_and_manual_release_installer_contract(self) -> None:
+    def test_public_readme_mirror_and_manual_build_promotion_contract(self) -> None:
         readme_bytes = (PROJECT_ROOT / "README.md").read_bytes()
         self.assertEqual(
             readme_bytes,
@@ -214,9 +214,13 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertIn("overwrite only `SKILL.md`", readme)
         self.assertIn("even if that file was edited", readme)
         self.assertIn("removed only when empty", readme)
-        workflow = (
-            PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml"
-        ).read_text(encoding="utf-8")
+        workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
+        self.assertTrue(workflow_path.is_file())
+        self.assertFalse(
+            (PROJECT_ROOT / ".github" / "workflows" / "windows-nightly.yml").exists()
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
+        self.assertIn("name: Build and promote herdr-win release", workflow)
         self.assertIn(WINDOWS_INSTALLER_TARGET, workflow)
         self.assertIn("release_version:", workflow)
         self.assertIn("herdr-win-asset-names", workflow)
@@ -244,15 +248,47 @@ class DeltaPatchTests(unittest.TestCase):
             "aarch64-apple-darwin",
         ):
             self.assertIn(rust_target, workflow)
-        self.assertIn("needs: [build, build-portable]", workflow)
-        self.assertIn("pattern: herdr-win-portable-*", workflow)
+        self.assertIn("operation:", workflow)
+        self.assertIn("- build", workflow)
+        self.assertIn("- promote", workflow)
+        self.assertEqual(workflow.count("if: inputs.operation == 'build'"), 2)
+        self.assertIn("if: inputs.operation == 'promote'", workflow)
+        self.assertIn("RELEASE_CANDIDATE.json", workflow)
+        self.assertIn("herdr-win-candidate-windows-${{ github.run_id }}", workflow)
+        self.assertIn(
+            "pattern: herdr-win-portable-*-${{ steps.build_run.outputs.run_id }}",
+            workflow,
+        )
         self.assertIn("merge-multiple: true", workflow)
+        self.assertIn("github-token: ${{ github.token }}", workflow)
+        self.assertIn("run-id: ${{ steps.build_run.outputs.run_id }}", workflow)
+        self.assertIn("retention-days: 14", workflow)
+        self.assertIn("Promotion requires a positive build workflow run ID", workflow)
+        self.assertIn("Release promotion must run from master", workflow)
+        self.assertIn("Release promotion does not accept a CalVer override", workflow)
+        self.assertIn("Candidate builds do not accept a promotion build run ID", workflow)
+        self.assertIn(
+            "Candidate build ID does not match its source identities", workflow
+        )
+        self.assertIn(
+            'selected="$(cd control && python3 scripts/preview.py select-commit '
+            '--ref origin/master)"',
+            workflow,
+        )
+        self.assertIn(
+            "Release asset ${name} does not match the selected candidate", workflow
+        )
+        self.assertEqual(workflow.count("contents: write"), 1)
+        self.assertIn("actions: read", workflow)
         self.assertIn('"linux-x86_64": $linux_x86_64', workflow)
         self.assertIn('format -cne "nsis"', workflow)
         self.assertIn("installer_sha", workflow)
-        self.assertIn("\n  workflow_dispatch:\n", workflow)
-        self.assertNotIn("\n  schedule:", workflow)
-        self.assertNotIn("cron:", workflow)
+        trigger = workflow.split("\nconcurrency:", 1)[0]
+        self.assertIn("\n  workflow_dispatch:\n", trigger)
+        self.assertNotIn("\n  schedule:", trigger)
+        self.assertNotIn("cron:", trigger)
+        self.assertNotIn("\n  push:", trigger)
+        self.assertNotIn("workflow_run:", trigger)
         self.assertIn('"control\\patches\\delta\\BASE"', workflow)
         self.assertIn(
             "$upstreamRef = [IO.File]::ReadAllText($basePath).Trim()", workflow
@@ -279,6 +315,10 @@ class DeltaPatchTests(unittest.TestCase):
             "replayed preview generator differs from the selected control revision",
             workflow,
         )
+        build_section, promotion_section = workflow.split("\n  publish:\n", 1)
+        self.assertIn("cargo build --release", build_section)
+        self.assertNotIn("cargo build", promotion_section)
+        self.assertNotIn("package_windows_installer.ps1", promotion_section)
         self.assertEqual(workflow.count("[void] $descendant.Handle"), 2)
 
 

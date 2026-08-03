@@ -117,21 +117,36 @@ behavior; code and tests remain the detailed implementation truth.
 ## Release and Generated State
 
 - `.github/workflows/ci.yml` owns cheap replay validation.
-  `.github/workflows/windows-nightly.yml` is legacy-named but owns the one manually
-  dispatched cross-platform release: Windows native/package tests, four upstream-
-  supported Linux/macOS executable builds, immutable asset publication, manifest
-  generation, and public-feed verification against recorded `BASE`.
-- Manual dispatch requires a herdr-win CalVer `YYYY.MM.DD.N`; the release tag is
-  `v<CalVer>`. Linux and macOS publish raw executables named
+  `.github/workflows/release.yml` owns one manually dispatched workflow with two
+  explicit operations: build a retained cross-platform candidate, or promote one
+  successful candidate run without rebuilding it. No event or schedule invokes
+  either operation automatically.
+- A build dispatch requires a herdr-win CalVer `YYYY.MM.DD.N`. It runs Windows
+  native/package tests and the four upstream-supported Linux/macOS executable
+  builds. Every platform job independently replays recorded `BASE` and the queue;
+  each source tree must match the tree tested by the Windows owner job, while one
+  shared upstream/control build ID and protocol value identify all assets.
+- A successful build retains its candidate artifacts for 14 days. The Windows
+  candidate owns `RELEASE_CANDIDATE.json`, which records the workflow run and
+  attempt, CalVer, source/control identities, protocol, and exact expected release
+  filenames. Each candidate asset has a SHA-256 sidecar. Candidate creation does
+  not create a tag, release, manifest commit, or other published channel state.
+- A promotion dispatch requires only the candidate build run ID. It fails closed
+  unless that run completed successfully in this repository and workflow on the
+  still-current `master` control commit, its metadata identifies that run and a
+  valid attempt, all source identities and filenames are coherent, and the complete
+  candidate file set matches every sidecar digest. Promotion downloads those
+  retained artifacts and publishes the exact bytes; it contains no source replay,
+  compile, or package path. Only the promotion job receives Actions read and
+  repository write permissions.
+- The promoted release tag is `v<CalVer>`. Linux and macOS publish raw executables named
   `herdr-win_v<CalVer>_{linux,macos}_{amd64,arm64}` for direct remote installation.
   Windows keeps `herdr-win_v<CalVer>_windows_amd64.zip` and the corresponding
   `_setup.exe`. The manifest's upstream-compatible target keys remain separate from
   these fork-presented filenames.
-- Every platform job independently replays the selected BASE and queue. Its source
-  tree must match the tree already tested by the Windows owner job, while one shared
-  upstream/control build ID and protocol value identify all assets. Publication and
-  the generated manifest proceed only when all six target assets have verified
-  SHA-256 digests; retained historical manifest entries may remain Windows-only.
+- Publication and the generated manifest proceed only when all six target assets
+  have verified SHA-256 digests; retained historical manifest entries may remain
+  Windows-only.
 - Machine-consumed tags and asset filenames remain CalVer-only for existing updater
   compatibility. The GitHub release title is `herdr-win v<CalVer> (Herdr
   v<upstream-version>)`; release notes and installer metadata expose that same
@@ -140,10 +155,10 @@ behavior; code and tests remain the detailed implementation truth.
   managed-runtime identity and exact source provenance. CalVer owns the human fork
   release identity; the upstream Cargo version remains compatibility/provenance
   metadata and does not define the herdr-win release.
-- `website/preview.json` is generated channel state and the manual release workflow
-  is its only writer. Release publication uses the exact tested replay and fails
-  closed on source drift, replay conflict, missing/mutable assets, or digest/feed
-  mismatch.
+- `website/preview.json` is generated channel state and the promotion operation is
+  its only writer. Release publication uses the exact tested candidate and fails
+  closed on source drift, stale control state, missing/mutable assets, or
+  digest/feed mismatch.
 - Root `README.md` and `docs/next/README.md` are byte-identical public projections;
   they do not replace `PRODUCT.md` or this architecture owner.
 

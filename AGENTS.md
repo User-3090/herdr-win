@@ -65,12 +65,13 @@ active memory owner.
 - `scripts/test_delta_patches.py` and `scripts/test_upstream_patches.py` own queue
   control invariants.
 - `.github/workflows/ci.yml` owns cheap PR/manual replay validation.
-- `.github/workflows/windows-nightly.yml` is the legacy-named, manually dispatched
-  owner for Windows testing, immutable publication, manifest generation, and feed
-  verification. It has no scheduled trigger, requires an explicit herdr-win CalVer,
-  and always releases recorded `BASE`.
-- `website/preview.json` is generated channel state; the manual release workflow is
-  its only writer.
+- `.github/workflows/release.yml` owns the manually dispatched candidate build and
+  exact-artifact promotion path. It has no scheduled trigger. A build requires an
+  explicit herdr-win CalVer and always replays recorded `BASE`; promotion requires
+  the successful build run ID and never rebuilds or repackages its retained
+  candidates.
+- `website/preview.json` is generated channel state; the release workflow's
+  promotion operation is its only writer.
 - `src/distribution.rs` in replayed source owns the fork channel and source URLs.
 - Root `README.md` and `docs/next/README.md` are one mirrored public-documentation
   projection of relevant `PRODUCT.md` behavior.

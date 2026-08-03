@@ -78,19 +78,23 @@ tests remain the detailed implementation truth.
 
 ## Release Promise
 
-- Published snapshot assets derive from one tested replay of the selected upstream
-  source plus the maintained queue. The portable ZIP, managed installer, and
-  manifest digest identify the same source.
+- Published snapshot assets are the exact retained outputs of one successful manual
+  candidate build of the selected upstream source plus the maintained queue.
+  Promotion never rebuilds or repackages them. The portable ZIP, managed installer,
+  and manifest digest identify the same source.
 - Each release has a manually selected herdr-win CalVer `YYYY.MM.DD.N` and is based
   on the exact latest upstream stable release selected during the most recent
   explicit refresh. Updater-facing tags and assets retain
   `herdr-win_v<CalVer>_<os>_<arch>.<ext>` and `_setup.exe`; the GitHub release title,
   notes, and installer metadata visibly pair that CalVer with `Herdr
   v<upstream-version>`. Source/control hashes remain exact provenance.
-- Releases are manual only and use the reviewed stable commit recorded in `BASE`.
-  An explicit manual refresh selects the latest non-draft, non-prerelease upstream
-  release and replays the complete queue; no scheduled workflow queries, rebases,
-  or publishes current upstream.
+- Candidate builds and release promotion are separate manual operations. A build
+  requires the intended CalVer, uses the reviewed stable commit recorded in `BASE`,
+  and retains its candidate artifacts for 14 days without publishing a release.
+  Promotion requires that successful build's workflow run ID and publishes only its
+  validated artifacts. An explicit manual refresh separately selects the latest
+  non-draft, non-prerelease upstream release and replays the complete queue; no
+  scheduled workflow queries, rebases, builds, or publishes current upstream.
 - Ordinary pushes do not publish binaries. A replay, build, package, immutability,
   digest, or feed-verification failure prevents or visibly fails the corresponding
   release stage rather than silently publishing a different build.
