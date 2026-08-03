@@ -81,6 +81,27 @@ impl App {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
 
+    pub(super) fn tab_shell_for_workspace(&self, ws_idx: usize) -> String {
+        let configured_shell = self.state.default_shell.clone();
+        #[cfg(windows)]
+        {
+            if configured_shell.is_empty()
+                || crate::plugin_command::resolve_windows_program(&configured_shell).is_some()
+            {
+                return configured_shell;
+            }
+            let running_shell = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+                .and_then(crate::terminal::TerminalRuntime::child_pid)
+                .and_then(crate::platform::process_executable);
+            matching_running_shell_path(&configured_shell, running_shell.as_deref())
+                .unwrap_or(configured_shell)
+        }
+        #[cfg(not(windows))]
+        configured_shell
+    }
+
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
         if self.state.mode == Mode::Navigate
             && self.state.workspaces.get(self.state.selected).is_some()
@@ -512,6 +533,45 @@ impl App {
                     is_linked_worktree: space.is_linked_worktree,
                 }),
         }
+    }
+}
+
+#[cfg(windows)]
+fn matching_running_shell_path(
+    configured_shell: &str,
+    running_shell: Option<&std::path::Path>,
+) -> Option<String> {
+    if configured_shell.contains(['/', '\\']) {
+        return None;
+    }
+    let running_shell = running_shell?.to_str()?;
+    let running_name = running_shell.rsplit(['/', '\\']).next()?;
+    running_name
+        .eq_ignore_ascii_case(configured_shell)
+        .then(|| running_shell.to_string())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::matching_running_shell_path;
+    use std::path::Path;
+
+    #[test]
+    fn matching_running_shell_reuses_only_the_configured_bare_executable() {
+        let running = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+
+        assert_eq!(
+            matching_running_shell_path("pwsh.exe", Some(running)).as_deref(),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
+        );
+        assert_eq!(
+            matching_running_shell_path("powershell.exe", Some(running)),
+            None
+        );
+        assert_eq!(
+            matching_running_shell_path(r"C:\tools\pwsh.exe", Some(running)),
+            None
+        );
     }
 }
 

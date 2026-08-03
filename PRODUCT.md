@@ -28,8 +28,11 @@ tests remain the detailed implementation truth.
   `%LOCALAPPDATA%\Programs\Herdr`, exposes the stable `herdr` command on user
   `PATH`, and registers Herdr in Windows Installed Apps without requiring
   administrator privileges. The installer interface is English-only. Its branded,
-  keyboard-operable Windows setup identifies herdr-win as an unofficial distribution
-  built from the latest reviewed stable Herdr release plus the maintained Windows
+  keyboard-operable Windows setup uses the human-facing display name **Herdr Win**
+  consistently while the repository and release slug remains `herdr-win`. Welcome
+  and Finish include the current reviewed Herdr base version. Setup identifies the
+  fork as an unofficial distribution built from the latest reviewed stable Herdr
+  release plus the maintained Windows
   patches. The destination remains fixed without displaying a path or offering a
   directory choice on Welcome. Setup presents the Apache-2.0 license before modifying
   files and ends with the exact first command plus separate user-invoked links to the

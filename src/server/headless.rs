@@ -4810,6 +4810,46 @@ mod tests {
         shutdown_test_runtimes(&mut server);
     }
 
+    #[tokio::test]
+    async fn headless_named_tab_spawn_failure_keeps_dialog_actionable() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.default_shell = "__herdr_missing_shell__".into();
+        server.app.state.mode = crate::app::Mode::RenameTab;
+        server.app.state.creating_new_tab = true;
+        server.app.state.name_input = "ops".into();
+
+        server.app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+            )],
+            true,
+        );
+
+        assert_eq!(server.app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(server.app.state.mode, crate::app::Mode::RenameTab);
+        assert!(server.app.state.creating_new_tab);
+        assert_eq!(server.app.state.name_input, "ops");
+        let toast = server
+            .app
+            .state
+            .toast
+            .as_ref()
+            .expect("new tab error toast");
+        assert_eq!(toast.title, "new tab failed");
+        assert!(
+            toast.context.contains("[terminal].default_shell"),
+            "unexpected error context: {}",
+            toast.context
+        );
+    }
+
     fn test_client_writer() -> (
         ClientWriter,
         std::sync::mpsc::Receiver<Vec<u8>>,

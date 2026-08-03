@@ -1,4 +1,4 @@
-From 150fb73e6dde4e04d21a18a11fa2144ad470aaa0 Mon Sep 17 00:00:00 2001
+From 6003f887e22a17cd732c1f974f67ba754ef7a158 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -19,17 +19,17 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  538 +++++
+ packaging/windows/installer/project.nsi       |  542 +++++
  ...crosoft.Windows.Console.ConPTY-LICENSE.txt |  Bin 0 -> 1116 bytes
  ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
  scripts/package_windows_conpty.py             |  263 +++
- scripts/package_windows_installer.ps1         |  461 ++++
+ scripts/package_windows_installer.ps1         |  463 ++++
  scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |  170 ++
  scripts/test_preview.py                       |  212 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
- scripts/test_windows_installer.py             |  611 +++++
+ scripts/test_windows_installer.py             |  626 ++++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 ++++
  .../windows_install_conpty_package_test.ps1   |   26 +
  scripts/windows_installer_fault_test.ps1      |  347 +++
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 ++-
- 57 files changed, 9664 insertions(+), 235 deletions(-)
+ 57 files changed, 9685 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -53709,10 +53709,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6fa0baa36
+index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af031b6ac24
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,542 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -53737,6 +53737,9 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +!endif
 +!ifndef INFO_PRODUCTVERSION_FIXED
 +  !error "INFO_PRODUCTVERSION_FIXED is required"
++!endif
++!ifndef INFO_PRODUCTVERSION_UI
++  !error "INFO_PRODUCTVERSION_UI is required"
 +!endif
 +!ifndef APP_OUTPUT_PATH
 +  !error "APP_OUTPUT_PATH is required"
@@ -53775,8 +53778,8 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +Unicode true
 +!define APP_LANG_ENGLISH 1033
 +
-+Name "${INFO_PRODUCTNAME}"
-+Caption "${INFO_PRODUCTNAME} Setup"
++Name "${INFO_DISTRIBUTIONNAME}"
++Caption "${INFO_DISTRIBUTIONNAME} Setup"
 +OutFile "${APP_OUTPUT_PATH}"
 +InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 +RequestExecutionLevel user
@@ -53791,10 +53794,10 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +ManifestDPIAware true
 +VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
 +VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
-+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_PRODUCTNAME}"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_DISTRIBUTIONNAME}"
 +VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "CompanyName" "${INFO_COMPANYNAME}"
 +VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "LegalCopyright" "${INFO_COPYRIGHT}"
-+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_PRODUCTNAME} per-user installer"
++VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_DISTRIBUTIONNAME} per-user installer"
 +VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 +VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 +VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFILENAME}"
@@ -53832,10 +53835,10 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_150}"
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
 +!pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
-+!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME}"
++!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}"
 +!define MUI_WELCOMEPAGE_TEXT "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}. It advances Windows support by applying this fork's patches to the latest reviewed stable ${INFO_PRODUCTNAME} release.$\r$\n$\r$\nNo administrator access is required. Open a new terminal after setup so it can find ${INFO_COMMANDNAME} on PATH."
 +!define MUI_FINISHPAGE_NOREBOOTSUPPORT
-+!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} is installed"
++!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI} is installed"
 +!define MUI_FINISHPAGE_TEXT "Setup completed successfully.$\r$\n$\r$\n${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME} and no application window opens.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n${INFO_COMMANDNAME}"
 +!define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"
 +!define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"
@@ -53851,7 +53854,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +
 +!insertmacro MUI_LANGUAGE "English"
 +
-+LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
++LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_DISTRIBUTIONNAME} data"
 +LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
 +LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
 +LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
@@ -53990,13 +53993,13 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +Function .onInit
 +  SetShellVarContext current
 +  ${IfNot} ${RunningX64}
-+    Push "${INFO_PRODUCTNAME} requires 64-bit Windows."
++    Push "${INFO_DISTRIBUTIONNAME} requires 64-bit Windows."
 +    Call FailInstall
 +  ${EndIf}
 +  Call WaitForUpdaterStartGate
 +  Call SetPowerShellPath
 +  IfFileExists "$PowerShellPath" powershell_ok
-+  Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
++  Push "Windows PowerShell is required to install ${INFO_DISTRIBUTIONNAME}."
 +  Call FailInstall
 +powershell_ok:
 +FunctionEnd
@@ -54012,7 +54015,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  ${EndIf}
 +  Call un.SetPowerShellPath
 +  IfFileExists "$PowerShellPath" un_powershell_ok
-+  Push "Windows PowerShell is required to uninstall ${INFO_PRODUCTNAME}."
++  Push "Windows PowerShell is required to uninstall ${INFO_DISTRIBUTIONNAME}."
 +  Call un.FailUninstall
 +un_powershell_ok:
 +FunctionEnd
@@ -54142,7 +54145,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +un_residual_validation_done:
 +FunctionEnd
 +
-+Section "${INFO_PRODUCTNAME}" SEC_APP
++Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
 +  SectionIn RO
 +  InitPluginsDir
 +  ClearErrors
@@ -54156,15 +54159,16 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  SetOutPath "$PLUGINSDIR"
 +  WriteUninstaller "$PLUGINSDIR\uninstall.exe"
 +  IfErrors 0 installer_inputs_ready
-+  Push "${INFO_PRODUCTNAME} setup could not unpack its embedded, pre-verified files."
++  Push "${INFO_DISTRIBUTIONNAME} setup could not unpack its embedded, pre-verified files."
 +  Call FailInstall
 +
 +installer_inputs_ready:
++  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
 +  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
-+  StrCpy $0 "${INFO_PRODUCTNAME} setup failed ($HelperExitCode). $HelperOutput"
++  StrCpy $0 "${INFO_DISTRIBUTIONNAME} setup failed ($HelperExitCode). $HelperOutput"
 +  Push $0
 +  Call FailInstall
 +
@@ -54178,7 +54182,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  Call un.ValidateResidualLayout
 +  StrCmp $ResidualValid "1" un_residual_exact
 +  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-+  Push "The managed ${INFO_PRODUCTNAME} uninstall helper is missing; the install was preserved."
++  Push "The managed ${INFO_DISTRIBUTIONNAME} uninstall helper is missing; the install was preserved."
 +  Call un.FailUninstall
 +
 +un_residual_exact:
@@ -54189,7 +54193,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +
 +un_residual_pending:
 +  IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-+  Push "${INFO_PRODUCTNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
++  Push "${INFO_DISTRIBUTIONNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
 +  Call un.FailUninstall
 +
 +un_helper_ready:
@@ -54197,7 +54201,7 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" un_helper_complete
-+  StrCpy $0 "${INFO_PRODUCTNAME} uninstall failed ($HelperExitCode). $HelperOutput"
++  StrCpy $0 "${INFO_DISTRIBUTIONNAME} uninstall failed ($HelperExitCode). $HelperOutput"
 +  Push $0
 +  Call un.FailUninstall
 +
@@ -54208,11 +54212,11 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  ${EndIf}
 +  Call un.ValidateResidualLayout
 +  StrCmp $ResidualValid "1" un_cleanup_start
-+  Push "${INFO_PRODUCTNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
++  Push "${INFO_DISTRIBUTIONNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
 +  Call un.FailUninstall
 +
 +un_residual_ready:
-+  DetailPrint "Resuming exact ${INFO_PRODUCTNAME} residual cleanup."
++  DetailPrint "Resuming exact ${INFO_DISTRIBUTIONNAME} residual cleanup."
 +
 +un_cleanup_start:
 +  ClearErrors
@@ -54239,11 +54243,11 @@ index 0000000000000000000000000000000000000000..90843da100c250143401da019a7607c6
 +  ClearErrors
 +  RMDir "$INSTDIR"
 +  IfErrors 0 uninstall_complete
-+  DetailPrint "${INFO_PRODUCTNAME} was removed; a non-empty install directory was preserved."
++  DetailPrint "${INFO_DISTRIBUTIONNAME} was removed; a non-empty install directory was preserved."
 +  ClearErrors
 +  Goto uninstall_complete
 +uninstall_cleanup_failed:
-+  Push "${INFO_PRODUCTNAME} uninstall could not remove its validated residual files. Retry uninstall."
++  Push "${INFO_DISTRIBUTIONNAME} uninstall could not remove its validated residual files. Retry uninstall."
 +  Call un.FailUninstall
 +uninstall_complete:
 +  !ifdef TEST_UNINSTALL_FAULT
@@ -54641,10 +54645,10 @@ index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b
 +    main()
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eafb7621435
+index 0000000000000000000000000000000000000000..aada7670cc8a67c459a5bd3f777ec7899cbb9762
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,463 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -54691,7 +54695,7 @@ index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eaf
 +$CompanyName = "herdr-win"
 +$Copyright = "Herdr contributors"
 +$CommandName = "herdr"
-+$DistributionName = "herdr-win"
++$DistributionName = "Herdr Win"
 +$ProductUrl = "https://github.com/User-3090/herdr-win"
 +$UpstreamUrl = "https://github.com/ogulcancelik/herdr"
 +$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
@@ -54883,6 +54887,7 @@ index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eaf
 +            throw "NumericVersion must match DisplayVersion's major, minor, and patch components."
 +        }
 +    }
++    return "$($displayMatch.Groups[1].Value).$($displayMatch.Groups[2].Value).$($displayMatch.Groups[3].Value)"
 +}
 +
 +function Invoke-HerdrIdentityQuery {
@@ -54975,7 +54980,7 @@ index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eaf
 +if ($ProductName -cnotmatch $ProductNamePattern) {
 +    throw "Invalid product name '$ProductName'."
 +}
-+Assert-VersionIdentity
++$UiVersion = Assert-VersionIdentity
 +
 +$projectRoot = Split-Path -Parent $PSScriptRoot
 +$packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
@@ -55088,6 +55093,7 @@ index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eaf
 +        "/DAPP_BUILD_ID=$BuildId",
 +        "/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion",
 +        "/DINFO_PRODUCTVERSION_FIXED=$NumericVersion",
++        "/DINFO_PRODUCTVERSION_UI=$UiVersion",
 +        "/DAPP_OUTPUT_PATH=$temporaryOutput",
 +        "/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable",
 +        "/DAPP_TEST_MARKER_PREFIX=$InstallerTestMarkerPrefix",
@@ -55763,10 +55769,10 @@ index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6
  if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c345582ba71
+index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e216782f592
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,611 @@
+@@ -0,0 +1,626 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56006,11 +56012,12 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +            "INFO_ORIGINALFILENAME",
 +            "INFO_PRODUCTVERSION_DISPLAY",
 +            "INFO_PRODUCTVERSION_FIXED",
++            "INFO_PRODUCTVERSION_UI",
 +        ):
 +            self.assertIn(f"!ifndef {required}", nsi)
 +        self.assertNotRegex(nsi, re.compile(r"herdr", re.IGNORECASE))
-+        self.assertIn('Name "${INFO_PRODUCTNAME}"', nsi)
-+        self.assertIn('Caption "${INFO_PRODUCTNAME} Setup"', nsi)
++        self.assertIn('Name "${INFO_DISTRIBUTIONNAME}"', nsi)
++        self.assertIn('Caption "${INFO_DISTRIBUTIONNAME} Setup"', nsi)
 +        self.assertNotIn("BrandingText", nsi)
 +        self.assertIn('!include "MUI2.nsh"', nsi)
 +        self.assertIn('!include "nsDialogs.nsh"', nsi)
@@ -56064,6 +56071,14 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +            "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}",
 +            nsi,
 +        )
++        self.assertIn(
++            '!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}"',
++            nsi,
++        )
++        self.assertIn(
++            '!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI} is installed"',
++            nsi,
++        )
 +        welcome_text = next(
 +            line for line in nsi.splitlines() if line.startswith("!define MUI_WELCOMEPAGE_TEXT")
 +        )
@@ -56082,6 +56097,10 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +        self.assertIn("${NSD_OnClick} $UpstreamLink OpenInstallerUpstream", nsi)
 +        self.assertIn("Function OpenInstallerUpstream", nsi)
 +        self.assertIn('ExecShell open "${INFO_UPSTREAMURL}"', nsi)
++        self.assertIn(
++            'DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."',
++            nsi,
++        )
 +        self.assertNotIn(
 +            "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed", nsi
 +        )
@@ -56225,7 +56244,7 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +        nsi = NSI.read_text(encoding="utf-8")
 +        validator = nsi[
 +            nsi.index("Function un.ValidateResidualLayout") : nsi.index(
-+                'Section "${INFO_PRODUCTNAME}" SEC_APP'
++                'Section "${INFO_DISTRIBUTIONNAME}" SEC_APP'
 +            )
 +        ]
 +        for exact_name in (
@@ -56289,7 +56308,7 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +        )
 +        self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
 +        self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
-+        self.assertIn('$DistributionName = "herdr-win"', packager)
++        self.assertIn('$DistributionName = "Herdr Win"', packager)
 +        self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)
 +        self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
 +        self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
@@ -56313,6 +56332,8 @@ index 0000000000000000000000000000000000000000..e1ac52f1e35efec50addb0070da40c34
 +            '"/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion"', packager
 +        )
 +        self.assertIn('"/DINFO_PRODUCTVERSION_FIXED=$NumericVersion"', packager)
++        self.assertIn("$UiVersion = Assert-VersionIdentity", packager)
++        self.assertIn('"/DINFO_PRODUCTVERSION_UI=$UiVersion"', packager)
 +        self.assertIn(
 +            '"/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable"',
 +            packager,
@@ -58685,7 +58706,7 @@ index 0a4fd1b179ab8e541108f8e34930724eb3bc8201..19024e5d9cea5ced082484e5c66bd7a4
  fn configure_background_command_platform(_command: &mut std::process::Command) {}
  
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 622c99c1ce22a1a30672500706957e89c8cb6f79..2e2fa8ed3092ced669373967eac319981d614a83 100644
+index b202d3efde61c69b033c952fb9260c9e3af126f4..182dd6d6f5c5d640b95cb23edf2a224593f995ff 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
 @@ -3,7 +3,8 @@ use std::{
@@ -58741,7 +58762,7 @@ index 622c99c1ce22a1a30672500706957e89c8cb6f79..2e2fa8ed3092ced669373967eac31998
  
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
-@@ -678,6 +691,108 @@ pub fn process_exists(pid: u32) -> bool {
+@@ -686,6 +699,108 @@ pub fn process_exists(pid: u32) -> bool {
      ok && exit_code == STILL_ACTIVE
  }
  
@@ -58850,9 +58871,9 @@ index 622c99c1ce22a1a30672500706957e89c8cb6f79..2e2fa8ed3092ced669373967eac31998
  pub fn write_clipboard(bytes: &[u8]) -> bool {
      let Ok(text) = std::str::from_utf8(bytes) else {
          return false;
-@@ -959,6 +1074,37 @@ mod tests {
-         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
-     };
+@@ -979,6 +1094,37 @@ mod tests {
+         );
+     }
  
 +    #[test]
 +    fn child_process_job_assigns_and_terminates_within_deadline() {

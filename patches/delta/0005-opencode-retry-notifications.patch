@@ -1,4 +1,4 @@
-From 2f5e5f9bf67409c83b686bd207deee8f7dfc5226 Mon Sep 17 00:00:00 2001
+From 921cee53b4e57b56c3ffa4ebbb3cb275adef3aff Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 19:41:54 +0200
 Subject: [PATCH 4/4] fix(opencode): correlate retry error lifecycle
@@ -1247,3 +1247,4 @@ index 73c23fc6220aa96ee1032d5fb7bf2e8005821889..e020408dd1e3d0a949eddee6d88f36fc
  const KILO_INTEGRATION_VERSION: u32 = 3;
 -- 
 2.55.0.windows.3
+

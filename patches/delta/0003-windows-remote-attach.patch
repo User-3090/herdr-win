@@ -1,4 +1,4 @@
-From c521529bdaec07e86f570005d15a68f0edbffa81 Mon Sep 17 00:00:00 2001
+From 1fc4e34efebea2832bebac892785d3932f2fec14 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -16,6 +16,9 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  .../src/content/docs/zh-cn/configuration.mdx  |    4 +-
  .../content/docs/zh-cn/persistence-remote.mdx |   10 +-
  .../src/content/docs/zh-cn/windows-beta.mdx   |   14 +-
+ src/app/api/tabs.rs                           |    2 +-
+ src/app/creation.rs                           |   60 +
+ src/app/input/modal.rs                        |   38 +-
  src/app/state.rs                              |   11 +-
  src/cli/status.rs                             |   12 +
  src/client/mod.rs                             |  293 +-
@@ -26,8 +29,9 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/platform/macos.rs                         |    6 +
  src/platform/mod.rs                           |   16 +-
  src/platform/unix_common.rs                   |  123 +
- src/platform/windows.rs                       |  172 +-
+ src/platform/windows.rs                       |  192 +-
  src/platform/windows/clipboard_image.rs       |  535 +++
+ src/plugin_command.rs                         |    2 +-
  src/remote.rs                                 |  149 +-
  src/remote/attach.rs                          | 3658 +++++++++++++++++
  src/remote/unix.rs                            | 3081 +-------------
@@ -35,10 +39,10 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/server/autodetect.rs                      |   48 +-
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
- src/server/headless.rs                        |  104 +-
+ src/server/headless.rs                        |  144 +-
  src/ui.rs                                     |   69 +-
  src/update.rs                                 |    5 +
- 33 files changed, 5391 insertions(+), 3405 deletions(-)
+ 37 files changed, 5550 insertions(+), 3408 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -362,6 +366,160 @@ index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc
  
  Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
  
+diff --git a/src/app/api/tabs.rs b/src/app/api/tabs.rs
+index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..fd8a45c10ea1235a335f5a1583f3b6d16a3bd6dd 100644
+--- a/src/app/api/tabs.rs
++++ b/src/app/api/tabs.rs
+@@ -66,7 +66,7 @@ impl App {
+             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
+         });
+         let (rows, cols) = self.state.estimate_pane_size();
+-        let default_shell = self.state.default_shell.clone();
++        let default_shell = self.tab_shell_for_workspace(ws_idx);
+         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+         let host_terminal_theme = self.state.host_terminal_theme;
+         let extra_env = match super::env::normalize_launch_env(env) {
+diff --git a/src/app/creation.rs b/src/app/creation.rs
+index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..d33c1de6bab76e94711c8007e861e3c09271c8dc 100644
+--- a/src/app/creation.rs
++++ b/src/app/creation.rs
+@@ -61,6 +61,27 @@ impl App {
+         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
+     }
+ 
++    pub(super) fn tab_shell_for_workspace(&self, ws_idx: usize) -> String {
++        let configured_shell = self.state.default_shell.clone();
++        #[cfg(windows)]
++        {
++            if configured_shell.is_empty()
++                || crate::plugin_command::resolve_windows_program(&configured_shell).is_some()
++            {
++                return configured_shell;
++            }
++            let running_shell = self
++                .state
++                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
++                .and_then(crate::terminal::TerminalRuntime::child_pid)
++                .and_then(crate::platform::process_executable);
++            matching_running_shell_path(&configured_shell, running_shell.as_deref())
++                .unwrap_or(configured_shell)
++        }
++        #[cfg(not(windows))]
++        configured_shell
++    }
++
+     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
+         if self.state.mode == Mode::Navigate
+             && self.state.workspaces.get(self.state.selected).is_some()
+@@ -495,6 +516,45 @@ impl App {
+     }
+ }
+ 
++#[cfg(windows)]
++fn matching_running_shell_path(
++    configured_shell: &str,
++    running_shell: Option<&std::path::Path>,
++) -> Option<String> {
++    if configured_shell.contains(['/', '\\']) {
++        return None;
++    }
++    let running_shell = running_shell?.to_str()?;
++    let running_name = running_shell.rsplit(['/', '\\']).next()?;
++    running_name
++        .eq_ignore_ascii_case(configured_shell)
++        .then(|| running_shell.to_string())
++}
++
++#[cfg(all(test, windows))]
++mod tests {
++    use super::matching_running_shell_path;
++    use std::path::Path;
++
++    #[test]
++    fn matching_running_shell_reuses_only_the_configured_bare_executable() {
++        let running = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
++
++        assert_eq!(
++            matching_running_shell_path("pwsh.exe", Some(running)).as_deref(),
++            Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
++        );
++        assert_eq!(
++            matching_running_shell_path("powershell.exe", Some(running)),
++            None
++        );
++        assert_eq!(
++            matching_running_shell_path(r"C:\tools\pwsh.exe", Some(running)),
++            None
++        );
++    }
++}
++
+ fn terminal_agent_session_info(
+     terminal: &crate::terminal::TerminalState,
+ ) -> Option<crate::api::schema::AgentSessionInfo> {
+diff --git a/src/app/input/modal.rs b/src/app/input/modal.rs
+index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..20801bc7416c25949335f5be0b15e0762e0e96a6 100644
+--- a/src/app/input/modal.rs
++++ b/src/app/input/modal.rs
+@@ -973,7 +973,8 @@ impl App {
+                 } else {
+                     Some(new_name)
+                 };
+-                self.runtime_tab_create(
++                let previous_toast = self.state.toast.clone();
++                let response = self.runtime_tab_create(
+                     "tui.tab.create_named",
+                     crate::api::schema::TabCreateParams {
+                         workspace_id: None,
+@@ -983,6 +984,9 @@ impl App {
+                         env: Default::default(),
+                     },
+                 );
++                if self.show_new_tab_creation_error(&response, previous_toast) {
++                    return;
++                }
+             }
+             Mode::RenameTab if !new_name.is_empty() => {
+                 let Some(ws_idx) = self.state.active else {
+@@ -1030,6 +1034,38 @@ impl App {
+         cancel_rename_modal(&mut self.state);
+     }
+ 
++    fn show_new_tab_creation_error(
++        &mut self,
++        response: &str,
++        previous_toast: Option<crate::app::state::ToastNotification>,
++    ) -> bool {
++        let Ok(response) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
++        else {
++            return false;
++        };
++        let configured_shell = self.state.default_shell.trim();
++        let context = if response.error.code == "tab_create_failed" {
++            if configured_shell.is_empty() {
++                "Herdr could not start the default shell. Check PATH, then try again.".to_string()
++            } else {
++                format!(
++                    "Herdr could not start {configured_shell}. Check [terminal].default_shell and PATH, then try again."
++                )
++            }
++        } else {
++            response.error.message
++        };
++        self.state.toast = Some(crate::app::state::ToastNotification {
++            kind: crate::app::state::ToastKind::NeedsAttention,
++            title: "new tab failed".to_string(),
++            context,
++            position: None,
++            target: None,
++        });
++        self.sync_toast_deadline(previous_toast);
++        true
++    }
++
+     pub(super) fn apply_rename_mouse_action_via_api(&mut self, action: ModalAction) {
+         match action {
+             ModalAction::Save => self.save_rename_modal_via_api(),
 diff --git a/src/app/state.rs b/src/app/state.rs
 index f8395cbdc69def7ba6e7578db83dec08aa97f09f..42c363a42b468721c2a5bce2104a65d553b8973d 100644
 --- a/src/app/state.rs
@@ -1481,7 +1639,7 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +    }
 +}
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 317ac495126cc7ea8472c5db442ba637db628dc8..622c99c1ce22a1a30672500706957e89c8cb6f79 100644
+index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e3af126f4 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
 @@ -4,7 +4,7 @@ use std::{
@@ -1618,7 +1776,22 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..622c99c1ce22a1a30672500706957e89
  
  pub(crate) fn should_draw_host_cursor_by_default() -> bool {
      true
-@@ -660,9 +751,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
+@@ -276,6 +367,14 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+         .filter(|path| path.is_absolute())
+ }
+ 
++pub(crate) fn process_executable(pid: u32) -> Option<PathBuf> {
++    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
++    let process_parameters = read_process_parameters(process.0)?;
++    read_unicode_string(process.0, process_parameters.image_path_name)
++        .map(PathBuf::from)
++        .filter(|path| path.is_absolute() && path.is_file())
++}
++
+ fn select_pane_foreground_job(
+     shell_pid: u32,
+     entries: &[WindowsProcessEntry],
+@@ -660,9 +759,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
      }
  }
  
@@ -1689,7 +1862,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..622c99c1ce22a1a30672500706957e89
      None
  }
  
-@@ -678,6 +828,8 @@ struct ProcessHandle(HANDLE);
+@@ -678,6 +836,8 @@ struct ProcessHandle(HANDLE);
  
  struct ClipboardGuard;
  
@@ -1698,7 +1871,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..622c99c1ce22a1a30672500706957e89
  impl Drop for ClipboardGuard {
      fn drop(&mut self) {
          unsafe {
-@@ -686,6 +838,14 @@ impl Drop for ClipboardGuard {
+@@ -686,6 +846,14 @@ impl Drop for ClipboardGuard {
      }
  }
  
@@ -1713,6 +1886,25 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..622c99c1ce22a1a30672500706957e89
  impl ProcessHandle {
      fn open(pid: u32, access: u32) -> Option<Self> {
          if pid == 0 {
+@@ -799,6 +967,18 @@ mod tests {
+         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+     };
+ 
++    #[test]
++    fn current_process_executable_is_read_from_process_parameters() {
++        let expected = std::env::current_exe().expect("current executable");
++        let actual =
++            super::process_executable(std::process::id()).expect("read current process executable");
++
++        assert_eq!(
++            crate::worktree::canonical_or_original(&actual),
++            crate::worktree::canonical_or_original(&expected)
++        );
++    }
++
+     #[test]
+     fn cmd_agent_command_encodes_edge_arguments_without_cmd_expansion() {
+         use base64::Engine as _;
 diff --git a/src/platform/windows/clipboard_image.rs b/src/platform/windows/clipboard_image.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c767327da5355
@@ -2254,6 +2446,19 @@ index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c7673
 +        );
 +    }
 +}
+diff --git a/src/plugin_command.rs b/src/plugin_command.rs
+index a0f7189413c60fc3b93efff7e6ecba3df2a7e1cc..9ae5d719fa1d15ea90e491affa999780b1b34c67 100644
+--- a/src/plugin_command.rs
++++ b/src/plugin_command.rs
+@@ -38,7 +38,7 @@ fn command_for_program(program: &str) -> Command {
+ }
+ 
+ #[cfg(windows)]
+-fn resolve_windows_program(program: &str) -> Option<PathBuf> {
++pub(crate) fn resolve_windows_program(program: &str) -> Option<PathBuf> {
+     if has_path_separator(program) {
+         return None;
+     }
 diff --git a/src/remote.rs b/src/remote.rs
 index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86bb179369e 100644
 --- a/src/remote.rs
@@ -9532,7 +9737,7 @@ index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df72
  }
  
 diff --git a/src/server/headless.rs b/src/server/headless.rs
-index aa9fd0018dc717142e7af8560387c740b1d22b6e..7c11c49a37429c46e5333d1d03ab63d9601885d5 100644
+index aa9fd0018dc717142e7af8560387c740b1d22b6e..f9fd4f1cfff763e54a497e3c185a99140dfb80b6 100644
 --- a/src/server/headless.rs
 +++ b/src/server/headless.rs
 @@ -2702,8 +2702,10 @@ impl HeadlessServer {
@@ -9608,7 +9813,54 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..7c11c49a37429c46e5333d1d03ab63d9
  #[cfg(unix)]
  fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
      let loaded_config = config::Config::load();
-@@ -4871,6 +4904,72 @@ new_tab = "prefix+t"
+@@ -4728,6 +4761,46 @@ mod tests {
+         shutdown_test_runtimes(&mut server);
+     }
+ 
++    #[tokio::test]
++    async fn headless_named_tab_spawn_failure_keeps_dialog_actionable() {
++        let mut server = test_headless_server();
++        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
++        server.app.state.ensure_test_terminals();
++        server.app.state.active = Some(0);
++        server.app.state.selected = 0;
++        server.app.state.default_shell = "__herdr_missing_shell__".into();
++        server.app.state.mode = crate::app::Mode::RenameTab;
++        server.app.state.creating_new_tab = true;
++        server.app.state.name_input = "ops".into();
++
++        server.app.route_client_events(
++            vec![crate::raw_input::RawInputEvent::Key(
++                crate::input::TerminalKey::new(
++                    crossterm::event::KeyCode::Enter,
++                    crossterm::event::KeyModifiers::empty(),
++                ),
++            )],
++            true,
++        );
++
++        assert_eq!(server.app.state.workspaces[0].tabs.len(), 1);
++        assert_eq!(server.app.state.mode, crate::app::Mode::RenameTab);
++        assert!(server.app.state.creating_new_tab);
++        assert_eq!(server.app.state.name_input, "ops");
++        let toast = server
++            .app
++            .state
++            .toast
++            .as_ref()
++            .expect("new tab error toast");
++        assert_eq!(toast.title, "new tab failed");
++        assert!(
++            toast.context.contains("[terminal].default_shell"),
++            "unexpected error context: {}",
++            toast.context
++        );
++    }
++
+     fn test_client_writer() -> (
+         ClientWriter,
+         std::sync::mpsc::Receiver<Vec<u8>>,
+@@ -4871,6 +4944,72 @@ new_tab = "prefix+t"
              .any(|binding| binding.label == "prefix+c"));
      }
  
@@ -9681,7 +9933,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..7c11c49a37429c46e5333d1d03ab63d9
      #[test]
      fn local_keybinding_client_hides_server_keybinding_warnings() {
          let mut server = test_headless_server();
-@@ -7323,6 +7422,7 @@ next_tab = ""
+@@ -7323,6 +7462,7 @@ next_tab = ""
                  .current_size(),
              expected
          );
@@ -9808,3 +10060,4 @@ index eac917bf6bc2e27f116dd7e674765c4f48b311d3..b874c117d472ba82f23dcee5bba652f9
          return true;
 -- 
 2.55.0.windows.3
+

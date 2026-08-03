@@ -38,7 +38,7 @@ fn command_for_program(program: &str) -> Command {
 }
 
 #[cfg(windows)]
-fn resolve_windows_program(program: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_windows_program(program: &str) -> Option<PathBuf> {
     if has_path_separator(program) {
         return None;
     }

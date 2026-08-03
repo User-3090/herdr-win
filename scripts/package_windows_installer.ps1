@@ -44,7 +44,7 @@ $NsisArchiveSha256 = "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa6
 $CompanyName = "herdr-win"
 $Copyright = "Herdr contributors"
 $CommandName = "herdr"
-$DistributionName = "herdr-win"
+$DistributionName = "Herdr Win"
 $ProductUrl = "https://github.com/User-3090/herdr-win"
 $UpstreamUrl = "https://github.com/ogulcancelik/herdr"
 $InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
@@ -236,6 +236,7 @@ function Assert-VersionIdentity {
             throw "NumericVersion must match DisplayVersion's major, minor, and patch components."
         }
     }
+    return "$($displayMatch.Groups[1].Value).$($displayMatch.Groups[2].Value).$($displayMatch.Groups[3].Value)"
 }
 
 function Invoke-HerdrIdentityQuery {
@@ -328,7 +329,7 @@ if ($BuildId -cnotmatch $BuildIdPattern) {
 if ($ProductName -cnotmatch $ProductNamePattern) {
     throw "Invalid product name '$ProductName'."
 }
-Assert-VersionIdentity
+$UiVersion = Assert-VersionIdentity
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
@@ -441,6 +442,7 @@ try {
         "/DAPP_BUILD_ID=$BuildId",
         "/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion",
         "/DINFO_PRODUCTVERSION_FIXED=$NumericVersion",
+        "/DINFO_PRODUCTVERSION_UI=$UiVersion",
         "/DAPP_OUTPUT_PATH=$temporaryOutput",
         "/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable",
         "/DAPP_TEST_MARKER_PREFIX=$InstallerTestMarkerPrefix",

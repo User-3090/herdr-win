@@ -237,11 +237,12 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "INFO_ORIGINALFILENAME",
             "INFO_PRODUCTVERSION_DISPLAY",
             "INFO_PRODUCTVERSION_FIXED",
+            "INFO_PRODUCTVERSION_UI",
         ):
             self.assertIn(f"!ifndef {required}", nsi)
         self.assertNotRegex(nsi, re.compile(r"herdr", re.IGNORECASE))
-        self.assertIn('Name "${INFO_PRODUCTNAME}"', nsi)
-        self.assertIn('Caption "${INFO_PRODUCTNAME} Setup"', nsi)
+        self.assertIn('Name "${INFO_DISTRIBUTIONNAME}"', nsi)
+        self.assertIn('Caption "${INFO_DISTRIBUTIONNAME} Setup"', nsi)
         self.assertNotIn("BrandingText", nsi)
         self.assertIn('!include "MUI2.nsh"', nsi)
         self.assertIn('!include "nsDialogs.nsh"', nsi)
@@ -295,6 +296,14 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}",
             nsi,
         )
+        self.assertIn(
+            '!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}"',
+            nsi,
+        )
+        self.assertIn(
+            '!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI} is installed"',
+            nsi,
+        )
         welcome_text = next(
             line for line in nsi.splitlines() if line.startswith("!define MUI_WELCOMEPAGE_TEXT")
         )
@@ -313,6 +322,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("${NSD_OnClick} $UpstreamLink OpenInstallerUpstream", nsi)
         self.assertIn("Function OpenInstallerUpstream", nsi)
         self.assertIn('ExecShell open "${INFO_UPSTREAMURL}"', nsi)
+        self.assertIn(
+            'DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."',
+            nsi,
+        )
         self.assertNotIn(
             "${INFO_PRODUCTNAME} ${INFO_PRODUCTVERSION_DISPLAY} was installed", nsi
         )
@@ -456,7 +469,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         nsi = NSI.read_text(encoding="utf-8")
         validator = nsi[
             nsi.index("Function un.ValidateResidualLayout") : nsi.index(
-                'Section "${INFO_PRODUCTNAME}" SEC_APP'
+                'Section "${INFO_DISTRIBUTIONNAME}" SEC_APP'
             )
         ]
         for exact_name in (
@@ -520,7 +533,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn('"/DARG_ARTWORK_DIR=$artworkDir"', packager)
         self.assertIn('"/DINFO_PRODUCTNAME=$ProductName"', packager)
-        self.assertIn('$DistributionName = "herdr-win"', packager)
+        self.assertIn('$DistributionName = "Herdr Win"', packager)
         self.assertIn('"/DINFO_DISTRIBUTIONNAME=$DistributionName"', packager)
         self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
         self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
@@ -544,6 +557,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             '"/DINFO_PRODUCTVERSION_DISPLAY=$DisplayVersion"', packager
         )
         self.assertIn('"/DINFO_PRODUCTVERSION_FIXED=$NumericVersion"', packager)
+        self.assertIn("$UiVersion = Assert-VersionIdentity", packager)
+        self.assertIn('"/DINFO_PRODUCTVERSION_UI=$UiVersion"', packager)
         self.assertIn(
             '"/DAPP_START_GATE_ENV=$InstallerStartGateEnvironmentVariable"',
             packager,

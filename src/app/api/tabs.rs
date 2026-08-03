@@ -66,7 +66,7 @@ impl App {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
         let (rows, cols) = self.state.estimate_pane_size();
-        let default_shell = self.state.default_shell.clone();
+        let default_shell = self.tab_shell_for_workspace(ws_idx);
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let extra_env = match super::env::normalize_launch_env(env) {

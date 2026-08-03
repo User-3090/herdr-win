@@ -23,6 +23,9 @@
 !ifndef INFO_PRODUCTVERSION_FIXED
   !error "INFO_PRODUCTVERSION_FIXED is required"
 !endif
+!ifndef INFO_PRODUCTVERSION_UI
+  !error "INFO_PRODUCTVERSION_UI is required"
+!endif
 !ifndef APP_OUTPUT_PATH
   !error "APP_OUTPUT_PATH is required"
 !endif
@@ -60,8 +63,8 @@
 Unicode true
 !define APP_LANG_ENGLISH 1033
 
-Name "${INFO_PRODUCTNAME}"
-Caption "${INFO_PRODUCTNAME} Setup"
+Name "${INFO_DISTRIBUTIONNAME}"
+Caption "${INFO_DISTRIBUTIONNAME} Setup"
 OutFile "${APP_OUTPUT_PATH}"
 InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 RequestExecutionLevel user
@@ -76,10 +79,10 @@ AutoCloseWindow true
 ManifestDPIAware true
 VIProductVersion "${INFO_PRODUCTVERSION_FIXED}"
 VIFileVersion "${INFO_PRODUCTVERSION_FIXED}"
-VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_PRODUCTNAME}"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductName" "${INFO_DISTRIBUTIONNAME}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "CompanyName" "${INFO_COMPANYNAME}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "LegalCopyright" "${INFO_COPYRIGHT}"
-VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_PRODUCTNAME} per-user installer"
+VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileDescription" "${INFO_DISTRIBUTIONNAME} per-user installer"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "FileVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "ProductVersion" "${INFO_PRODUCTVERSION_DISPLAY}"
 VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFILENAME}"
@@ -117,10 +120,10 @@ Var UpstreamLink
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_150}"
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_175}"
 !pragma verifyloadimage "${INSTALLER_WELCOME_BITMAP_200}"
-!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME}"
+!define MUI_WELCOMEPAGE_TITLE "Install ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}"
 !define MUI_WELCOMEPAGE_TEXT "This setup installs ${INFO_DISTRIBUTIONNAME}, an unofficial Windows distribution of ${INFO_PRODUCTNAME}. It advances Windows support by applying this fork's patches to the latest reviewed stable ${INFO_PRODUCTNAME} release.$\r$\n$\r$\nNo administrator access is required. Open a new terminal after setup so it can find ${INFO_COMMANDNAME} on PATH."
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
-!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} is installed"
+!define MUI_FINISHPAGE_TITLE "${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI} is installed"
 !define MUI_FINISHPAGE_TEXT "Setup completed successfully.$\r$\n$\r$\n${INFO_DISTRIBUTIONNAME} is an unofficial distribution; the command remains ${INFO_COMMANDNAME} and no application window opens.$\r$\n$\r$\nOpen a new terminal, then run:$\r$\n${INFO_COMMANDNAME}"
 !define MUI_FINISHPAGE_LINK "Open ${INFO_DISTRIBUTIONNAME} setup and usage guide"
 !define MUI_FINISHPAGE_LINK_LOCATION "${INFO_PRODUCTURL}"
@@ -136,7 +139,7 @@ UninstPage custom un.SettingsPage un.SettingsPageLeave
 
 !insertmacro MUI_LANGUAGE "English"
 
-LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_PRODUCTNAME} data"
+LangString AppSettingsPageTitle ${LANG_ENGLISH} "Remove local ${INFO_DISTRIBUTIONNAME} data"
 LangString AppSettingsPageSubtitle ${LANG_ENGLISH} "Choose what remains after uninstall."
 LangString AppSettingsPageText ${LANG_ENGLISH} "Uninstall removes the managed program, user PATH entry, Windows Installed Apps registration, and managed skill copies. Settings and session data are kept by default. Select this option to delete them too. Other files are not removed."
 LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} settings and session data"
@@ -275,13 +278,13 @@ FunctionEnd
 Function .onInit
   SetShellVarContext current
   ${IfNot} ${RunningX64}
-    Push "${INFO_PRODUCTNAME} requires 64-bit Windows."
+    Push "${INFO_DISTRIBUTIONNAME} requires 64-bit Windows."
     Call FailInstall
   ${EndIf}
   Call WaitForUpdaterStartGate
   Call SetPowerShellPath
   IfFileExists "$PowerShellPath" powershell_ok
-  Push "Windows PowerShell is required to install ${INFO_PRODUCTNAME}."
+  Push "Windows PowerShell is required to install ${INFO_DISTRIBUTIONNAME}."
   Call FailInstall
 powershell_ok:
 FunctionEnd
@@ -297,7 +300,7 @@ Function un.onInit
   ${EndIf}
   Call un.SetPowerShellPath
   IfFileExists "$PowerShellPath" un_powershell_ok
-  Push "Windows PowerShell is required to uninstall ${INFO_PRODUCTNAME}."
+  Push "Windows PowerShell is required to uninstall ${INFO_DISTRIBUTIONNAME}."
   Call un.FailUninstall
 un_powershell_ok:
 FunctionEnd
@@ -427,7 +430,7 @@ un_residual_valid:
 un_residual_validation_done:
 FunctionEnd
 
-Section "${INFO_PRODUCTNAME}" SEC_APP
+Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   SectionIn RO
   InitPluginsDir
   ClearErrors
@@ -441,15 +444,16 @@ Section "${INFO_PRODUCTNAME}" SEC_APP
   SetOutPath "$PLUGINSDIR"
   WriteUninstaller "$PLUGINSDIR\uninstall.exe"
   IfErrors 0 installer_inputs_ready
-  Push "${INFO_PRODUCTNAME} setup could not unpack its embedded, pre-verified files."
+  Push "${INFO_DISTRIBUTIONNAME} setup could not unpack its embedded, pre-verified files."
   Call FailInstall
 
 installer_inputs_ready:
+  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
   nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete
-  StrCpy $0 "${INFO_PRODUCTNAME} setup failed ($HelperExitCode). $HelperOutput"
+  StrCpy $0 "${INFO_DISTRIBUTIONNAME} setup failed ($HelperExitCode). $HelperOutput"
   Push $0
   Call FailInstall
 
@@ -463,7 +467,7 @@ Section "Uninstall"
   Call un.ValidateResidualLayout
   StrCmp $ResidualValid "1" un_residual_exact
   IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "The managed ${INFO_PRODUCTNAME} uninstall helper is missing; the install was preserved."
+  Push "The managed ${INFO_DISTRIBUTIONNAME} uninstall helper is missing; the install was preserved."
   Call un.FailUninstall
 
 un_residual_exact:
@@ -474,7 +478,7 @@ un_residual_exact:
 
 un_residual_pending:
   IfFileExists "$INSTDIR\state\installer-helper.ps1" un_helper_ready
-  Push "${INFO_PRODUCTNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
+  Push "${INFO_DISTRIBUTIONNAME} uninstall is pending but its retry helper is missing; residual files were preserved."
   Call un.FailUninstall
 
 un_helper_ready:
@@ -482,7 +486,7 @@ un_helper_ready:
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" un_helper_complete
-  StrCpy $0 "${INFO_PRODUCTNAME} uninstall failed ($HelperExitCode). $HelperOutput"
+  StrCpy $0 "${INFO_DISTRIBUTIONNAME} uninstall failed ($HelperExitCode). $HelperOutput"
   Push $0
   Call un.FailUninstall
 
@@ -493,11 +497,11 @@ un_helper_complete:
   ${EndIf}
   Call un.ValidateResidualLayout
   StrCmp $ResidualValid "1" un_cleanup_start
-  Push "${INFO_PRODUCTNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
+  Push "${INFO_DISTRIBUTIONNAME} uninstall did not leave an exact recognized residual layout; cleanup was preserved."
   Call un.FailUninstall
 
 un_residual_ready:
-  DetailPrint "Resuming exact ${INFO_PRODUCTNAME} residual cleanup."
+  DetailPrint "Resuming exact ${INFO_DISTRIBUTIONNAME} residual cleanup."
 
 un_cleanup_start:
   ClearErrors
@@ -524,11 +528,11 @@ un_cleanup_start:
   ClearErrors
   RMDir "$INSTDIR"
   IfErrors 0 uninstall_complete
-  DetailPrint "${INFO_PRODUCTNAME} was removed; a non-empty install directory was preserved."
+  DetailPrint "${INFO_DISTRIBUTIONNAME} was removed; a non-empty install directory was preserved."
   ClearErrors
   Goto uninstall_complete
 uninstall_cleanup_failed:
-  Push "${INFO_PRODUCTNAME} uninstall could not remove its validated residual files. Retry uninstall."
+  Push "${INFO_DISTRIBUTIONNAME} uninstall could not remove its validated residual files. Retry uninstall."
   Call un.FailUninstall
 uninstall_complete:
   !ifdef TEST_UNINSTALL_FAULT

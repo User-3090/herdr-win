@@ -390,6 +390,14 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
+pub(crate) fn process_executable(pid: u32) -> Option<PathBuf> {
+    let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
+    let process_parameters = read_process_parameters(process.0)?;
+    read_unicode_string(process.0, process_parameters.image_path_name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file())
+}
+
 fn select_pane_foreground_job(
     shell_pid: u32,
     entries: &[WindowsProcessEntry],
@@ -1145,6 +1153,18 @@ mod tests {
     use windows_sys::Win32::System::Console::{
         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
     };
+
+    #[test]
+    fn current_process_executable_is_read_from_process_parameters() {
+        let expected = std::env::current_exe().expect("current executable");
+        let actual =
+            super::process_executable(std::process::id()).expect("read current process executable");
+
+        assert_eq!(
+            crate::worktree::canonical_or_original(&actual),
+            crate::worktree::canonical_or_original(&expected)
+        );
+    }
 
     #[test]
     fn child_process_job_assigns_and_terminates_within_deadline() {
