@@ -1,4 +1,4 @@
-name: herdr-win Windows release
+name: herdr-win release
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         type: string
 
 concurrency:
-  group: herdr-win-windows-release
+  group: herdr-win-release
   cancel-in-progress: false
 
 permissions:
@@ -29,9 +29,11 @@ jobs:
       upstream_sha: ${{ steps.source.outputs.upstream_sha }}
       control_sha: ${{ steps.source.outputs.control_sha }}
       build_id: ${{ steps.source.outputs.build_id }}
+      replay_tree: ${{ steps.replay.outputs.replay_tree }}
       base_version: ${{ steps.replay.outputs.base_version }}
       protocol: ${{ steps.replay.outputs.protocol }}
       release_version: ${{ steps.release_identity.outputs.release_version }}
+      asset_names_json: ${{ steps.release_identity.outputs.asset_names_json }}
       artifact_name: ${{ steps.release_identity.outputs.artifact_name }}
       archive_asset_name: ${{ steps.release_identity.outputs.archive_asset_name }}
       installer_asset_name: ${{ steps.release_identity.outputs.installer_asset_name }}
@@ -75,6 +77,7 @@ jobs:
             throw "portable archive name is not a ZIP: $archiveAssetName"
           }
           "release_version=$releaseVersion" >> $env:GITHUB_OUTPUT
+          "asset_names_json=$assetJson" >> $env:GITHUB_OUTPUT
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
           "archive_asset_name=$archiveAssetName" >> $env:GITHUB_OUTPUT
           "installer_asset_name=$installerAssetName" >> $env:GITHUB_OUTPUT
@@ -110,7 +113,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF -ne "refs/heads/master") {
-            throw "Windows publication must run from master, not $env:GITHUB_REF"
+            throw "Release publication must run from master, not $env:GITHUB_REF"
           }
           $upstream = (git -C source rev-parse HEAD).Trim()
           Push-Location control
@@ -230,7 +233,9 @@ jobs:
           "base_version=$baseVersion" >> $env:GITHUB_OUTPUT
           "protocol=$($Matches[1])" >> $env:GITHUB_OUTPUT
           $replaySha = (git -C ..\source rev-parse HEAD).Trim()
+          $replayTree = (git -C ..\source rev-parse 'HEAD^{tree}').Trim()
           "HERDR_REPLAY_SHA=$replaySha" >> $env:GITHUB_ENV
+          "replay_tree=$replayTree" >> $env:GITHUB_OUTPUT
         working-directory: control
 
       - name: Install Rust
@@ -262,7 +267,7 @@ jobs:
           python -m unittest scripts.test_package_windows_conpty scripts.test_windows_installer
           python -m unittest `
             scripts.test_preview.PreviewNotesTests.test_build_manifest_archives_current_assets `
-            scripts.test_preview.PreviewNotesTests.test_windows_preview_asset_requires_sha256 `
+            scripts.test_preview.PreviewNotesTests.test_preview_assets_require_sha256 `
             scripts.test_preview.PreviewNotesTests.test_manifest_preserves_legacy_zip_only_archived_build `
             scripts.test_preview.PreviewNotesTests.test_manifest_build_id_uses_source_and_control_hashes
           cargo fmt --check
@@ -521,9 +526,246 @@ jobs:
           compression-level: 0
           overwrite: true
 
-  publish:
-    name: Publish immutable Windows prerelease
+  build-portable:
+    name: Build ${{ matrix.asset_key }}
     needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_key: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            file_arch: x86-64
+          - asset_key: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            file_arch: ARM aarch64
+          - asset_key: macos-x86_64
+            target: x86_64-apple-darwin
+            os: macos-latest
+            file_arch: x86_64
+          - asset_key: macos-aarch64
+            target: aarch64-apple-darwin
+            os: macos-latest
+            file_arch: arm64
+    env:
+      HERDR_BUILD_ID: ${{ needs.build.outputs.build_id }}
+      HERDR_BUILD_COMMIT: ${{ needs.build.outputs.upstream_sha }}
+      HERDR_REPLAY_TREE: ${{ needs.build.outputs.replay_tree }}
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: "true"
+    steps:
+      - name: Checkout tested herdr-win control revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: control
+          ref: ${{ needs.build.outputs.control_sha }}
+          persist-credentials: false
+
+      - name: Checkout tested upstream source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ogulcancelik/herdr
+          path: source
+          ref: ${{ needs.build.outputs.upstream_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select herdr-win asset name
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_json="$(python3 control/scripts/preview.py herdr-win-asset-names \
+            --release-version "$RELEASE_VERSION")"
+          asset_name="$(python3 -c \
+            'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' \
+            '${{ matrix.asset_key }}' <<<"$asset_json")"
+          case "$asset_name" in
+            "herdr-win_v${RELEASE_VERSION}_"*) ;;
+            *)
+              echo "Invalid herdr-win asset name: ${asset_name}" >&2
+              exit 1
+              ;;
+          esac
+          echo "name=$asset_name" >> "$GITHUB_OUTPUT"
+          echo "ASSET_NAME=$asset_name" >> "$GITHUB_ENV"
+
+      - name: Replay the tested maintained delta
+        working-directory: control
+        shell: bash
+        env:
+          GIT_COMMITTER_NAME: herdr-win replay
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          base="$(git -C ../source rev-parse HEAD)"
+          if [[ "$base" != '${{ needs.build.outputs.upstream_sha }}' ]]; then
+            echo "Portable build checked out unexpected upstream source ${base}." >&2
+            exit 1
+          fi
+          while IFS= read -r patch; do
+            patch="${patch%$'\r'}"
+            [[ -z "$patch" || "$patch" == \#* ]] && continue
+            if ! git -C ../source am --3way "$PWD/patches/delta/$patch"; then
+              git -C ../source am --abort 2>/dev/null || true
+              echo "Failed to replay ${patch} for ${{ matrix.asset_key }}." >&2
+              exit 1
+            fi
+          done < patches/delta/series
+          git -C ../source diff --check "$base..HEAD"
+          replay_tree="$(git -C ../source rev-parse 'HEAD^{tree}')"
+          if [[ "$replay_tree" != "$HERDR_REPLAY_TREE" ]]; then
+            echo "Portable replay tree ${replay_tree} differs from tested Windows tree ${HERDR_REPLAY_TREE}." >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Restore Homebrew Zig cache
+        if: runner.os == 'macOS'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            homebrew-zig-0.15-${{ runner.os }}-
+
+      - name: Install patched Zig on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix zig@0.15)/bin/zig" version
+
+      - name: Prefer official Ubuntu mirrors over Azure
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+            cat /etc/apt/apt-mirrors.txt
+          fi
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -type f \
+            \( -iname '*microsoft*' -o -iname '*azure-cli*' \) -print -delete
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
+
+      - name: Set Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        shell: bash
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: herdr-win-release-${{ matrix.target }}
+          workspaces: source
+
+      - name: Remove Zig caches
+        shell: bash
+        run: rm -rf source/.zig-cache source/vendor/libghostty-vt/.zig-cache source/vendor/libghostty-vt/zig-out
+
+      - name: Build release executable
+        working-directory: source
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin herdr
+
+      - name: Package and validate executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          executable="artifact/${ASSET_NAME}"
+          cp "source/target/${{ matrix.target }}/release/herdr" "$executable"
+          chmod 755 "$executable"
+          file_output="$(file "$executable")"
+          echo "$file_output"
+          if [[ "$file_output" != *'${{ matrix.file_arch }}'* ]]; then
+            echo "Unexpected machine type for ${ASSET_NAME}: ${file_output}" >&2
+            exit 1
+          fi
+          if [[ '${{ runner.os }}' == 'Linux' ]]; then
+            ldd_output="$(ldd "$executable" 2>&1 || true)"
+            echo "$ldd_output"
+            if ! grep -Eq 'statically linked|not a dynamic executable' <<<"$ldd_output"; then
+              echo "Linux release executable is not statically linked." >&2
+              exit 1
+            fi
+            if nm -u "$executable" 2>/dev/null | grep -E '(__cxa|GLIBCXX|CXXABI|_ZSt)'; then
+              echo "Linux release executable has unresolved C++ runtime symbols." >&2
+              exit 1
+            fi
+          fi
+          python3 - "$executable" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_name(path.name + ".sha256").write_text(
+              f"{digest}  {path.name}\n", encoding="ascii"
+          )
+          PY
+          replay_tree="$(git -C source rev-parse 'HEAD^{tree}')"
+          if [[ "$replay_tree" != "$HERDR_REPLAY_TREE" ]]; then
+            echo "Replayed source tree changed during the portable build." >&2
+            exit 1
+          fi
+          tracked_changes="$(git -C source status --short --untracked-files=no)"
+          if [[ -n "$tracked_changes" ]]; then
+            echo "Portable build modified tracked replay source:" >&2
+            echo "$tracked_changes" >&2
+            exit 1
+          fi
+
+      - name: Upload tested executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: herdr-win-portable-${{ matrix.asset_key }}-${{ github.run_id }}
+          path: |
+            artifact/${{ steps.asset.outputs.name }}
+            artifact/${{ steps.asset.outputs.name }}.sha256
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    name: Publish immutable cross-platform prerelease
+    needs: [build, build-portable]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -535,6 +777,7 @@ jobs:
       BASE_VERSION: ${{ needs.build.outputs.base_version }}
       PROTOCOL: ${{ needs.build.outputs.protocol }}
       RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      ASSET_NAMES_JSON: ${{ needs.build.outputs.asset_names_json }}
       ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
       INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
     steps:
@@ -552,6 +795,13 @@ jobs:
           name: herdr-win-windows-release-${{ github.run_id }}
           path: release-assets
 
+      - name: Download tested portable executables
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: herdr-win-portable-*
+          path: release-assets
+          merge-multiple: true
+
       - name: Verify and publish prerelease
         id: release
         shell: bash
@@ -564,6 +814,29 @@ jobs:
           checksum="${zip}.sha256"
           installer="${INSTALLER_ASSET_NAME}"
           installer_checksum="${installer}.sha256"
+          portable_keys=(
+            linux-x86_64
+            linux-aarch64
+            macos-x86_64
+            macos-aarch64
+          )
+          portable_assets=()
+          declare -A tested_portable_digests=()
+          for key in "${portable_keys[@]}"; do
+            asset="$(jq -er --arg key "$key" \
+              '.[$key] | strings | select(length > 0)' <<<"$ASSET_NAMES_JSON")"
+            if [[ "$asset" == */* || "$asset" == *\\* || "$asset" == .* ]]; then
+              echo "Invalid portable release asset name for ${key}: ${asset}" >&2
+              exit 1
+            fi
+            portable_assets+=("$asset")
+            sha256sum --check "${asset}.sha256"
+            tested_portable_digests["$key"]="sha256:$(sha256sum "$asset" | awk '{print $1}')"
+          done
+          if [[ "$(printf '%s\n' "${portable_assets[@]}" | sort -u | wc -l)" != "${#portable_assets[@]}" ]]; then
+            echo "Portable release asset names are not unique." >&2
+            exit 1
+          fi
           sha256sum --check "$checksum"
           sha256sum --check "$installer_checksum"
           zip_digest="sha256:$(sha256sum "$zip" | awk '{print $1}')"
@@ -637,17 +910,21 @@ jobs:
                   "$(jq -r .prerelease <<<"$release_json")" != "true" || \
                   "$(jq -r '.immutable // false' <<<"$release_json")" != "true" || \
                   "$(jq -r .name <<<"$release_json")" != "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})" || \
-                  "$(jq '.assets | length' <<<"$release_json")" != "3" ]]; then
+                  "$(jq '.assets | length' <<<"$release_json")" != "7" ]]; then
               echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
             fi
             verify_asset_shape "$release_json" "$zip"
             verify_asset_shape "$release_json" "$checksum"
             verify_asset_shape "$release_json" "$installer"
+            for asset in "${portable_assets[@]}"; do
+              verify_asset_shape "$release_json" "$asset"
+            done
           }
 
           {
-            echo "Unofficial herdr-win Windows snapshot built from upstream Herdr plus the maintained delta."
+            echo "Unofficial herdr-win snapshot built from upstream Herdr plus the maintained delta."
+            echo "Matching Linux and macOS executables are included for cross-platform remote compatibility."
             echo
             echo "- herdr-win release: \`v${RELEASE_VERSION}\`"
             echo "- Upstream release: \`Herdr v${BASE_VERSION}\`"
@@ -662,7 +939,7 @@ jobs:
               printf -- '- `%s`\n' "$patch"
             done < PATCH_SERIES.txt
             echo
-            echo "The installed executable and command remain \`herdr\`. This is a drop-in Windows build, not an official upstream release."
+            echo "The executable and command remain \`herdr\` on every platform. This is not an official upstream release."
           } > RELEASE_NOTES.md
 
           release_pages="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
@@ -695,6 +972,7 @@ jobs:
               "${ARTIFACT_NAME}.zip" \
               "${ARTIFACT_NAME}.zip.sha256" \
               "${INSTALLER_ASSET_NAME}" \
+              "${portable_assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --title "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})" \
@@ -713,6 +991,10 @@ jobs:
             verify_asset_matches "$release_json" "$zip" "$zip_digest"
             verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
             verify_asset_matches "$release_json" "$installer" "$installer_digest"
+            for key in "${portable_keys[@]}"; do
+              asset="$(jq -er --arg key "$key" '.[$key]' <<<"$ASSET_NAMES_JSON")"
+              verify_asset_matches "$release_json" "$asset" "${tested_portable_digests[$key]}"
+            done
           fi
 
           built_at="$(jq -r .published_at <<<"$release_json")"
@@ -723,12 +1005,18 @@ jobs:
 
           canonical_dir="$RUNNER_TEMP/herdr-win-published-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$canonical_dir"
-          gh release download "$tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$zip" \
-            --pattern "$checksum" \
-            --pattern "$installer" \
+          download_args=(
+            release download "$tag"
+            --repo "$GITHUB_REPOSITORY"
+            --pattern "$zip"
+            --pattern "$checksum"
+            --pattern "$installer"
             --dir "$canonical_dir"
+          )
+          for asset in "${portable_assets[@]}"; do
+            download_args+=(--pattern "$asset")
+          done
+          gh "${download_args[@]}"
           (
             cd "$canonical_dir"
             sha256sum --check "$checksum"
@@ -745,6 +1033,36 @@ jobs:
             echo "Downloaded immutable release assets do not match GitHub's recorded digests." >&2
             exit 1
           fi
+          declare -A published_shas=(
+            [windows-x86_64]="${published_zip_digest#sha256:}"
+            [windows-x86_64-installer]="${published_installer_digest#sha256:}"
+          )
+          for key in "${portable_keys[@]}"; do
+            asset="$(jq -er --arg key "$key" '.[$key]' <<<"$ASSET_NAMES_JSON")"
+            published_digest="sha256:$(sha256sum "$canonical_dir/$asset" | awk '{print $1}')"
+            api_digest="$(jq -r --arg name "$asset" \
+              '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            if [[ "$published_digest" != "$api_digest" ]]; then
+              echo "Downloaded immutable release asset ${asset} does not match GitHub's recorded digest." >&2
+              exit 1
+            fi
+            published_shas["$key"]="${published_digest#sha256:}"
+          done
+          jq -n \
+            --arg linux_x86_64 "${published_shas[linux-x86_64]}" \
+            --arg linux_aarch64 "${published_shas[linux-aarch64]}" \
+            --arg macos_x86_64 "${published_shas[macos-x86_64]}" \
+            --arg macos_aarch64 "${published_shas[macos-aarch64]}" \
+            --arg windows_x86_64 "${published_shas[windows-x86_64]}" \
+            --arg windows_installer "${published_shas[windows-x86_64-installer]}" \
+            '{
+              "linux-x86_64": $linux_x86_64,
+              "linux-aarch64": $linux_aarch64,
+              "macos-x86_64": $macos_x86_64,
+              "macos-aarch64": $macos_aarch64,
+              "windows-x86_64": $windows_x86_64,
+              "windows-x86_64-installer": $windows_installer
+            }' > "$GITHUB_WORKSPACE/release-assets/published-sha256.json"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
           echo "zip_sha=${published_zip_digest#sha256:}" >> "$GITHUB_OUTPUT"
@@ -756,23 +1074,10 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
           BUILT_AT: ${{ steps.release.outputs.built_at }}
-          ZIP_SHA: ${{ steps.release.outputs.zip_sha }}
-          INSTALLER_SHA: ${{ steps.release.outputs.installer_sha }}
         run: |
           set -euo pipefail
-          zip="${ARTIFACT_NAME}.zip"
-          installer="${INSTALLER_ASSET_NAME}"
-          zip_sha="$ZIP_SHA"
-          installer_sha="$INSTALLER_SHA"
-          cd release-assets
-          jq -n \
-            --arg zip_sha "$zip_sha" \
-            --arg installer_sha "$installer_sha" \
-            '{"windows-x86_64": $zip_sha, "windows-x86_64-installer": $installer_sha}' \
-            > preview-sha256.json
-
           notes="$GITHUB_WORKSPACE/release-assets/RELEASE_NOTES.md"
-          shas="$GITHUB_WORKSPACE/release-assets/preview-sha256.json"
+          shas="$GITHUB_WORKSPACE/release-assets/published-sha256.json"
           cd "$GITHUB_WORKSPACE/control"
           git fetch --no-tags origin master
           git checkout --force -B manifest-publish origin/master
@@ -807,42 +1112,44 @@ jobs:
             --release-version "$RELEASE_VERSION" \
             --retain 30
 
-          expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}"
-          expected_installer_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${installer}"
+          asset_keys='["linux-aarch64","linux-x86_64","macos-aarch64","macos-x86_64","windows-x86_64","windows-x86_64-installer"]'
           jq -e \
             --arg build_id "$BUILD_ID" \
             --arg commit "$UPSTREAM_SHA" \
             --arg base_version "$BASE_VERSION" \
             --arg release_version "$RELEASE_VERSION" \
             --argjson protocol "$PROTOCOL" \
-            --arg sha "$zip_sha" \
-            --arg installer_sha "$installer_sha" \
-            --arg expected_url "$expected_url" \
-            --arg expected_installer_url "$expected_installer_url" \
+            --arg tag "$TAG" \
+            --argjson names "$ASSET_NAMES_JSON" \
+            --argjson asset_keys "$asset_keys" \
+            --slurpfile shas "$shas" \
             --arg prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/" \
-            'def valid_asset_group:
+            'def valid_digest:
+               type == "string" and test("^[0-9a-f]{64}$");
+             def valid_asset_group:
                type == "object"
                and has("windows-x86_64")
-               and ((keys - ["windows-x86_64", "windows-x86_64-installer"]) | length == 0)
+               and ((keys - $asset_keys) | length == 0)
                and .["windows-x86_64"].format == "zip"
-               and (.["windows-x86_64"].sha256 | test("^[0-9a-f]{64}$"))
                and ((has("windows-x86_64-installer") | not)
-                    or (.["windows-x86_64-installer"].format == "nsis"
-                        and (.["windows-x86_64-installer"].sha256 | test("^[0-9a-f]{64}$"))));
+                    or .["windows-x86_64-installer"].format == "nsis")
+               and ([to_entries[] | .value.sha256] | all(valid_digest))
+               and ([.["linux-x86_64"], .["linux-aarch64"],
+                     .["macos-x86_64"], .["macos-aarch64"]]
+                    | map(select(. != null)) | all(has("format") | not));
              .channel == "preview"
              and .release_version == $release_version
              and .build_id == $build_id
              and .commit == $commit
              and .base_version == $base_version
              and .protocol == $protocol
-             and (.assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
-             and (.builds[$build_id].assets | keys == ["windows-x86_64", "windows-x86_64-installer"])
+             and (.assets | keys == $asset_keys)
+             and (.builds[$build_id].assets | keys == $asset_keys)
              and .builds[$build_id].assets == .assets
              and .builds[$build_id].release_version == $release_version
-             and .assets["windows-x86_64"].url == $expected_url
-             and .assets["windows-x86_64"].sha256 == $sha
-             and .assets["windows-x86_64-installer"].url == $expected_installer_url
-             and .assets["windows-x86_64-installer"].sha256 == $installer_sha
+             and ([$asset_keys[] as $key
+                   | .assets[$key].url == ($prefix + $tag + "/" + $names[$key])
+                     and .assets[$key].sha256 == $shas[0][$key]] | all)
              and ([.assets, (.builds[]?.assets)] | all(valid_asset_group))
              and ([.assets[]?, (.builds[]?.assets[]?)] | all(.url | startswith($prefix)))' \
             website/preview.json >/dev/null
@@ -913,6 +1220,8 @@ jobs:
     env:
       BUILD_ID: ${{ needs.build.outputs.build_id }}
       BASE_VERSION: ${{ needs.build.outputs.base_version }}
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
+      ASSET_NAMES_JSON: ${{ needs.build.outputs.asset_names_json }}
       ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
       INSTALLER_ASSET_NAME: ${{ needs.build.outputs.installer_asset_name }}
     steps:
@@ -1098,16 +1407,38 @@ jobs:
 
           $asset = $manifest.assets.'windows-x86_64'
           $installerAsset = $manifest.assets.'windows-x86_64-installer'
+          $assetNames = $env:ASSET_NAMES_JSON | ConvertFrom-Json
           $releasePrefix = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/"
+          $releaseTag = "v$env:RELEASE_VERSION"
+          $archiveName = [string] $assetNames.PSObject.Properties['windows-x86_64'].Value
+          $installerName = [string] $assetNames.PSObject.Properties['windows-x86_64-installer'].Value
           if ($null -eq $asset -or [string] $asset.format -cne "zip" -or
-              [string] $asset.url -notlike "$releasePrefix*" -or
+              $archiveName -cne "$($env:ARTIFACT_NAME).zip" -or
+              [string] $asset.url -cne "$releasePrefix$releaseTag/$archiveName" -or
               [string] $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
             throw "published preview manifest has no valid fork Windows ZIP asset"
           }
           if ($null -eq $installerAsset -or [string] $installerAsset.format -cne "nsis" -or
-              [string] $installerAsset.url -notlike "$releasePrefix*/$env:INSTALLER_ASSET_NAME" -or
+              $installerName -cne $env:INSTALLER_ASSET_NAME -or
+              [string] $installerAsset.url -cne "$releasePrefix$releaseTag/$installerName" -or
               [string] $installerAsset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
             throw "published preview manifest has no valid fork Windows installer asset"
+          }
+          foreach ($target in @('linux-x86_64', 'linux-aarch64', 'macos-x86_64', 'macos-aarch64')) {
+            $portableAsset = $manifest.assets.PSObject.Properties[$target].Value
+            $portableName = [string] $assetNames.PSObject.Properties[$target].Value
+            if ($null -eq $portableAsset -or [string]::IsNullOrWhiteSpace($portableName) -or
+                [string] $portableAsset.url -cne "$releasePrefix$releaseTag/$portableName" -or
+                [string] $portableAsset.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                $portableAsset.PSObject.Properties.Name -contains 'format') {
+              throw "published preview manifest has no valid $target executable"
+            }
+            $portablePath = Join-Path $env:RUNNER_TEMP $portableName
+            Invoke-WebRequest -Uri ([string] $portableAsset.url) -OutFile $portablePath -TimeoutSec 120
+            $portableActual = (Get-FileHash -LiteralPath $portablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($portableActual -cne [string] $portableAsset.sha256) {
+              throw "published $target executable digest does not match the preview manifest"
+            }
           }
           $archive = Join-Path $env:RUNNER_TEMP "$($env:ARTIFACT_NAME).zip"
           $installer = Join-Path $env:RUNNER_TEMP $env:INSTALLER_ASSET_NAME

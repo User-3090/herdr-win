@@ -9,6 +9,11 @@ from pathlib import Path
 import scripts.conventional_commits as conventional_commits
 import scripts.preview as preview
 
+VALID_SHAS = {
+    target: f"{index:x}" * 64
+    for index, target in enumerate(preview.ASSET_TARGETS, start=1)
+}
+
 
 class PreviewNotesTests(unittest.TestCase):
     def test_humanize_groups_conventional_subjects(self):
@@ -39,11 +44,7 @@ class PreviewNotesTests(unittest.TestCase):
                 base_version="0.6.6",
                 protocol=12,
                 notes=notes,
-                shas={
-                    "linux-x86_64": "deadbeef",
-                    "windows-x86_64": "a" * 64,
-                    "windows-x86_64-installer": "b" * 64,
-                },
+                shas=VALID_SHAS,
                 retain=30,
                 release_version="2026.06.02.1",
             )
@@ -52,16 +53,15 @@ class PreviewNotesTests(unittest.TestCase):
             self.assertEqual(data["release_version"], "2026.06.02.1")
             self.assertEqual(data["build_id"], "abcdef123456.7890abcdef12")
             self.assertEqual(
-                set(data["assets"]),
-                {
-                    "linux-x86_64",
-                    "windows-x86_64",
-                    "windows-x86_64-installer",
-                },
+                set(data["assets"]), set(preview.ASSET_TARGETS),
+            )
+            self.assertEqual(
+                data["assets"]["linux-x86_64"]["url"],
+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
             )
             self.assertEqual(
                 data["assets"]["linux-x86_64"]["sha256"],
-                "deadbeef",
+                VALID_SHAS["linux-x86_64"],
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["url"],
@@ -69,7 +69,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["sha256"],
-                "a" * 64,
+                VALID_SHAS["windows-x86_64"],
             )
             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
             self.assertEqual(
@@ -93,6 +93,10 @@ class PreviewNotesTests(unittest.TestCase):
         self.assertEqual(
             preview.herdr_win_asset_names("2026.07.31.1"),
             {
+                "linux-x86_64": "herdr-win_v2026.07.31.1_linux_amd64",
+                "linux-aarch64": "herdr-win_v2026.07.31.1_linux_arm64",
+                "macos-x86_64": "herdr-win_v2026.07.31.1_macos_amd64",
+                "macos-aarch64": "herdr-win_v2026.07.31.1_macos_arm64",
                 "windows-x86_64": "herdr-win_v2026.07.31.1_windows_amd64.zip",
                 "windows-x86_64-installer": (
                     "herdr-win_v2026.07.31.1_windows_amd64_setup.exe"
@@ -116,23 +120,30 @@ class PreviewNotesTests(unittest.TestCase):
             ):
                 preview.herdr_win_asset_names(invalid)
 
-    def test_windows_preview_asset_requires_sha256(self):
+    def test_preview_assets_require_sha256(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
-                preview.build_manifest(
-                    output=Path(tmp) / "preview.json",
-                    repo="ogulcancelik/herdr",
-                    tag="preview-test",
-                    build_id="abcdef123456.7890abcdef12",
-                    commit="abcdef",
-                    built_at="2026-06-02T03:00:00Z",
-                    base_version="0.6.6",
-                    protocol=12,
-                    notes="test",
-                    shas={},
-                    retain=1,
-                )
+            for target in preview.ASSET_TARGETS:
+                shas = dict(VALID_SHAS)
+                shas.pop(target)
+                with self.subTest(target=target), self.assertRaisesRegex(
+                    ValueError, f"{target} requires"
+                ):
+                    preview.build_manifest(
+                        output=Path(tmp) / "preview.json",
+                        repo="ogulcancelik/herdr",
+                        tag="preview-test",
+                        build_id="abcdef123456.7890abcdef12",
+                        commit="abcdef",
+                        built_at="2026-06-02T03:00:00Z",
+                        base_version="0.6.6",
+                        protocol=12,
+                        notes="test",
+                        shas=shas,
+                        retain=1,
+                    )
 
+            invalid = dict(VALID_SHAS)
+            invalid["windows-x86_64-installer"] = "B" * 64
             with self.assertRaisesRegex(
                 ValueError, "windows-x86_64-installer requires"
             ):
@@ -146,27 +157,7 @@ class PreviewNotesTests(unittest.TestCase):
                     base_version="0.6.6",
                     protocol=12,
                     notes="test",
-                    shas={
-                        "windows-x86_64": "a" * 64,
-                        "windows-x86_64-installer": "B" * 64,
-                    },
-                    retain=1,
-                )
-
-            with self.assertRaisesRegex(
-                ValueError, "windows-x86_64-installer requires"
-            ):
-                preview.build_manifest(
-                    output=Path(tmp) / "preview.json",
-                    repo="ogulcancelik/herdr",
-                    tag="preview-test",
-                    build_id="abcdef123456.7890abcdef12",
-                    commit="abcdef",
-                    built_at="2026-06-02T03:00:00Z",
-                    base_version="0.6.6",
-                    protocol=12,
-                    notes="test",
-                    shas={"windows-x86_64": "a" * 64},
+                    shas=invalid,
                     retain=1,
                 )
 
@@ -203,10 +194,7 @@ class PreviewNotesTests(unittest.TestCase):
                 base_version="0.6.6",
                 protocol=12,
                 notes="test",
-                shas={
-                    "windows-x86_64": "a" * 64,
-                    "windows-x86_64-installer": "b" * 64,
-                },
+                shas=VALID_SHAS,
                 retain=2,
             )
             data = json.loads(content)
@@ -215,7 +203,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 set(data["builds"]["abcdef123456.7890abcdef12"]["assets"]),
-                {"windows-x86_64", "windows-x86_64-installer"},
+                set(preview.ASSET_TARGETS),
             )
 
     def test_manifest_build_id_uses_source_and_control_hashes(self):
@@ -231,10 +219,7 @@ class PreviewNotesTests(unittest.TestCase):
                     base_version="0.6.6",
                     protocol=12,
                     notes="test",
-                    shas={
-                        "windows-x86_64": "a" * 64,
-                        "windows-x86_64-installer": "b" * 64,
-                    },
+                    shas=VALID_SHAS,
                     retain=1,
                 )
 

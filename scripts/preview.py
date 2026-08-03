@@ -183,6 +183,10 @@ def herdr_win_asset_names(release_version: str) -> dict[str, str]:
     except ValueError as error:
         raise ValueError("release_version must contain a real UTC calendar date") from error
     return {
+        "linux-x86_64": f"herdr-win_v{release_version}_linux_amd64",
+        "linux-aarch64": f"herdr-win_v{release_version}_linux_arm64",
+        "macos-x86_64": f"herdr-win_v{release_version}_macos_amd64",
+        "macos-aarch64": f"herdr-win_v{release_version}_macos_arm64",
         "windows-x86_64": f"herdr-win_v{release_version}_windows_amd64.zip",
         "windows-x86_64-installer": (
             f"herdr-win_v{release_version}_windows_amd64_setup.exe"
@@ -212,16 +216,14 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
 
 
 def asset_objects(urls: dict[str, str], shas: dict[str, str]) -> dict[str, dict[str, str]]:
-    for target in ("windows-x86_64", "windows-x86_64-installer"):
-        windows_sha = shas.get(target)
-        if not windows_sha or not re.fullmatch(r"[0-9a-f]{64}", windows_sha):
+    for target in ASSET_TARGETS:
+        sha = shas.get(target)
+        if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
             raise ValueError(f"{target} requires a lowercase SHA-256 digest")
 
     assets: dict[str, dict[str, str]] = {}
     for target in ASSET_TARGETS:
-        sha = shas.get(target)
-        if not sha:
-            continue
+        sha = shas[target]
         entry = {"url": urls[target], "sha256": sha}
         if target == "windows-x86_64":
             entry["format"] = "zip"

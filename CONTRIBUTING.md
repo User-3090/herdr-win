@@ -100,12 +100,13 @@ closed if `master` advances to an untested control revision.
 
 Each manual dispatch supplies one unused herdr-win CalVer in `YYYY.MM.DD.N`
 format. Use the UTC release date and increment `N` for another release that day.
-Do not reuse one CalVer for different source. Platform assets share
-`herdr-win_v<CalVer>_<os>_<arch>.<ext>` for portable packages and append
-`_setup.exe` for Windows setup; upstream package versions and source/control
-hashes remain separate provenance. Preserve these machine-consumed names; show the
-stable Herdr version beside the CalVer in the GitHub release title, notes, and
-installer metadata instead of changing updater-facing filenames.
+Do not reuse one CalVer for different source. Linux and macOS publish raw
+`herdr-win_v<CalVer>_{linux,macos}_{amd64,arm64}` executables. Windows publishes
+`herdr-win_v<CalVer>_windows_amd64.zip` and appends `_setup.exe` for setup; upstream
+package versions and source/control hashes remain separate provenance. Preserve
+these machine-consumed names; show the stable Herdr version beside the CalVer in
+the GitHub release title, notes, and installer metadata instead of changing
+updater-facing filenames.
 
 Publication also fails closed on replay conflict, source drift, missing or mutable
 assets, digest mismatch, wrong installer pin, or feed content that was not fetched
@@ -117,8 +118,8 @@ Manual release work is ephemeral: never create or force-push an integration
 branch, merge upstream into a release branch, resolve replay conflicts
 automatically, or publish releases from ordinary pushes. A conflict fails closed.
 On a same-source rerun, the existing immutable release is canonical; validate and
-reuse both Windows assets, derive each manifest digest independently from the
-downloaded canonical release, and never replace or repoint either asset.
+reuse its complete platform asset set, derive each manifest digest independently
+from the downloaded canonical release, and never replace or repoint an asset.
 
 ## Verification
 
@@ -137,14 +138,15 @@ cargo fmt --check
 cargo clippy --bins --locked --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
-Use the manually dispatched Windows release workflow for the signed ConPTY package, enhanced-input,
-PowerShell 5.1/7 installer lifecycle and fault-retry matrix, managed launcher,
-and system-fallback gates that depend on GitHub's Windows runner.
+Use the manually dispatched release workflow for the Linux/macOS target builds and
+machine checks as well as the signed ConPTY package, enhanced-input, PowerShell
+5.1/7 installer lifecycle and fault-retry matrix, managed launcher, and system-
+fallback gates that depend on GitHub's Windows runner.
 
 Workflow changes require `actionlint` plus review of triggers, permissions,
 credential persistence, immutable source identity, artifact digests, and failure
-behavior. Native package or installer changes require the Windows release gates
-or equivalent real Windows evidence.
+behavior. Native package or installer changes require the corresponding release
+gate or equivalent real-platform evidence.
 
 Documentation, process, and canonical-owner-only changes that do not alter a
 mailbox or executable workflow use inline review, `git diff --check`, README mirror

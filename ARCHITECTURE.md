@@ -117,15 +117,21 @@ behavior; code and tests remain the detailed implementation truth.
 ## Release and Generated State
 
 - `.github/workflows/ci.yml` owns cheap replay validation.
-  `.github/workflows/windows-nightly.yml` is legacy-named but owns only manually
-  dispatched Windows native tests, immutable asset publication, manifest generation,
-  and public-feed verification against recorded `BASE`.
+  `.github/workflows/windows-nightly.yml` is legacy-named but owns the one manually
+  dispatched cross-platform release: Windows native/package tests, four upstream-
+  supported Linux/macOS executable builds, immutable asset publication, manifest
+  generation, and public-feed verification against recorded `BASE`.
 - Manual dispatch requires a herdr-win CalVer `YYYY.MM.DD.N`; the release tag is
-  `v<CalVer>`. Portable assets follow
-  `herdr-win_v<CalVer>_<os>_<arch>.<ext>` and Windows setup appends `_setup.exe`,
-  currently using `windows_amd64`. The manifest's upstream-compatible target keys
-  remain separate from filenames so additional upstream-supported platforms can
-  use the same release and naming contract later.
+  `v<CalVer>`. Linux and macOS publish raw executables named
+  `herdr-win_v<CalVer>_{linux,macos}_{amd64,arm64}` for direct remote installation.
+  Windows keeps `herdr-win_v<CalVer>_windows_amd64.zip` and the corresponding
+  `_setup.exe`. The manifest's upstream-compatible target keys remain separate from
+  these fork-presented filenames.
+- Every platform job independently replays the selected BASE and queue. Its source
+  tree must match the tree already tested by the Windows owner job, while one shared
+  upstream/control build ID and protocol value identify all assets. Publication and
+  the generated manifest proceed only when all six target assets have verified
+  SHA-256 digests; retained historical manifest entries may remain Windows-only.
 - Machine-consumed tags and asset filenames remain CalVer-only for existing updater
   compatibility. The GitHub release title is `herdr-win v<CalVer> (Herdr
   v<upstream-version>)`; release notes and installer metadata expose that same
@@ -148,8 +154,9 @@ behavior; code and tests remain the detailed implementation truth.
 - Verification has distinct control-plane inventory, replayed-product, and
   native/package lanes. `CONTRIBUTING.md` owns when each lane runs and keeps broad
   gates on one frozen logical snapshot.
-- Formatting, Clippy, and Rust tests run in replayed product source. Windows
-  packaging changes add package/vendor checks plus PowerShell 5.1/7 and realistic
-  native installer evidence where that boundary changed.
+- Formatting, Clippy, and Rust tests run in replayed product source. Cross-platform
+  release builds add native target/machine checks and static-link validation for
+  Linux. Windows packaging changes add package/vendor checks plus PowerShell 5.1/7
+  and realistic native installer evidence where that boundary changed.
 - Broad gates run on an implementation-frozen snapshot. Passing evidence remains
   valid until relevant source, inputs, or environment-sensitive assumptions change.

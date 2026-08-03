@@ -1,4 +1,4 @@
-From ad6c0cfcecef3d22465142a587d137f08743d65d Mon Sep 17 00:00:00 2001
+From 150fb73e6dde4e04d21a18a11fa2144ad470aaa0 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -24,9 +24,9 @@ Refs ogulcancelik/herdr#1947
  ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
  scripts/package_windows_conpty.py             |  263 +++
  scripts/package_windows_installer.ps1         |  461 ++++
- scripts/preview.py                            |   80 +-
+ scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |  170 ++
- scripts/test_preview.py                       |  195 +-
+ scripts/test_preview.py                       |  212 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
  scripts/test_windows_installer.py             |  611 +++++
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 ++-
- 57 files changed, 9646 insertions(+), 232 deletions(-)
+ 57 files changed, 9664 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -55107,7 +55107,7 @@ index 0000000000000000000000000000000000000000..d914b4e3d21e334e2aee7a2d914e3eaf
 +
 +Write-Host "Created $ProductName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
-index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a94302868db33846 100644
+index e173f8651ae1e685d5d2a88531dccd73d8410a43..7e0d15912ee22b09745d342a7de34e51ffba676d 100644
 --- a/scripts/preview.py
 +++ b/scripts/preview.py
 @@ -5,6 +5,7 @@ import argparse
@@ -55136,7 +55136,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
  HIDDEN_SUBJECTS = (
      "docs: update website manifest",
      "docs: update preview manifest",
-@@ -164,9 +170,34 @@ def build_notes(previous: str, commit: str, build_id: str, base_version: str, re
+@@ -164,9 +170,38 @@ def build_notes(previous: str, commit: str, build_id: str, base_version: str, re
      return "\n".join(lines).rstrip() + "\n"
  
  
@@ -55154,6 +55154,10 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
 +    except ValueError as error:
 +        raise ValueError("release_version must contain a real UTC calendar date") from error
 +    return {
++        "linux-x86_64": f"herdr-win_v{release_version}_linux_amd64",
++        "linux-aarch64": f"herdr-win_v{release_version}_linux_arm64",
++        "macos-x86_64": f"herdr-win_v{release_version}_macos_amd64",
++        "macos-aarch64": f"herdr-win_v{release_version}_macos_arm64",
 +        "windows-x86_64": f"herdr-win_v{release_version}_windows_amd64.zip",
 +        "windows-x86_64-installer": (
 +            f"herdr-win_v{release_version}_windows_amd64_setup.exe"
@@ -55173,24 +55177,23 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
          for target in ASSET_TARGETS
      }
  
-@@ -181,13 +212,21 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
+@@ -181,13 +216,19 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
  
  
  def asset_objects(urls: dict[str, str], shas: dict[str, str]) -> dict[str, dict[str, str]]:
-+    for target in ("windows-x86_64", "windows-x86_64-installer"):
-+        windows_sha = shas.get(target)
-+        if not windows_sha or not re.fullmatch(r"[0-9a-f]{64}", windows_sha):
-+            raise ValueError(f"{target} requires a lowercase SHA-256 digest")
-+
-     assets: dict[str, dict[str, str]] = {}
+-    assets: dict[str, dict[str, str]] = {}
      for target in ASSET_TARGETS:
 -        url = urls[target]
 -        entry = {"url": url}
          sha = shas.get(target)
 -        if sha:
 -            entry["sha256"] = sha
-+        if not sha:
-+            continue
++        if not sha or not re.fullmatch(r"[0-9a-f]{64}", sha):
++            raise ValueError(f"{target} requires a lowercase SHA-256 digest")
++
++    assets: dict[str, dict[str, str]] = {}
++    for target in ASSET_TARGETS:
++        sha = shas[target]
 +        entry = {"url": urls[target], "sha256": sha}
 +        if target == "windows-x86_64":
 +            entry["format"] = "zip"
@@ -55199,7 +55202,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
          assets[target] = entry
      return assets
  
-@@ -204,13 +243,16 @@ def build_manifest(
+@@ -204,13 +245,16 @@ def build_manifest(
      notes: str,
      shas: dict[str, str],
      retain: int,
@@ -55220,7 +55223,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
          "base_version": normalize_version(base_version),
          "commit": commit,
          "built_at": built_at,
-@@ -218,6 +260,9 @@ def build_manifest(
+@@ -218,6 +262,9 @@ def build_manifest(
          "tag": tag,
          "assets": assets,
      }
@@ -55230,7 +55233,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
      ordered_builds = {
          key: builds[key]
          for key in sorted(
-@@ -238,6 +283,8 @@ def build_manifest(
+@@ -238,6 +285,8 @@ def build_manifest(
          "assets": assets,
          "builds": ordered_builds,
      }
@@ -55239,7 +55242,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
      return json.dumps(manifest, indent=2) + "\n"
  
  
-@@ -263,6 +310,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
+@@ -263,6 +312,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
          notes=notes,
          shas=shas,
          retain=args.retain,
@@ -55247,7 +55250,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
      )
      Path(args.output).write_text(content, encoding="utf-8")
      return 0
-@@ -285,6 +333,11 @@ def cmd_range_base(args: argparse.Namespace) -> int:
+@@ -285,6 +335,11 @@ def cmd_range_base(args: argparse.Namespace) -> int:
      return 0
  
  
@@ -55259,7 +55262,7 @@ index e173f8651ae1e685d5d2a88531dccd73d8410a43..bd1a66c42703a1d4001ebe01a9430286
  def main() -> int:
      parser = argparse.ArgumentParser(description="Preview channel release helpers")
      sub = parser.add_subparsers(required=True)
-@@ -311,8 +364,13 @@ def main() -> int:
+@@ -311,8 +366,13 @@ def main() -> int:
      manifest.add_argument("--notes", required=True)
      manifest.add_argument("--sha-file")
      manifest.add_argument("--retain", type=int, default=30)
@@ -55450,10 +55453,22 @@ index 0000000000000000000000000000000000000000..9dee7737199f7b2fc6117163ae5562af
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/scripts/test_preview.py b/scripts/test_preview.py
-index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b7b59612e 100644
+index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..45cbd1fa9686ed1b6e6993fa5b8e6dd9d91d4dc3 100644
 --- a/scripts/test_preview.py
 +++ b/scripts/test_preview.py
-@@ -32,28 +32,211 @@ class PreviewNotesTests(unittest.TestCase):
+@@ -9,6 +9,11 @@ from pathlib import Path
+ import scripts.conventional_commits as conventional_commits
+ import scripts.preview as preview
+ 
++VALID_SHAS = {
++    target: f"{index:x}" * 64
++    for index, target in enumerate(preview.ASSET_TARGETS, start=1)
++}
++
+ 
+ class PreviewNotesTests(unittest.TestCase):
+     def test_humanize_groups_conventional_subjects(self):
+@@ -32,28 +37,191 @@ class PreviewNotesTests(unittest.TestCase):
              content = preview.build_manifest(
                  output=output,
                  repo="ogulcancelik/herdr",
@@ -55467,11 +55482,7 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
                  protocol=12,
                  notes=notes,
 -                shas={"linux-x86_64": "deadbeef"},
-+                shas={
-+                    "linux-x86_64": "deadbeef",
-+                    "windows-x86_64": "a" * 64,
-+                    "windows-x86_64-installer": "b" * 64,
-+                },
++                shas=VALID_SHAS,
                  retain=30,
 +                release_version="2026.06.02.1",
              )
@@ -55481,16 +55492,16 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +            self.assertEqual(data["release_version"], "2026.06.02.1")
 +            self.assertEqual(data["build_id"], "abcdef123456.7890abcdef12")
 +            self.assertEqual(
-+                set(data["assets"]),
-+                {
-+                    "linux-x86_64",
-+                    "windows-x86_64",
-+                    "windows-x86_64-installer",
-+                },
++                set(data["assets"]), set(preview.ASSET_TARGETS),
++            )
++            self.assertEqual(
++                data["assets"]["linux-x86_64"]["url"],
++                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
 +            )
              self.assertEqual(
                  data["assets"]["linux-x86_64"]["sha256"],
-                 "deadbeef",
+-                "deadbeef",
++                VALID_SHAS["linux-x86_64"],
              )
              self.assertEqual(
                  data["assets"]["windows-x86_64"]["url"],
@@ -55499,7 +55510,7 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +            )
 +            self.assertEqual(
 +                data["assets"]["windows-x86_64"]["sha256"],
-+                "a" * 64,
++                VALID_SHAS["windows-x86_64"],
 +            )
 +            self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
 +            self.assertEqual(
@@ -55517,13 +55528,16 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +            self.assertEqual(
 +                data["builds"]["abcdef123456.7890abcdef12"]["release_version"],
 +                "2026.06.02.1",
-             )
--            self.assertIn("2026-06-02-abcdef123456", data["builds"])
++            )
 +
 +    def test_herdr_win_asset_names_require_real_calver(self):
 +        self.assertEqual(
 +            preview.herdr_win_asset_names("2026.07.31.1"),
 +            {
++                "linux-x86_64": "herdr-win_v2026.07.31.1_linux_amd64",
++                "linux-aarch64": "herdr-win_v2026.07.31.1_linux_arm64",
++                "macos-x86_64": "herdr-win_v2026.07.31.1_macos_amd64",
++                "macos-aarch64": "herdr-win_v2026.07.31.1_macos_arm64",
 +                "windows-x86_64": "herdr-win_v2026.07.31.1_windows_amd64.zip",
 +                "windows-x86_64-installer": (
 +                    "herdr-win_v2026.07.31.1_windows_amd64_setup.exe"
@@ -55547,23 +55561,30 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +            ):
 +                preview.herdr_win_asset_names(invalid)
 +
-+    def test_windows_preview_asset_requires_sha256(self):
++    def test_preview_assets_require_sha256(self):
 +        with tempfile.TemporaryDirectory() as tmp:
-+            with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
-+                preview.build_manifest(
-+                    output=Path(tmp) / "preview.json",
-+                    repo="ogulcancelik/herdr",
-+                    tag="preview-test",
-+                    build_id="abcdef123456.7890abcdef12",
-+                    commit="abcdef",
-+                    built_at="2026-06-02T03:00:00Z",
-+                    base_version="0.6.6",
-+                    protocol=12,
-+                    notes="test",
-+                    shas={},
-+                    retain=1,
-+                )
++            for target in preview.ASSET_TARGETS:
++                shas = dict(VALID_SHAS)
++                shas.pop(target)
++                with self.subTest(target=target), self.assertRaisesRegex(
++                    ValueError, f"{target} requires"
++                ):
++                    preview.build_manifest(
++                        output=Path(tmp) / "preview.json",
++                        repo="ogulcancelik/herdr",
++                        tag="preview-test",
++                        build_id="abcdef123456.7890abcdef12",
++                        commit="abcdef",
++                        built_at="2026-06-02T03:00:00Z",
++                        base_version="0.6.6",
++                        protocol=12,
++                        notes="test",
++                        shas=shas,
++                        retain=1,
++                    )
 +
++            invalid = dict(VALID_SHAS)
++            invalid["windows-x86_64-installer"] = "B" * 64
 +            with self.assertRaisesRegex(
 +                ValueError, "windows-x86_64-installer requires"
 +            ):
@@ -55577,27 +55598,7 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +                    base_version="0.6.6",
 +                    protocol=12,
 +                    notes="test",
-+                    shas={
-+                        "windows-x86_64": "a" * 64,
-+                        "windows-x86_64-installer": "B" * 64,
-+                    },
-+                    retain=1,
-+                )
-+
-+            with self.assertRaisesRegex(
-+                ValueError, "windows-x86_64-installer requires"
-+            ):
-+                preview.build_manifest(
-+                    output=Path(tmp) / "preview.json",
-+                    repo="ogulcancelik/herdr",
-+                    tag="preview-test",
-+                    build_id="abcdef123456.7890abcdef12",
-+                    commit="abcdef",
-+                    built_at="2026-06-02T03:00:00Z",
-+                    base_version="0.6.6",
-+                    protocol=12,
-+                    notes="test",
-+                    shas={"windows-x86_64": "a" * 64},
++                    shas=invalid,
 +                    retain=1,
 +                )
 +
@@ -55634,10 +55635,7 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +                base_version="0.6.6",
 +                protocol=12,
 +                notes="test",
-+                shas={
-+                    "windows-x86_64": "a" * 64,
-+                    "windows-x86_64-installer": "b" * 64,
-+                },
++                shas=VALID_SHAS,
 +                retain=2,
 +            )
 +            data = json.loads(content)
@@ -55646,8 +55644,9 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +            )
 +            self.assertEqual(
 +                set(data["builds"]["abcdef123456.7890abcdef12"]["assets"]),
-+                {"windows-x86_64", "windows-x86_64-installer"},
-+            )
++                set(preview.ASSET_TARGETS),
+             )
+-            self.assertIn("2026-06-02-abcdef123456", data["builds"])
 +
 +    def test_manifest_build_id_uses_source_and_control_hashes(self):
 +        with tempfile.TemporaryDirectory() as tmp:
@@ -55662,15 +55661,49 @@ index 87bd52eb5bce417a9504e35c89c3a5100d19d6fd..db6296dca32fbb4c95febaeb751c5f0b
 +                    base_version="0.6.6",
 +                    protocol=12,
 +                    notes="test",
-+                    shas={
-+                        "windows-x86_64": "a" * 64,
-+                        "windows-x86_64-installer": "b" * 64,
-+                    },
++                    shas=VALID_SHAS,
 +                    retain=1,
 +                )
  
      def test_hidden_subjects_include_preview_manifest_commits(self):
          self.assertTrue(preview.hidden_subject("docs: update preview manifest"))
+@@ -156,7 +324,35 @@ file: ../../../public/assets/logo.svg
+         self.assertIn("file: ../../../../public/assets/logo.svg", output)
+         self.assertIn("from '../../../components/ConfigReference.astro'", output)
+         self.assertIn("from '../../../../components/LocaleWidget.astro'", output)
+-        self.assertIn("Preview docs describe unreleased preview builds", output)
++        self.assertIn("Next docs describe unreleased work", output)
++        self.assertIn("edit/master/docs/next/website/src/content/docs/", output)
++
++    def test_version_docs_rewrite_links_and_source_paths(self):
++        source = """---
++title: Install Herdr
++---
++
++import ConfigReference from '../../components/ConfigReference.astro';
++
++[Install](/docs/install/)
++[Skill](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)
++file: ../../../public/assets/logo.svg
++"""
++        output = subprocess.check_output(
++            [
++                "node",
++                "website/scripts/prepare-docs.mjs",
++                "--rewrite-version-doc-fixture",
++                "0.7.4",
++            ],
++            input=source,
++            text=True,
++        )
++        self.assertIn("[Install](/docs/0.7.4/install/)", output)
++        self.assertIn("file: ../../../../../public/assets/logo.svg", output)
++        self.assertIn("from '../../../../components/ConfigReference.astro'", output)
++        self.assertIn("blob/v0.7.4/docs/next/website/src/content/docs/index.mdx", output)
++        self.assertIn("blob/v0.7.4/SKILL.md", output)
+ 
+ 
+ class ConventionalCommitTests(unittest.TestCase):
 diff --git a/scripts/test_vendor_libghostty_vt.py b/scripts/test_vendor_libghostty_vt.py
 index ad5c8d5e2f46793d46f75cbd84710b58a3447fdc..2986af8f9609e27886eb2be61f121c44710a6049 100644
 --- a/scripts/test_vendor_libghostty_vt.py
@@ -62559,3 +62592,4 @@ index 133eab52dbefde90fccc1e80f2fcc01fdbdb3193..21700f702bbc0cb54cb4a3100c0d85a4
  lazy_static! {
 -- 
 2.55.0.windows.3
+

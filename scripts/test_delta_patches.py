@@ -23,6 +23,25 @@ FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/
 FORK_RAW_PREFIX = "https://raw.githubusercontent.com/User-3090/herdr-win/"
 WINDOWS_ZIP_TARGET = "windows-x86_64"
 WINDOWS_INSTALLER_TARGET = "windows-x86_64-installer"
+PORTABLE_TARGET_NAMES = {
+    "linux-x86_64": re.compile(
+        r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_linux_amd64$"
+    ),
+    "linux-aarch64": re.compile(
+        r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_linux_arm64$"
+    ),
+    "macos-x86_64": re.compile(
+        r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_macos_amd64$"
+    ),
+    "macos-aarch64": re.compile(
+        r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_macos_arm64$"
+    ),
+}
+RELEASE_TARGETS = {
+    *PORTABLE_TARGET_NAMES,
+    WINDOWS_ZIP_TARGET,
+    WINDOWS_INSTALLER_TARGET,
+}
 WINDOWS_SETUP_NAME = re.compile(
     r"^herdr-win_v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*_windows_amd64_setup\.exe$"
 )
@@ -100,9 +119,22 @@ class DeltaPatchTests(unittest.TestCase):
         for assets in asset_groups:
             self.assertIsInstance(assets, dict)
             self.assertIn(WINDOWS_ZIP_TARGET, assets)
-            self.assertLessEqual(
-                set(assets), {WINDOWS_ZIP_TARGET, WINDOWS_INSTALLER_TARGET}
-            )
+            self.assertLessEqual(set(assets), RELEASE_TARGETS)
+            for target, name_pattern in PORTABLE_TARGET_NAMES.items():
+                if target not in assets:
+                    continue
+                portable = assets[target]
+                self.assertIsInstance(portable, dict)
+                self.assertTrue(
+                    str(portable.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+                )
+                self.assertRegex(
+                    str(portable.get("url", "")).rsplit("/", 1)[-1], name_pattern
+                )
+                self.assertRegex(
+                    str(portable.get("sha256", "")), r"^[0-9a-f]{64}$"
+                )
+                self.assertNotIn("format", portable)
             windows = assets[WINDOWS_ZIP_TARGET]
             self.assertIsInstance(windows, dict)
             self.assertTrue(
@@ -193,9 +225,29 @@ class DeltaPatchTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("herdr-win_v{release_version}_windows_amd64.zip", preview_source)
+        for name in (
+            "herdr-win_v{release_version}_linux_amd64",
+            "herdr-win_v{release_version}_linux_arm64",
+            "herdr-win_v{release_version}_macos_amd64",
+            "herdr-win_v{release_version}_macos_arm64",
+        ):
+            self.assertIn(name, preview_source)
         self.assertIn(
             "herdr-win_v{release_version}_windows_amd64_setup.exe", preview_source
         )
+        for target in PORTABLE_TARGET_NAMES:
+            self.assertIn(target, workflow)
+        for rust_target in (
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ):
+            self.assertIn(rust_target, workflow)
+        self.assertIn("needs: [build, build-portable]", workflow)
+        self.assertIn("pattern: herdr-win-portable-*", workflow)
+        self.assertIn("merge-multiple: true", workflow)
+        self.assertIn('"linux-x86_64": $linux_x86_64', workflow)
         self.assertIn('format -cne "nsis"', workflow)
         self.assertIn("installer_sha", workflow)
         self.assertIn("\n  workflow_dispatch:\n", workflow)
