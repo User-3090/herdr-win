@@ -35,6 +35,7 @@ $script:RuntimePattern = '\Aherdr-runtime-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{1
 $script:LeasePattern = '^([0-9a-f]{12}\.[0-9a-f]{12})\.lease$'
 $script:PendingLauncherPattern = '^launcher\.pending-([0-9a-f]{64})\.exe$'
 $script:LauncherReplacementName = "herdr.exe.new"
+$script:LauncherBuildIdArgument = "--herdr-private-launcher-build-id-v1"
 $script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 $script:InstallManifestHeader = "herdr-install-manifest-v1"
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
@@ -683,6 +684,11 @@ function Assert-HerdrRuntimeDirectory {
     }
     Assert-HerdrRegularFile -Path (Join-Path $Path "herdr.exe")
     $manifest = Read-HerdrRuntimeManifest -RuntimeRoot $Path
+    foreach ($relative in $manifest.Keys) {
+        if ([IO.Path]::GetFileName([string]$relative) -ceq "herdr-launcher.exe") {
+            throw "Runtime contains the obsolete launcher hop and must be uninstalled first: $Path"
+        }
+    }
     $actualFiles = @($tree | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
         (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
     })
@@ -812,6 +818,60 @@ function Read-HerdrInstallManifest {
     return Read-HerdrInstallManifestFile -Path (Join-Path $StateDir "install.manifest")
 }
 
+function Get-HerdrLauncherBuildId {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutMilliseconds = 30000
+    )
+
+    Assert-HerdrRegularFile -Path $Path
+    if ($TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 120000) {
+        throw "Launcher build-ID timeout must be between 1 and 120000 milliseconds."
+    }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Path
+    $startInfo.Arguments = $script:LauncherBuildIdArgument
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start the managed launcher build-ID query: $Path"
+        }
+        $started = $true
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill()
+            [void]$process.WaitForExit(5000)
+            throw "Managed launcher build-ID query exceeded $TimeoutMilliseconds ms: $Path"
+        }
+        [void]$process.WaitForExit()
+        $output = $stdout.GetAwaiter().GetResult()
+        $errorOutput = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $errorOutput.Length -ne 0) {
+            throw "Managed launcher build-ID query failed for $Path (exit $($process.ExitCode)): $errorOutput"
+        }
+        if ($output.EndsWith("`r`n", [StringComparison]::Ordinal)) {
+            $output = $output.Substring(0, $output.Length - 2)
+        } elseif ($output.EndsWith("`n", [StringComparison]::Ordinal)) {
+            $output = $output.Substring(0, $output.Length - 1)
+        }
+        Assert-HerdrBuildId -Value $output
+        return $output
+    } finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill()
+            [void]$process.WaitForExit(5000)
+        }
+        $process.Dispose()
+    }
+}
+
 function Get-HerdrPendingLauncher {
     param([Parameter(Mandatory = $true)][string]$StateDir)
 
@@ -846,10 +906,16 @@ function Get-HerdrPendingLauncher {
 function Set-HerdrPendingLauncher {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
-        [Parameter(Mandatory = $true)][string]$LauncherPath
+        [Parameter(Mandatory = $true)][string]$LauncherPath,
+        [Parameter(Mandatory = $true)][string]$BuildId
     )
 
     Assert-HerdrRegularFile -Path $LauncherPath
+    Assert-HerdrBuildId -Value $BuildId
+    $launcherBuildId = Get-HerdrLauncherBuildId -Path $LauncherPath
+    if ($launcherBuildId -cne $BuildId) {
+        throw "Managed launcher build ID '$launcherBuildId' does not match runtime '$BuildId': $LauncherPath"
+    }
     $stateDir = Join-Path $InstallRoot "state"
     $manifest = Read-HerdrInstallManifest -StateDir $stateDir
     $installed = Join-Path $InstallRoot "bin\herdr.exe"
@@ -932,6 +998,11 @@ function Repair-HerdrLauncherPublication {
     }
     if ($null -eq $pending -or $installedSha256 -cne $pending.Sha256) {
         throw "Managed launcher hash matches neither the install manifest nor a validated pending launcher: $launcher"
+    }
+    $activeBuildId = Read-HerdrPointer -Path (Join-Path $stateDir "active")
+    $pendingBuildId = Get-HerdrLauncherBuildId -Path $pending.Path
+    if ($pendingBuildId -cne $activeBuildId) {
+        throw "Pending managed launcher build ID '$pendingBuildId' does not match active runtime '$activeBuildId'."
     }
     Set-HerdrInstallManifestBootstrapHash -InstallRoot $InstallRoot -BootstrapSha256 $installedSha256
     Remove-Item -LiteralPath $pending.Path -Force
@@ -1461,6 +1532,23 @@ function Remove-HerdrRecoverableUninstallTransaction {
     }
 }
 
+function Test-HerdrLegacyLauncherHop {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $runtimeRoot = Join-Path $InstallRoot "runtime"
+    if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container) -or
+        (Get-Item -LiteralPath $runtimeRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        return $false
+    }
+    foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory)) {
+        if (-not ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            (Test-Path -LiteralPath (Join-Path $runtime.FullName "herdr-launcher.exe"))) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-HerdrRootKind {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
@@ -1475,7 +1563,7 @@ function Get-HerdrRootKind {
         Assert-HerdrManagedRoot -InstallRoot $InstallRoot
         return "Managed"
     } catch {
-        throw "The existing Herdr installation is not compatible with this setup. Uninstall $script:ProductName from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
+        throw "The existing Herdr installation is not compatible with this setup. Uninstall the existing Herdr or Herdr Win entry from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
     }
 }
 
@@ -1705,6 +1793,11 @@ function Complete-HerdrLauncherUpdateLocked {
     if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
         return $false
     }
+    $activeBuildId = Read-HerdrPointer -Path (Join-Path $stateDir "active")
+    $pendingBuildId = Get-HerdrLauncherBuildId -Path $pending.Path
+    if ($pendingBuildId -cne $activeBuildId) {
+        throw "Pending managed launcher build ID '$pendingBuildId' does not match active runtime '$activeBuildId'."
+    }
 
     $launcher = Join-Path $InstallRoot "bin\herdr.exe"
     $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
@@ -1884,7 +1977,7 @@ function Install-HerdrManagedUpgrade {
 
             Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
             Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
-            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath)
+            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath -BuildId $BuildId)
 
             $activePath = Join-Path $stateDir "active"
             $activeBuild = Read-HerdrPointer -Path $activePath
@@ -1945,6 +2038,10 @@ function Install-HerdrLayout {
     $StageDir = Get-HerdrFullPath -Path $StageDir
     Assert-HerdrRegularDirectory -Path $StageDir
     Assert-HerdrRegularFile -Path $LauncherPath
+    $launcherBuildId = Get-HerdrLauncherBuildId -Path $LauncherPath
+    if ($launcherBuildId -cne $BuildId) {
+        throw "Managed launcher build ID '$launcherBuildId' does not match runtime '$BuildId': $LauncherPath"
+    }
     Assert-HerdrRegularFile -Path $UninstallerPath
     Assert-HerdrRegularFile -Path $HelperSourcePath
     [void](Get-HerdrAgentSkillSha256 -Path $SkillSourcePath)
@@ -1952,6 +2049,10 @@ function Install-HerdrLayout {
     if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
         -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
         Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
+    }
+
+    if (Test-HerdrLegacyLauncherHop -InstallRoot $InstallRoot) {
+        throw "The existing Herdr installation is not compatible with this setup. Uninstall the existing Herdr or Herdr Win entry from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
     }
 
     if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and

@@ -1,4 +1,4 @@
-From fa61e5040a9bfde710af1c22ac820dc6a6672a14 Mon Sep 17 00:00:00 2001
+From ac8157fc1da7bb0bcb4b42b90628c47fd0f67bcc Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -11,7 +11,7 @@ Refs ogulcancelik/herdr#1947
  build.rs                                      |    1 -
  justfile                                      |    6 +-
  packaging/windows/conpty.json                 |   48 +
- packaging/windows/herdr-installer-helper.ps1  | 2323 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 2424 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -29,11 +29,11 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  212 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
- scripts/test_windows_installer.py             |  639 +++++
+ scripts/test_windows_installer.py             |  642 +++++
  .../windows_conpty_enhanced_input_probe.ps1   |  418 +++
  .../windows_install_conpty_package_test.ps1   |   26 +
  scripts/windows_installer_fault_test.ps1      |  430 +++
- scripts/windows_installer_test.ps1            |  622 +++++
+ scripts/windows_installer_test.ps1            |  687 +++++
  scripts/windows_smoke_conpty_path.ps1         |   36 +-
  skills/herdr/SKILL.md                         |  195 ++
  src/app/api/plugins/panes.rs                  |    2 +-
@@ -50,7 +50,7 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  229 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  154 +-
- src/platform/windows/launcher.rs              | 1120 ++++++++
+ src/platform/windows/launcher.rs              | 1065 ++++++++
  src/platform/windows/managed_install.rs       |  689 +++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
@@ -62,7 +62,7 @@ Refs ogulcancelik/herdr#1947
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
  vendor/portable-pty/src/win/psuedocon.rs      |  272 +-
- 57 files changed, 9941 insertions(+), 235 deletions(-)
+ 57 files changed, 10055 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -264,10 +264,10 @@ index 0000000000000000000000000000000000000000..9bb7747373f66b92060b19357602abeb
 +}
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb5eebec86
+index 0000000000000000000000000000000000000000..cb82a711b7253ecf1404683f63ac7002a2d355b9
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,2323 @@
+@@ -0,0 +1,2424 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "CompleteMaintenance")]
@@ -305,6 +305,7 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +$script:LeasePattern = '^([0-9a-f]{12}\.[0-9a-f]{12})\.lease$'
 +$script:PendingLauncherPattern = '^launcher\.pending-([0-9a-f]{64})\.exe$'
 +$script:LauncherReplacementName = "herdr.exe.new"
++$script:LauncherBuildIdArgument = "--herdr-private-launcher-build-id-v1"
 +$script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 +$script:InstallManifestHeader = "herdr-install-manifest-v1"
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
@@ -953,6 +954,11 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    }
 +    Assert-HerdrRegularFile -Path (Join-Path $Path "herdr.exe")
 +    $manifest = Read-HerdrRuntimeManifest -RuntimeRoot $Path
++    foreach ($relative in $manifest.Keys) {
++        if ([IO.Path]::GetFileName([string]$relative) -ceq "herdr-launcher.exe") {
++            throw "Runtime contains the obsolete launcher hop and must be uninstalled first: $Path"
++        }
++    }
 +    $actualFiles = @($tree | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
 +        (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
 +    })
@@ -1082,6 +1088,60 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    return Read-HerdrInstallManifestFile -Path (Join-Path $StateDir "install.manifest")
 +}
 +
++function Get-HerdrLauncherBuildId {
++    param(
++        [Parameter(Mandatory = $true)][string]$Path,
++        [int]$TimeoutMilliseconds = 30000
++    )
++
++    Assert-HerdrRegularFile -Path $Path
++    if ($TimeoutMilliseconds -lt 1 -or $TimeoutMilliseconds -gt 120000) {
++        throw "Launcher build-ID timeout must be between 1 and 120000 milliseconds."
++    }
++    $startInfo = [Diagnostics.ProcessStartInfo]::new()
++    $startInfo.FileName = $Path
++    $startInfo.Arguments = $script:LauncherBuildIdArgument
++    $startInfo.UseShellExecute = $false
++    $startInfo.CreateNoWindow = $true
++    $startInfo.RedirectStandardOutput = $true
++    $startInfo.RedirectStandardError = $true
++    $process = [Diagnostics.Process]::new()
++    $process.StartInfo = $startInfo
++    $started = $false
++    try {
++        if (-not $process.Start()) {
++            throw "Could not start the managed launcher build-ID query: $Path"
++        }
++        $started = $true
++        $stdout = $process.StandardOutput.ReadToEndAsync()
++        $stderr = $process.StandardError.ReadToEndAsync()
++        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
++            $process.Kill()
++            [void]$process.WaitForExit(5000)
++            throw "Managed launcher build-ID query exceeded $TimeoutMilliseconds ms: $Path"
++        }
++        [void]$process.WaitForExit()
++        $output = $stdout.GetAwaiter().GetResult()
++        $errorOutput = $stderr.GetAwaiter().GetResult()
++        if ($process.ExitCode -ne 0 -or $errorOutput.Length -ne 0) {
++            throw "Managed launcher build-ID query failed for $Path (exit $($process.ExitCode)): $errorOutput"
++        }
++        if ($output.EndsWith("`r`n", [StringComparison]::Ordinal)) {
++            $output = $output.Substring(0, $output.Length - 2)
++        } elseif ($output.EndsWith("`n", [StringComparison]::Ordinal)) {
++            $output = $output.Substring(0, $output.Length - 1)
++        }
++        Assert-HerdrBuildId -Value $output
++        return $output
++    } finally {
++        if ($started -and -not $process.HasExited) {
++            $process.Kill()
++            [void]$process.WaitForExit(5000)
++        }
++        $process.Dispose()
++    }
++}
++
 +function Get-HerdrPendingLauncher {
 +    param([Parameter(Mandatory = $true)][string]$StateDir)
 +
@@ -1116,10 +1176,16 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +function Set-HerdrPendingLauncher {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$LauncherPath
++        [Parameter(Mandatory = $true)][string]$LauncherPath,
++        [Parameter(Mandatory = $true)][string]$BuildId
 +    )
 +
 +    Assert-HerdrRegularFile -Path $LauncherPath
++    Assert-HerdrBuildId -Value $BuildId
++    $launcherBuildId = Get-HerdrLauncherBuildId -Path $LauncherPath
++    if ($launcherBuildId -cne $BuildId) {
++        throw "Managed launcher build ID '$launcherBuildId' does not match runtime '$BuildId': $LauncherPath"
++    }
 +    $stateDir = Join-Path $InstallRoot "state"
 +    $manifest = Read-HerdrInstallManifest -StateDir $stateDir
 +    $installed = Join-Path $InstallRoot "bin\herdr.exe"
@@ -1202,6 +1268,11 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    }
 +    if ($null -eq $pending -or $installedSha256 -cne $pending.Sha256) {
 +        throw "Managed launcher hash matches neither the install manifest nor a validated pending launcher: $launcher"
++    }
++    $activeBuildId = Read-HerdrPointer -Path (Join-Path $stateDir "active")
++    $pendingBuildId = Get-HerdrLauncherBuildId -Path $pending.Path
++    if ($pendingBuildId -cne $activeBuildId) {
++        throw "Pending managed launcher build ID '$pendingBuildId' does not match active runtime '$activeBuildId'."
 +    }
 +    Set-HerdrInstallManifestBootstrapHash -InstallRoot $InstallRoot -BootstrapSha256 $installedSha256
 +    Remove-Item -LiteralPath $pending.Path -Force
@@ -1731,6 +1802,23 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    }
 +}
 +
++function Test-HerdrLegacyLauncherHop {
++    param([Parameter(Mandatory = $true)][string]$InstallRoot)
++
++    $runtimeRoot = Join-Path $InstallRoot "runtime"
++    if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container) -or
++        (Get-Item -LiteralPath $runtimeRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
++        return $false
++    }
++    foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory)) {
++        if (-not ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
++            (Test-Path -LiteralPath (Join-Path $runtime.FullName "herdr-launcher.exe"))) {
++            return $true
++        }
++    }
++    return $false
++}
++
 +function Get-HerdrRootKind {
 +    param([Parameter(Mandatory = $true)][string]$InstallRoot)
 +
@@ -1745,7 +1833,7 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +        Assert-HerdrManagedRoot -InstallRoot $InstallRoot
 +        return "Managed"
 +    } catch {
-+        throw "The existing Herdr installation is not compatible with this setup. Uninstall $script:ProductName from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
++        throw "The existing Herdr installation is not compatible with this setup. Uninstall the existing Herdr or Herdr Win entry from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
 +    }
 +}
 +
@@ -1975,6 +2063,11 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
 +        return $false
 +    }
++    $activeBuildId = Read-HerdrPointer -Path (Join-Path $stateDir "active")
++    $pendingBuildId = Get-HerdrLauncherBuildId -Path $pending.Path
++    if ($pendingBuildId -cne $activeBuildId) {
++        throw "Pending managed launcher build ID '$pendingBuildId' does not match active runtime '$activeBuildId'."
++    }
 +
 +    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
 +    $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
@@ -2154,7 +2247,7 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
-+            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath)
++            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath -BuildId $BuildId)
 +
 +            $activePath = Join-Path $stateDir "active"
 +            $activeBuild = Read-HerdrPointer -Path $activePath
@@ -2215,6 +2308,10 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    $StageDir = Get-HerdrFullPath -Path $StageDir
 +    Assert-HerdrRegularDirectory -Path $StageDir
 +    Assert-HerdrRegularFile -Path $LauncherPath
++    $launcherBuildId = Get-HerdrLauncherBuildId -Path $LauncherPath
++    if ($launcherBuildId -cne $BuildId) {
++        throw "Managed launcher build ID '$launcherBuildId' does not match runtime '$BuildId': $LauncherPath"
++    }
 +    Assert-HerdrRegularFile -Path $UninstallerPath
 +    Assert-HerdrRegularFile -Path $HelperSourcePath
 +    [void](Get-HerdrAgentSkillSha256 -Path $SkillSourcePath)
@@ -2222,6 +2319,10 @@ index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb
 +    if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
 +        -not $ClaudeSkillsRoot.Equals($AgentSkillsRoot, [StringComparison]::OrdinalIgnoreCase)) {
 +        Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
++    }
++
++    if (Test-HerdrLegacyLauncherHop -InstallRoot $InstallRoot) {
++        throw "The existing Herdr installation is not compatible with this setup. Uninstall the existing Herdr or Herdr Win entry from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
 +    }
 +
 +    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
@@ -56118,10 +56219,10 @@ index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6
  if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9bd7411b6226d7d26ec9fb398dd261344ae17d7
+index 0000000000000000000000000000000000000000..5e10750d737379b79e333463e4c5aae0639bbde5
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,639 @@
+@@ -0,0 +1,642 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56193,8 +56294,11 @@ index 0000000000000000000000000000000000000000..b9bd7411b6226d7d26ec9fb398dd2613
 +        self.assertIn('return "herdr-runtime-v1`nbuild_id=$BuildId`n"', helper)
 +        self.assertIn('return "herdr-pointer-v1`nbuild_id=$BuildId`n"', helper)
 +        self.assertIn('$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"', helper)
-+        self.assertNotIn('"herdr-launcher.exe"', helper)
++        self.assertIn("obsolete launcher hop", helper)
 +        self.assertIn("launcher\\.pending-([0-9a-f]{64})\\.exe", helper)
++        self.assertIn('"--herdr-private-launcher-build-id-v1"', helper)
++        self.assertIn("Get-HerdrLauncherBuildId", helper)
++        self.assertIn("does not match active runtime", helper)
 +        self.assertIn("Complete-HerdrLauncherUpdateLocked", helper)
 +        self.assertIn("Remove-HerdrInactiveRuntimes", helper)
 +        self.assertIn('"CompleteMaintenance"', helper)
@@ -57655,10 +57759,10 @@ index 0000000000000000000000000000000000000000..c0ebb60a4cfd6aa7f96ba205e7c302bd
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba66cf85ea
+index 0000000000000000000000000000000000000000..106011d9daf6b837bbd8abca4080f483a01e23aa
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,622 @@
+@@ -0,0 +1,687 @@
 +[CmdletBinding()]
 +param()
 +
@@ -57704,6 +57808,45 @@ index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba
 +        New-Item -ItemType Directory -Path $parent -Force | Out-Null
 +    }
 +    [IO.File]::WriteAllText($Path, $Text, $script:Utf8NoBom)
++}
++
++function New-TestLauncher {
++    param(
++        [Parameter(Mandatory = $true)][string]$Path,
++        [Parameter(Mandatory = $true)][string]$BuildId
++    )
++
++    Assert-HerdrBuildId -Value $BuildId
++    $sourcePath = "$Path.cs"
++    Write-TestFile -Path $sourcePath -Text @"
++using System;
++using System.Threading;
++internal static class Program {
++    public static int Main(string[] args) {
++        if (args.Length == 1 && String.Equals(args[0], "--herdr-private-launcher-build-id-v1", StringComparison.Ordinal)) {
++            Console.Out.WriteLine("$BuildId");
++            return 0;
++        }
++        if (args.Length == 1 && String.Equals(args[0], "--wait", StringComparison.Ordinal)) {
++            Thread.Sleep(3000);
++            return 0;
++        }
++        return 64;
++    }
++}
++"@
++    $csc = @(
++        "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
++        "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
++    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
++    if ($null -eq $csc) {
++        throw "The Windows .NET Framework C# compiler is required for launcher lifecycle tests."
++    }
++    & $csc /nologo /target:exe "/out:$Path" $sourcePath
++    if ($LASTEXITCODE -ne 0) {
++        throw "Test launcher compilation failed with exit code $LASTEXITCODE."
++    }
++    Assert-HerdrRegularFile -Path $Path
 +}
 +
 +function New-TestStage {
@@ -57841,11 +57984,13 @@ index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba
 +    $display2 = "0.9.1-preview.$id2"
 +    $numeric1 = "0.9.0.0"
 +    $numeric2 = "0.9.1.0"
-+    $launcher1 = Join-Path $tempRoot "launcher-one.exe"
-+    $launcher2 = Join-Path $tempRoot "launcher-two.exe"
++    $launcher1 = Join-Path $tempRoot "launcher-one\herdr-launcher.exe"
++    $launcher2 = Join-Path $tempRoot "launcher-two\herdr-launcher.exe"
++    $wrongLauncher = Join-Path $tempRoot "launcher-wrong\herdr-launcher.exe"
 +    $uninstaller = Join-Path $tempRoot "uninstall.exe"
-+    Write-TestFile -Path $launcher1 -Text "launcher-one"
-+    Write-TestFile -Path $launcher2 -Text "launcher-two"
++    New-TestLauncher -Path $launcher1 -BuildId $id1
++    New-TestLauncher -Path $launcher2 -BuildId $id2
++    New-TestLauncher -Path $wrongLauncher -BuildId $id1
 +    Write-TestFile -Path $uninstaller -Text "uninstaller"
 +    $stage1 = New-TestStage -Root $tempRoot -Name "stage-one" -PayloadText "payload-one"
 +    $stage2 = New-TestStage -Root $tempRoot -Name "stage-two" -PayloadText "payload-two"
@@ -58052,6 +58197,30 @@ index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
 +    $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
 +    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
++    Assert-Equal (Get-HerdrLauncherBuildId -Path $launcher1) $id1 "Launcher build-ID query returned the wrong first build."
++    Assert-Equal (Get-HerdrLauncherBuildId -Path $launcher2) $id2 "Launcher build-ID query returned the wrong second build."
++    Assert-Throws {
++        Set-HerdrPendingLauncher -InstallRoot $installRoot -LauncherPath $wrongLauncher -BuildId $id2
++    } "does not match runtime" "Pending launcher accepted a mismatched embedded build ID."
++    Assert-True ($null -eq (Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state"))) "Rejected launcher left pending state."
++
++    # The previous two-hop runtime layout is incompatible and must be rejected
++    # before setup mutates the managed root or creates the new package identity.
++    $firstRuntime = Join-Path $installRoot "runtime\$id1"
++    $legacyRuntimeLauncher = Join-Path $firstRuntime "herdr-launcher.exe"
++    Copy-HerdrDurableFile -Source $launcher1 -Destination $legacyRuntimeLauncher
++    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
++    $launcherBeforeLegacyRejection = Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")
++    Assert-Throws {
++        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
++    } "not compatible.*Uninstall the existing Herdr or Herdr Win entry" "Legacy runtime-local launcher layout was accepted."
++    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Legacy layout rejection changed active runtime."
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) $launcherBeforeLegacyRejection "Legacy layout rejection changed the installed launcher."
++    Assert-True (Test-Path -LiteralPath $legacyRuntimeLauncher) "Legacy layout rejection deleted the old runtime launcher."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id2"))) "Legacy layout rejection staged the new runtime."
++    Remove-Item -LiteralPath $legacyRuntimeLauncher -Force
++    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
++    Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 +
 +    # Every managed update overwrites SKILL.md while preserving foreign siblings.
 +    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
@@ -58143,7 +58312,7 @@ index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba
 +    Write-TestFile -Path (Join-Path $incompatibleRoot "bin\herdr.exe") -Text "preserve"
 +    Assert-Throws {
 +        Invoke-TestInstall -Root $incompatibleRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
-+    } "not compatible with this setup.*Uninstall Herdr from Windows Installed Apps" "An incompatible install root was accepted."
++    } "not compatible with this setup.*Uninstall the existing Herdr or Herdr Win entry" "An incompatible install root was accepted."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 +
 +    # ARP stores the truthful display/numeric identity and preserves mismatches.
@@ -58160,9 +58329,9 @@ index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba
 +    # copied PowerShell executable and let it exit naturally.
 +    $processRoot = Join-Path $tempRoot "process-busy-install"
 +    $processAgentSkillsRoot = Join-Path $tempRoot "process-agent-skills"
-+    $realLauncher = Join-Path $env:WINDIR "System32\cmd.exe"
++    $realLauncher = $launcher1
 +    [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot)
-+    $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("/d", "/c", "ping -n 4 127.0.0.1 >nul") -PassThru -WindowStyle Hidden
++    $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("--wait") -PassThru -WindowStyle Hidden
 +    $childProcesses.Add($busyProcess)
 +    Start-Sleep -Milliseconds 200
 +    Assert-Throws {
@@ -59364,10 +59533,10 @@ index b202d3efde61c69b033c952fb9260c9e3af126f4..182dd6d6f5c5d640b95cb23edf2a2245
          use base64::Engine as _;
 diff --git a/src/platform/windows/launcher.rs b/src/platform/windows/launcher.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e57211b978
+index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc9563b904ef2
 --- /dev/null
 +++ b/src/platform/windows/launcher.rs
-@@ -0,0 +1,1120 @@
+@@ -0,0 +1,1065 @@
 +use std::{
 +    ffi::{OsStr, OsString},
 +    fs,
@@ -59415,14 +59584,31 @@ index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e5
 +}
 +
 +fn maybe_run_build_id_query(current: &Path, args: &[OsString]) -> io::Result<Option<i32>> {
-+    if current.file_name() != Some(OsStr::new("herdr-launcher.exe"))
-+        || args != [OsString::from(BUILD_ID_QUERY_ARG)]
-+    {
++    if !allows_build_id_query(current) || args != [OsString::from(BUILD_ID_QUERY_ARG)] {
 +        return Ok(None);
 +    }
 +    std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
 +    writeln!(io::stdout().lock(), "{}", compiled_build_id_label()?)?;
 +    Ok(Some(0))
++}
++
++fn allows_build_id_query(current: &Path) -> bool {
++    let Some(name) = current.file_name().and_then(OsStr::to_str) else {
++        return false;
++    };
++    if name == "herdr-launcher.exe" || name == "app-launcher.exe" {
++        return true;
++    }
++    let Some(hash) = name
++        .strip_prefix(PENDING_LAUNCHER_PREFIX)
++        .and_then(|name| name.strip_suffix(PENDING_LAUNCHER_SUFFIX))
++    else {
++        return false;
++    };
++    hash.len() == 64
++        && hash
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 +}
 +
 +fn compiled_build_id_label() -> io::Result<&'static str> {
@@ -60019,7 +60205,7 @@ index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e5
 +    }
 +
 +    #[test]
-+    fn build_id_query_is_available_only_from_the_staged_launcher_name() {
++    fn build_id_query_is_available_only_from_valid_staged_launcher_names() {
 +        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
 +        let args = [OsString::from(BUILD_ID_QUERY_ARG)];
 +        std::env::set_var(MANAGED_LEASE_HANDLE_ENV, "1234");
@@ -60029,6 +60215,23 @@ index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e5
 +            Some(0)
 +        );
 +        assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
++        let embedded = PathBuf::from(r"C:\setup\app-launcher.exe");
++        assert_eq!(
++            maybe_run_build_id_query(&embedded, &args).expect("embedded build query"),
++            Some(0)
++        );
++        let pending = PathBuf::from(format!(
++            r"C:\Herdr\state\{PENDING_LAUNCHER_PREFIX}{}{PENDING_LAUNCHER_SUFFIX}",
++            "a".repeat(64)
++        ));
++        assert_eq!(
++            maybe_run_build_id_query(&pending, &args).expect("pending build query"),
++            Some(0)
++        );
++        let malformed = PathBuf::from(r"C:\Herdr\state\launcher.pending-not-a-hash.exe");
++        assert!(maybe_run_build_id_query(&malformed, &args)
++            .expect("malformed pending query")
++            .is_none());
 +        let installed = PathBuf::from(r"C:\Herdr\bin\herdr.exe");
 +        assert!(maybe_run_build_id_query(&installed, &args)
 +            .expect("installed query")
@@ -60247,95 +60450,6 @@ index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e5
 +        let mut helper = command.spawn().expect("spawn detached launcher helper");
 +        let status = wait_child_bounded(&mut helper, HELPER_TIMEOUT);
 +        assert_eq!(status.code(), Some(41));
-+    }
-+
-+    #[test]
-+    #[cfg(any())]
-+    fn bootstrap_dispatcher_helper() {
-+        let current = std::env::current_exe().expect("helper executable");
-+        match current.file_name().and_then(OsStr::to_str) {
-+            Some("herdr-launcher.exe") => {
-+                let LauncherRole::Dispatcher {
-+                    install,
-+                    physical_build,
-+                } = launcher_role(&current).expect("resolve helper dispatcher")
-+                else {
-+                    panic!("expected helper dispatcher role");
-+                };
-+                let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-+                let code = run_dispatcher(&install, &physical_build, &args)
-+                    .expect("dispatch helper payload");
-+                std::process::exit(code);
-+            }
-+            Some("herdr.exe") => {
-+                let _lease = adopt_managed_runtime_lease_platform()
-+                    .expect("adopt bootstrap-chain payload lease");
-+                assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-+                assert_eq!(
-+                    std::env::var(CHILD_ENV).as_deref(),
-+                    Ok("through-bootstrap-and-dispatcher")
-+                );
-+                assert_eq!(
-+                    std::env::args_os().skip(1).collect::<Vec<_>>(),
-+                    [
-+                        OsString::from("--exact"),
-+                        OsString::from(harness_test_name("bootstrap_dispatcher_helper")),
-+                        OsString::from("--nocapture")
-+                    ]
-+                );
-+                std::process::exit(37);
-+            }
-+            _ => {}
-+        }
-+    }
-+
-+    #[test]
-+    #[cfg(any())]
-+    fn stale_dispatcher_helper() {
-+        let current = std::env::current_exe().expect("redispatch helper executable");
-+        match current.file_name().and_then(OsStr::to_str) {
-+            Some("herdr-launcher.exe") => {
-+                let LauncherRole::Dispatcher {
-+                    install,
-+                    physical_build,
-+                } = launcher_role(&current).expect("resolve redispatch helper")
-+                else {
-+                    panic!("expected redispatch helper dispatcher role");
-+                };
-+                let address =
-+                    std::env::var(REDISPATCH_ADDR_ENV).expect("redispatch helper listener address");
-+                let mut stream = TcpStream::connect(address).expect("connect redispatch helper");
-+                writeln!(
-+                    stream,
-+                    "dispatcher-{} {}",
-+                    physical_build.as_str(),
-+                    std::process::id()
-+                )
-+                .expect("dispatcher redispatch handshake");
-+                stream.flush().expect("flush redispatch handshake");
-+                let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-+                let code = run_dispatcher(&install, &physical_build, &args)
-+                    .expect("run selected dispatcher");
-+                std::process::exit(code);
-+            }
-+            Some("herdr.exe") => {
-+                let _lease = adopt_managed_runtime_lease_platform()
-+                    .expect("adopt redispatched payload lease");
-+                assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-+                let address = std::env::var(REDISPATCH_ADDR_ENV)
-+                    .expect("redispatch payload listener address");
-+                let mut stream = TcpStream::connect(address).expect("connect redispatch payload");
-+                writeln!(stream, "payload {}", std::process::id())
-+                    .expect("redispatch payload handshake");
-+                stream.flush().expect("flush redispatch payload handshake");
-+                let mut release = [0_u8; 1];
-+                stream
-+                    .read_exact(&mut release)
-+                    .expect("redispatch payload release");
-+                std::process::exit(43);
-+            }
-+            _ => {}
-+        }
 +    }
 +
 +    #[test]

@@ -49,11 +49,13 @@ tests remain the detailed implementation truth.
 - The managed installation has exactly one launcher at `bin\herdr.exe`. It starts
   the selected immutable runtime payload directly; runtime directories never carry
   a second launcher. Setup replaces the launcher immediately when idle or stages a
-  validated replacement for publication after the final managed payload exits.
+  replacement whose hash and embedded build ID are validated before publication
+  after the final managed payload exits.
 - Setup updates only an exact current managed installation. Any other existing
-  install layout is preserved and rejected with instructions to uninstall Herdr
-  from Windows Installed Apps before running setup again; setup never migrates,
-  backs up, or removes an incompatible layout.
+  install layout, including the former runtime-local launcher design, is preserved
+  and rejected with instructions to uninstall the existing **Herdr** or **Herdr Win**
+  entry from Windows Installed Apps before running setup again; setup never
+  migrates, backs up, or removes an incompatible layout.
 - Snapshot updates use only the fork-owned immutable setup asset and verified
   digest through the fork-owned update feed. Existing managed sessions continue on
   their current runtime; a newer runtime may remain staged until old sessions exit,

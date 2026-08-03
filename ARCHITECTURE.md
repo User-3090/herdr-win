@@ -111,7 +111,11 @@ behavior; code and tests remain the detailed implementation truth.
   a user choice and compatibility asset for older immutable clients.
 - The managed setup accepts only a missing install root or the exact current
   managed layout. Any other root is preserved and rejected with an uninstall-first
-  action; there are no migration, compatibility, or backup branches.
+  action; there are no migration, compatibility, or backup branches. In particular,
+  a runtime-local `herdr-launcher.exe` marks the former two-hop layout and is rejected
+  before repair, PATH, or ARP mutation. The user removes its existing **Herdr** entry
+  before a fresh **Herdr Win** install, so setup never co-owns duplicate package
+  registrations.
 - NSIS embeds upstream's canonical `skills/herdr/SKILL.md` and delegates skill
   filesystem work to the existing PowerShell installation boundary. The helper
   always copies it to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and also to

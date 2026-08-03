@@ -45,14 +45,31 @@ pub(crate) fn run() -> io::Result<i32> {
 }
 
 fn maybe_run_build_id_query(current: &Path, args: &[OsString]) -> io::Result<Option<i32>> {
-    if current.file_name() != Some(OsStr::new("herdr-launcher.exe"))
-        || args != [OsString::from(BUILD_ID_QUERY_ARG)]
-    {
+    if !allows_build_id_query(current) || args != [OsString::from(BUILD_ID_QUERY_ARG)] {
         return Ok(None);
     }
     std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
     writeln!(io::stdout().lock(), "{}", compiled_build_id_label()?)?;
     Ok(Some(0))
+}
+
+fn allows_build_id_query(current: &Path) -> bool {
+    let Some(name) = current.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    if name == "herdr-launcher.exe" || name == "app-launcher.exe" {
+        return true;
+    }
+    let Some(hash) = name
+        .strip_prefix(PENDING_LAUNCHER_PREFIX)
+        .and_then(|name| name.strip_suffix(PENDING_LAUNCHER_SUFFIX))
+    else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn compiled_build_id_label() -> io::Result<&'static str> {
@@ -649,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn build_id_query_is_available_only_from_the_staged_launcher_name() {
+    fn build_id_query_is_available_only_from_valid_staged_launcher_names() {
         let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
         let args = [OsString::from(BUILD_ID_QUERY_ARG)];
         std::env::set_var(MANAGED_LEASE_HANDLE_ENV, "1234");
@@ -659,6 +676,23 @@ mod tests {
             Some(0)
         );
         assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
+        let embedded = PathBuf::from(r"C:\setup\app-launcher.exe");
+        assert_eq!(
+            maybe_run_build_id_query(&embedded, &args).expect("embedded build query"),
+            Some(0)
+        );
+        let pending = PathBuf::from(format!(
+            r"C:\Herdr\state\{PENDING_LAUNCHER_PREFIX}{}{PENDING_LAUNCHER_SUFFIX}",
+            "a".repeat(64)
+        ));
+        assert_eq!(
+            maybe_run_build_id_query(&pending, &args).expect("pending build query"),
+            Some(0)
+        );
+        let malformed = PathBuf::from(r"C:\Herdr\state\launcher.pending-not-a-hash.exe");
+        assert!(maybe_run_build_id_query(&malformed, &args)
+            .expect("malformed pending query")
+            .is_none());
         let installed = PathBuf::from(r"C:\Herdr\bin\herdr.exe");
         assert!(maybe_run_build_id_query(&installed, &args)
             .expect("installed query")
@@ -877,95 +911,6 @@ mod tests {
         let mut helper = command.spawn().expect("spawn detached launcher helper");
         let status = wait_child_bounded(&mut helper, HELPER_TIMEOUT);
         assert_eq!(status.code(), Some(41));
-    }
-
-    #[test]
-    #[cfg(any())]
-    fn bootstrap_dispatcher_helper() {
-        let current = std::env::current_exe().expect("helper executable");
-        match current.file_name().and_then(OsStr::to_str) {
-            Some("herdr-launcher.exe") => {
-                let LauncherRole::Dispatcher {
-                    install,
-                    physical_build,
-                } = launcher_role(&current).expect("resolve helper dispatcher")
-                else {
-                    panic!("expected helper dispatcher role");
-                };
-                let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-                let code = run_dispatcher(&install, &physical_build, &args)
-                    .expect("dispatch helper payload");
-                std::process::exit(code);
-            }
-            Some("herdr.exe") => {
-                let _lease = adopt_managed_runtime_lease_platform()
-                    .expect("adopt bootstrap-chain payload lease");
-                assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-                assert_eq!(
-                    std::env::var(CHILD_ENV).as_deref(),
-                    Ok("through-bootstrap-and-dispatcher")
-                );
-                assert_eq!(
-                    std::env::args_os().skip(1).collect::<Vec<_>>(),
-                    [
-                        OsString::from("--exact"),
-                        OsString::from(harness_test_name("bootstrap_dispatcher_helper")),
-                        OsString::from("--nocapture")
-                    ]
-                );
-                std::process::exit(37);
-            }
-            _ => {}
-        }
-    }
-
-    #[test]
-    #[cfg(any())]
-    fn stale_dispatcher_helper() {
-        let current = std::env::current_exe().expect("redispatch helper executable");
-        match current.file_name().and_then(OsStr::to_str) {
-            Some("herdr-launcher.exe") => {
-                let LauncherRole::Dispatcher {
-                    install,
-                    physical_build,
-                } = launcher_role(&current).expect("resolve redispatch helper")
-                else {
-                    panic!("expected redispatch helper dispatcher role");
-                };
-                let address =
-                    std::env::var(REDISPATCH_ADDR_ENV).expect("redispatch helper listener address");
-                let mut stream = TcpStream::connect(address).expect("connect redispatch helper");
-                writeln!(
-                    stream,
-                    "dispatcher-{} {}",
-                    physical_build.as_str(),
-                    std::process::id()
-                )
-                .expect("dispatcher redispatch handshake");
-                stream.flush().expect("flush redispatch handshake");
-                let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-                let code = run_dispatcher(&install, &physical_build, &args)
-                    .expect("run selected dispatcher");
-                std::process::exit(code);
-            }
-            Some("herdr.exe") => {
-                let _lease = adopt_managed_runtime_lease_platform()
-                    .expect("adopt redispatched payload lease");
-                assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-                let address = std::env::var(REDISPATCH_ADDR_ENV)
-                    .expect("redispatch payload listener address");
-                let mut stream = TcpStream::connect(address).expect("connect redispatch payload");
-                writeln!(stream, "payload {}", std::process::id())
-                    .expect("redispatch payload handshake");
-                stream.flush().expect("flush redispatch payload handshake");
-                let mut release = [0_u8; 1];
-                stream
-                    .read_exact(&mut release)
-                    .expect("redispatch payload release");
-                std::process::exit(43);
-            }
-            _ => {}
-        }
     }
 
     #[test]

@@ -45,6 +45,45 @@ function Write-TestFile {
     [IO.File]::WriteAllText($Path, $Text, $script:Utf8NoBom)
 }
 
+function New-TestLauncher {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BuildId
+    )
+
+    Assert-HerdrBuildId -Value $BuildId
+    $sourcePath = "$Path.cs"
+    Write-TestFile -Path $sourcePath -Text @"
+using System;
+using System.Threading;
+internal static class Program {
+    public static int Main(string[] args) {
+        if (args.Length == 1 && String.Equals(args[0], "--herdr-private-launcher-build-id-v1", StringComparison.Ordinal)) {
+            Console.Out.WriteLine("$BuildId");
+            return 0;
+        }
+        if (args.Length == 1 && String.Equals(args[0], "--wait", StringComparison.Ordinal)) {
+            Thread.Sleep(3000);
+            return 0;
+        }
+        return 64;
+    }
+}
+"@
+    $csc = @(
+        "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if ($null -eq $csc) {
+        throw "The Windows .NET Framework C# compiler is required for launcher lifecycle tests."
+    }
+    & $csc /nologo /target:exe "/out:$Path" $sourcePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Test launcher compilation failed with exit code $LASTEXITCODE."
+    }
+    Assert-HerdrRegularFile -Path $Path
+}
+
 function New-TestStage {
     param([string]$Root, [string]$Name, [string]$PayloadText)
     $stage = Join-Path $Root $Name
@@ -180,11 +219,13 @@ try {
     $display2 = "0.9.1-preview.$id2"
     $numeric1 = "0.9.0.0"
     $numeric2 = "0.9.1.0"
-    $launcher1 = Join-Path $tempRoot "launcher-one.exe"
-    $launcher2 = Join-Path $tempRoot "launcher-two.exe"
+    $launcher1 = Join-Path $tempRoot "launcher-one\herdr-launcher.exe"
+    $launcher2 = Join-Path $tempRoot "launcher-two\herdr-launcher.exe"
+    $wrongLauncher = Join-Path $tempRoot "launcher-wrong\herdr-launcher.exe"
     $uninstaller = Join-Path $tempRoot "uninstall.exe"
-    Write-TestFile -Path $launcher1 -Text "launcher-one"
-    Write-TestFile -Path $launcher2 -Text "launcher-two"
+    New-TestLauncher -Path $launcher1 -BuildId $id1
+    New-TestLauncher -Path $launcher2 -BuildId $id2
+    New-TestLauncher -Path $wrongLauncher -BuildId $id1
     Write-TestFile -Path $uninstaller -Text "uninstaller"
     $stage1 = New-TestStage -Root $tempRoot -Name "stage-one" -PayloadText "payload-one"
     $stage2 = New-TestStage -Root $tempRoot -Name "stage-two" -PayloadText "payload-two"
@@ -391,6 +432,30 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
+    Assert-Equal (Get-HerdrLauncherBuildId -Path $launcher1) $id1 "Launcher build-ID query returned the wrong first build."
+    Assert-Equal (Get-HerdrLauncherBuildId -Path $launcher2) $id2 "Launcher build-ID query returned the wrong second build."
+    Assert-Throws {
+        Set-HerdrPendingLauncher -InstallRoot $installRoot -LauncherPath $wrongLauncher -BuildId $id2
+    } "does not match runtime" "Pending launcher accepted a mismatched embedded build ID."
+    Assert-True ($null -eq (Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state"))) "Rejected launcher left pending state."
+
+    # The previous two-hop runtime layout is incompatible and must be rejected
+    # before setup mutates the managed root or creates the new package identity.
+    $firstRuntime = Join-Path $installRoot "runtime\$id1"
+    $legacyRuntimeLauncher = Join-Path $firstRuntime "herdr-launcher.exe"
+    Copy-HerdrDurableFile -Source $launcher1 -Destination $legacyRuntimeLauncher
+    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
+    $launcherBeforeLegacyRejection = Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")
+    Assert-Throws {
+        Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
+    } "not compatible.*Uninstall the existing Herdr or Herdr Win entry" "Legacy runtime-local launcher layout was accepted."
+    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Legacy layout rejection changed active runtime."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) $launcherBeforeLegacyRejection "Legacy layout rejection changed the installed launcher."
+    Assert-True (Test-Path -LiteralPath $legacyRuntimeLauncher) "Legacy layout rejection deleted the old runtime launcher."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id2"))) "Legacy layout rejection staged the new runtime."
+    Remove-Item -LiteralPath $legacyRuntimeLauncher -Force
+    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
+    Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 
     # Every managed update overwrites SKILL.md while preserving foreign siblings.
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt") -Text "old-version"
@@ -482,7 +547,7 @@ try {
     Write-TestFile -Path (Join-Path $incompatibleRoot "bin\herdr.exe") -Text "preserve"
     Assert-Throws {
         Invoke-TestInstall -Root $incompatibleRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
-    } "not compatible with this setup.*Uninstall Herdr from Windows Installed Apps" "An incompatible install root was accepted."
+    } "not compatible with this setup.*Uninstall the existing Herdr or Herdr Win entry" "An incompatible install root was accepted."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 
     # ARP stores the truthful display/numeric identity and preserves mismatches.
@@ -499,9 +564,9 @@ try {
     # copied PowerShell executable and let it exit naturally.
     $processRoot = Join-Path $tempRoot "process-busy-install"
     $processAgentSkillsRoot = Join-Path $tempRoot "process-agent-skills"
-    $realLauncher = Join-Path $env:WINDIR "System32\cmd.exe"
+    $realLauncher = $launcher1
     [void](Invoke-TestInstall -Root $processRoot -Stage $stage1 -Launcher $realLauncher -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $processAgentSkillsRoot)
-    $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("/d", "/c", "ping -n 4 127.0.0.1 >nul") -PassThru -WindowStyle Hidden
+    $busyProcess = Start-Process -FilePath (Join-Path $processRoot "bin\herdr.exe") -ArgumentList @("--wait") -PassThru -WindowStyle Hidden
     $childProcesses.Add($busyProcess)
     Start-Sleep -Milliseconds 200
     Assert-Throws {
