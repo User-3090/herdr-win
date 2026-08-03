@@ -460,4 +460,4 @@ try {
     Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Created $ProductName installer: $OutputPath"
+Write-Host "Created $DistributionName installer: $OutputPath"

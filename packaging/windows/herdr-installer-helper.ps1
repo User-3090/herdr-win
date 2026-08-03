@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Install", "Uninstall")]
+    [ValidateSet("Install", "Uninstall", "CompleteMaintenance")]
     [string]$Action,
 
     [string]$InstallRoot,
@@ -14,7 +14,9 @@ param(
     [string]$DisplayVersion,
     [string]$NumericVersion,
     [ValidateSet("Keep", "Remove")]
-    [string]$SettingsDisposition = "Keep"
+    [string]$SettingsDisposition = "Keep",
+
+    [uint32]$ParentProcessId = 0
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +33,8 @@ $script:NumericVersionPattern = '^([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\.([0-
 $script:PointerPattern = '\Aherdr-pointer-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{12})\n\z'
 $script:RuntimePattern = '\Aherdr-runtime-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{12})\n\z'
 $script:LeasePattern = '^([0-9a-f]{12}\.[0-9a-f]{12})\.lease$'
+$script:PendingLauncherPattern = '^launcher\.pending-([0-9a-f]{64})\.exe$'
+$script:LauncherReplacementName = "herdr.exe.new"
 $script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 $script:InstallManifestHeader = "herdr-install-manifest-v1"
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
@@ -678,7 +682,6 @@ function Assert-HerdrRuntimeDirectory {
         throw "Runtime marker build ID '$actualBuildId' does not match directory '$ExpectedBuildId'."
     }
     Assert-HerdrRegularFile -Path (Join-Path $Path "herdr.exe")
-    Assert-HerdrRegularFile -Path (Join-Path $Path "herdr-launcher.exe")
     $manifest = Read-HerdrRuntimeManifest -RuntimeRoot $Path
     $actualFiles = @($tree | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
         (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
@@ -719,7 +722,6 @@ function New-HerdrRuntimeTree {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][string]$StageDir,
-        [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$BuildId
     )
 
@@ -727,7 +729,6 @@ function New-HerdrRuntimeTree {
         throw "Runtime staging destination already exists: $Destination"
     }
     Copy-HerdrDurableTree -SourceRoot $StageDir -DestinationRoot $Destination
-    Copy-HerdrDurableFile -Source $LauncherPath -Destination (Join-Path $Destination "herdr-launcher.exe")
     Write-HerdrDurableText -Path (Join-Path $Destination "runtime.ready") -Text (Get-HerdrRuntimeReadyText -BuildId $BuildId)
     Write-HerdrDurableText -Path (Join-Path $Destination "runtime.manifest") -Text (Get-HerdrRuntimeManifestText -RuntimeRoot $Destination)
     Assert-HerdrRuntimeDirectory -Path $Destination -ExpectedBuildId $BuildId
@@ -756,7 +757,23 @@ function Get-HerdrInstallManifestText {
         [Parameter(Mandatory = $true)][string]$NumericVersion
     )
 
-    return "$script:InstallManifestHeader`nbootstrap_sha256=$(Get-HerdrSha256 -Path $BootstrapPath)`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
+    return Get-HerdrInstallManifestTextForHash `
+        -BootstrapSha256 (Get-HerdrSha256 -Path $BootstrapPath) `
+        -DisplayVersion $DisplayVersion `
+        -NumericVersion $NumericVersion
+}
+
+function Get-HerdrInstallManifestTextForHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$BootstrapSha256,
+        [Parameter(Mandatory = $true)][string]$DisplayVersion,
+        [Parameter(Mandatory = $true)][string]$NumericVersion
+    )
+
+    if ($BootstrapSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "Invalid managed launcher SHA-256 '$BootstrapSha256'."
+    }
+    return "$script:InstallManifestHeader`nbootstrap_sha256=$BootstrapSha256`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
 }
 
 function Read-HerdrInstallManifestFile {
@@ -793,6 +810,131 @@ function Read-HerdrInstallManifest {
     param([Parameter(Mandatory = $true)][string]$StateDir)
 
     return Read-HerdrInstallManifestFile -Path (Join-Path $StateDir "install.manifest")
+}
+
+function Get-HerdrPendingLauncher {
+    param([Parameter(Mandatory = $true)][string]$StateDir)
+
+    Assert-HerdrRegularDirectory -Path $StateDir
+    $matches = @()
+    foreach ($entry in @(Get-ChildItem -LiteralPath $StateDir -Force)) {
+        $match = [regex]::Match($entry.Name, $script:PendingLauncherPattern)
+        if (-not $match.Success) {
+            continue
+        }
+        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Pending managed launcher is not a regular file: $($entry.FullName)"
+        }
+        $matches += [PSCustomObject]@{
+            Path = $entry.FullName
+            Sha256 = $match.Groups[1].Value
+        }
+    }
+    if ($matches.Count -gt 1) {
+        throw "Managed Herdr state contains more than one pending launcher."
+    }
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+    Assert-HerdrRegularFile -Path $matches[0].Path
+    if ((Get-HerdrSha256 -Path $matches[0].Path) -cne $matches[0].Sha256) {
+        throw "Pending managed launcher hash does not match its filename: $($matches[0].Path)"
+    }
+    return $matches[0]
+}
+
+function Set-HerdrPendingLauncher {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$LauncherPath
+    )
+
+    Assert-HerdrRegularFile -Path $LauncherPath
+    $stateDir = Join-Path $InstallRoot "state"
+    $manifest = Read-HerdrInstallManifest -StateDir $stateDir
+    $installed = Join-Path $InstallRoot "bin\herdr.exe"
+    Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $manifest.BootstrapSha256
+    $pendingSha256 = Get-HerdrSha256 -Path $LauncherPath
+    $existing = Get-HerdrPendingLauncher -StateDir $stateDir
+    if ($null -ne $existing -and $existing.Sha256 -cne $pendingSha256) {
+        Remove-Item -LiteralPath $existing.Path -Force
+        $existing = $null
+    }
+    if ($pendingSha256 -ceq (Get-HerdrSha256 -Path $installed)) {
+        if ($null -ne $existing) {
+            Remove-Item -LiteralPath $existing.Path -Force
+        }
+        return $null
+    }
+    if ($null -eq $existing) {
+        $destination = Join-Path $stateDir "launcher.pending-$pendingSha256.exe"
+        Copy-HerdrDurableFile -Source $LauncherPath -Destination $destination
+        $existing = Get-HerdrPendingLauncher -StateDir $stateDir
+    }
+    return $existing
+}
+
+function Set-HerdrInstallManifestBootstrapHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$BootstrapSha256
+    )
+
+    $stateDir = Join-Path $InstallRoot "state"
+    $current = Read-HerdrInstallManifest -StateDir $stateDir
+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
+    try {
+        $metadata = Join-Path $transaction.Path "metadata"
+        New-Item -ItemType Directory -Path $metadata | Out-Null
+        Write-HerdrDurableText -Path (Join-Path $metadata "install.manifest") -Text (
+            Get-HerdrInstallManifestTextForHash `
+                -BootstrapSha256 $BootstrapSha256 `
+                -DisplayVersion $current.DisplayVersion `
+                -NumericVersion $current.NumericVersion
+        )
+        Publish-HerdrStagedFile `
+            -Source (Join-Path $metadata "install.manifest") `
+            -Destination (Join-Path $stateDir "install.manifest") `
+            -BackupDir $transaction.Path
+    } finally {
+        if (Test-Path -LiteralPath $transaction.Path) {
+            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
+        }
+    }
+}
+
+function Repair-HerdrLauncherPublication {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    if (-not (Test-Path -LiteralPath $InstallRoot)) {
+        return
+    }
+    $stateDir = Join-Path $InstallRoot "state"
+    $manifest = Read-HerdrInstallManifest -StateDir $stateDir
+    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
+    Assert-HerdrRegularFile -Path $launcher
+    $pending = Get-HerdrPendingLauncher -StateDir $stateDir
+    $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
+    if (Test-Path -LiteralPath $replacement) {
+        Assert-HerdrRegularFile -Path $replacement
+        if ($null -eq $pending -or (Get-HerdrSha256 -Path $replacement) -cne $pending.Sha256) {
+            throw "Unrecognized managed launcher replacement file: $replacement"
+        }
+        Remove-Item -LiteralPath $replacement -Force
+    }
+
+    $installedSha256 = Get-HerdrSha256 -Path $launcher
+    if ($installedSha256 -ceq $manifest.BootstrapSha256) {
+        if ($null -ne $pending -and $pending.Sha256 -ceq $installedSha256) {
+            Remove-Item -LiteralPath $pending.Path -Force
+        }
+        return
+    }
+    if ($null -eq $pending -or $installedSha256 -cne $pending.Sha256) {
+        throw "Managed launcher hash matches neither the install manifest nor a validated pending launcher: $launcher"
+    }
+    Set-HerdrInstallManifestBootstrapHash -InstallRoot $InstallRoot -BootstrapSha256 $installedSha256
+    Remove-Item -LiteralPath $pending.Path -Force
 }
 
 function Assert-HerdrManagedBin {
@@ -849,7 +991,9 @@ function Assert-HerdrManagedRoot {
     Assert-HerdrRegularDirectory -Path $stateDir
     $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")
     foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
-        if ($allowedState -cnotcontains $entry.Name -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
+        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Unrecognized content in managed Herdr state: $($entry.FullName)"
         }
     }
@@ -866,6 +1010,7 @@ function Assert-HerdrManagedRoot {
     Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
     $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
     Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
+    [void](Get-HerdrPendingLauncher -StateDir $stateDir)
 
     $runtimeRoot = Join-Path $InstallRoot "runtime"
     Assert-HerdrRegularDirectory -Path $runtimeRoot
@@ -906,7 +1051,9 @@ function Assert-HerdrUninstallRetryRoot {
     }
     $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
     foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
-        if ($allowedState -cnotcontains $entry.Name -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
+        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Unrecognized content in uninstall-retry state: $($entry.FullName)"
         }
     }
@@ -923,6 +1070,9 @@ function Assert-HerdrUninstallRetryRoot {
             throw "Cannot validate remaining managed bin without install.manifest."
         }
         Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
+    }
+    if (Test-Path -LiteralPath $stateDir) {
+        [void](Get-HerdrPendingLauncher -StateDir $stateDir)
     }
     if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
         Assert-HerdrRegularDirectory -Path (Join-Path $InstallRoot "runtime")
@@ -1056,7 +1206,7 @@ function Remove-HerdrTransaction {
             continue
         }
         if ($entry.PSIsContainer -or
-            $entry.Name -cnotmatch '^(?:active|pending|installer-helper\.ps1|uninstall\.exe|install\.manifest)\.backup\.[0-9a-f]{32}$') {
+            $entry.Name -cnotmatch '^(?:active|pending|launcher|installer-helper\.ps1|uninstall\.exe|install\.manifest)\.backup\.[0-9a-f]{32}$') {
             throw "Update installer transaction contains unexpected content: $($entry.FullName)"
         }
     }
@@ -1325,7 +1475,7 @@ function Get-HerdrRootKind {
         Assert-HerdrManagedRoot -InstallRoot $InstallRoot
         return "Managed"
     } catch {
-        throw "The existing Herdr installation is not compatible with this setup. Uninstall Herdr from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
+        throw "The existing Herdr installation is not compatible with this setup. Uninstall $script:ProductName from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
     }
 }
 
@@ -1476,6 +1626,176 @@ function Remove-HerdrStaleLeases {
     }
 }
 
+function Remove-HerdrRuntimeDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BuildId
+    )
+
+    Assert-HerdrRuntimeDirectory -Path $Path -ExpectedBuildId $BuildId
+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
+    $moved = $false
+    try {
+        [IO.Directory]::Move($Path, (Join-Path $transaction.Path "runtime"))
+        $moved = $true
+        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
+    } finally {
+        if (-not $moved -and (Test-Path -LiteralPath $transaction.Path)) {
+            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
+        }
+    }
+}
+
+function Remove-HerdrInactiveRuntimes {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [AllowEmptyCollection()][object[]]$Processes = @()
+    )
+
+    $stateDir = Join-Path $InstallRoot "state"
+    $runtimeRoot = Join-Path $InstallRoot "runtime"
+    $protected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    [void]$protected.Add((Read-HerdrPointer -Path (Join-Path $stateDir "active")))
+    $pendingPointer = Join-Path $stateDir "pending"
+    if (Test-Path -LiteralPath $pendingPointer) {
+        [void]$protected.Add((Read-HerdrPointer -Path $pendingPointer))
+    }
+
+    foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory)) {
+        if ($protected.Contains($runtime.Name)) {
+            continue
+        }
+        Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
+        if (Test-HerdrProcessWithinRoots -Processes $Processes -Roots @($runtime.FullName)) {
+            continue
+        }
+        $leasePath = Join-Path $stateDir "leases\$($runtime.Name).lease"
+        $leaseProbe = $null
+        if (Test-Path -LiteralPath $leasePath) {
+            Assert-HerdrRegularFile -Path $leasePath
+            try {
+                $leaseProbe = [IO.File]::Open($leasePath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            } catch [UnauthorizedAccessException] {
+                continue
+            } catch [IO.IOException] {
+                continue
+            }
+        }
+        if ($null -ne $leaseProbe) {
+            $leaseProbe.Dispose()
+        }
+        Remove-HerdrRuntimeDirectory -InstallRoot $InstallRoot -Path $runtime.FullName -BuildId $runtime.Name
+        if (Test-Path -LiteralPath $leasePath) {
+            Remove-Item -LiteralPath $leasePath -Force
+        }
+    }
+}
+
+function Complete-HerdrLauncherUpdateLocked {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+    $stateDir = Join-Path $InstallRoot "state"
+    $pending = Get-HerdrPendingLauncher -StateDir $stateDir
+    if ($null -eq $pending) {
+        return $false
+    }
+    $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
+    if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
+        return $false
+    }
+
+    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
+    $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
+    if (Test-Path -LiteralPath $replacement) {
+        Assert-HerdrRegularFile -Path $replacement
+        Remove-Item -LiteralPath $replacement -Force
+    }
+    Copy-HerdrDurableFile -Source $pending.Path -Destination $replacement
+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
+    $backup = Join-Path $transaction.Path ("launcher.backup." + [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::Replace($replacement, $launcher, $backup)
+    } catch [IO.IOException] {
+        if (Test-Path -LiteralPath $replacement) {
+            Remove-Item -LiteralPath $replacement -Force
+        }
+        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
+        return $false
+    }
+    Remove-Item -LiteralPath $backup -Force
+    Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
+    if ((Get-HerdrSha256 -Path $launcher) -cne $pending.Sha256) {
+        throw "Published managed launcher does not match its staged SHA-256: $launcher"
+    }
+    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+    return $true
+}
+
+function Invoke-HerdrMaintenanceLocked {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+    Assert-HerdrManagedRoot -InstallRoot $InstallRoot
+    $processes = @(Get-HerdrProcessSnapshot)
+    Remove-HerdrInactiveRuntimes -InstallRoot $InstallRoot -Processes $processes
+    $launcherUpdated = Complete-HerdrLauncherUpdateLocked -InstallRoot $InstallRoot
+    Assert-HerdrManagedRoot -InstallRoot $InstallRoot
+    return [PSCustomObject]@{ LauncherUpdated = $launcherUpdated }
+}
+
+function Wait-HerdrParentProcessExit {
+    param(
+        [uint32]$ProcessId,
+        [int]$TimeoutMilliseconds = 30000
+    )
+
+    if ($ProcessId -eq 0) {
+        return $true
+    }
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    } catch {
+        return $true
+    }
+    try {
+        return $process.WaitForExit($TimeoutMilliseconds)
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-HerdrCompleteMaintenance {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [uint32]$ParentProcessId = 0,
+        [int]$LifecycleLockTimeoutMilliseconds = 30000
+    )
+
+    if (-not (Wait-HerdrParentProcessExit -ProcessId $ParentProcessId)) {
+        return [PSCustomObject]@{ Status = "Deferred"; LauncherUpdated = $false }
+    }
+    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
+        if (-not (Test-Path -LiteralPath $InstallRoot)) {
+            return [PSCustomObject]@{ Status = "Missing"; LauncherUpdated = $false }
+        }
+        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+        Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
+        if ((Get-HerdrRootKind -InstallRoot $InstallRoot) -ne "Managed") {
+            return [PSCustomObject]@{ Status = "Deferred"; LauncherUpdated = $false }
+        }
+        $coordination = Open-HerdrShareModeLock -Path (Join-Path $InstallRoot "state\launcher.lock") -TimeoutMilliseconds 30000
+        try {
+            $result = Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot
+            return [PSCustomObject]@{ Status = "Complete"; LauncherUpdated = $result.LauncherUpdated }
+        } finally {
+            $coordination.Dispose()
+        }
+    }
+}
+
 function New-HerdrManagedRootTree {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
@@ -1493,7 +1813,7 @@ function New-HerdrManagedRootTree {
     New-Item -ItemType Directory -Path (Join-Path $Destination "state\leases") -Force | Out-Null
     Copy-HerdrDurableFile -Source $LauncherPath -Destination (Join-Path $Destination "bin\herdr.exe")
     Write-HerdrDurableText -Path (Join-Path $Destination "bin\managed-install-v1\marker") -Text $script:ManagedBinMarkerText
-    New-HerdrRuntimeTree -Destination (Join-Path $Destination "runtime\$BuildId") -StageDir $StageDir -LauncherPath $LauncherPath -BuildId $BuildId
+    New-HerdrRuntimeTree -Destination (Join-Path $Destination "runtime\$BuildId") -StageDir $StageDir -BuildId $BuildId
     Write-HerdrDurableBytes -Path (Join-Path $Destination "state\launcher.lock") -Bytes ([byte[]]@())
     Write-HerdrDurableText -Path (Join-Path $Destination "state\active") -Text (Get-HerdrPointerText -BuildId $BuildId)
     Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $Destination "state\installer-helper.ps1")
@@ -1534,13 +1854,10 @@ function Install-HerdrManagedUpgrade {
         [int]$LockTimeoutMilliseconds = 30000
     )
 
-    # Inactive runtimes remain until uninstall. The coordination gate closes the
-    # new-launch race, but CIM omits inaccessible ExecutablePath values, so this
-    # helper cannot prove the required no-process condition without ambiguity.
     $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
     try {
         $stagedRuntime = Join-Path $transaction.Path "runtime"
-        New-HerdrRuntimeTree -Destination $stagedRuntime -StageDir $StageDir -LauncherPath $LauncherPath -BuildId $BuildId
+        New-HerdrRuntimeTree -Destination $stagedRuntime -StageDir $StageDir -BuildId $BuildId
         $metadata = Join-Path $transaction.Path "metadata"
         New-Item -ItemType Directory -Path $metadata | Out-Null
         Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $metadata "installer-helper.ps1")
@@ -1567,6 +1884,7 @@ function Install-HerdrManagedUpgrade {
 
             Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
             Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
+            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath)
 
             $activePath = Join-Path $stateDir "active"
             $activeBuild = Read-HerdrPointer -Path $activePath
@@ -1576,12 +1894,14 @@ function Install-HerdrManagedUpgrade {
                     Remove-Item -LiteralPath $pendingPath -Force
                 }
                 Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
+                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
                 return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
             }
             Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
             $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
             if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
                 Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
+                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
                 return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
             }
             Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -1592,6 +1912,7 @@ function Install-HerdrManagedUpgrade {
                 throw "Atomic pending activation did not publish the expected active pointer."
             }
             Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
+            [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
             return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
         } finally {
             $coordination.Dispose()
@@ -1633,6 +1954,10 @@ function Install-HerdrLayout {
         Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
     }
 
+    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
+        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
+        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+    }
     Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
     if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
         throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
@@ -1854,6 +2179,10 @@ function Invoke-HerdrUninstallLayout {
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
+        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
+        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
+    }
     Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
     $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
     if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
@@ -1909,6 +2238,10 @@ function Invoke-HerdrUninstallLayout {
         Remove-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
 
         Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
+        $pendingLauncher = Get-HerdrPendingLauncher -StateDir $stateDir
+        if ($null -ne $pendingLauncher) {
+            Remove-Item -LiteralPath $pendingLauncher.Path -Force
+        }
         foreach ($name in @("active", "pending", "install.manifest")) {
             $path = Join-Path $stateDir $name
             if (Test-Path -LiteralPath $path) {
@@ -1972,8 +2305,14 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
                 [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
             }
+            "CompleteMaintenance" {
+                $result = Invoke-HerdrCompleteMaintenance `
+                    -InstallRoot $InstallRoot `
+                    -ParentProcessId $ParentProcessId
+                [Console]::Out.WriteLine("$script:ProductName maintenance: $($result.Status)")
+            }
             default {
-                throw "Action must be Install or Uninstall."
+                throw "Action must be Install, Uninstall, or CompleteMaintenance."
             }
         }
         exit 0

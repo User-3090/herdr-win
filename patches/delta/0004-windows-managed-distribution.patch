@@ -1,4 +1,4 @@
-From 6003f887e22a17cd732c1f974f67ba754ef7a158 Mon Sep 17 00:00:00 2001
+From eab83ca1170e404d03ba7829fb6dd497641d9d30 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -11,7 +11,7 @@ Refs ogulcancelik/herdr#1947
  build.rs                                      |    1 -
  justfile                                      |    6 +-
  packaging/windows/conpty.json                 |   48 +
- packaging/windows/herdr-installer-helper.ps1  | 1984 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 2323 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -19,21 +19,21 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  542 +++++
+ packaging/windows/installer/project.nsi       |  552 ++++
  ...crosoft.Windows.Console.ConPTY-LICENSE.txt |  Bin 0 -> 1116 bytes
  ...Microsoft.Windows.Console.ConPTY-NOTICE.md |  Bin 0 -> 23176 bytes
- scripts/package_windows_conpty.py             |  263 +++
+ scripts/package_windows_conpty.py             |  263 ++
  scripts/package_windows_installer.ps1         |  463 ++++
  scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |  170 ++
  scripts/test_preview.py                       |  212 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |   17 +-
- scripts/test_windows_installer.py             |  626 ++++++
- .../windows_conpty_enhanced_input_probe.ps1   |  418 ++++
+ scripts/test_windows_installer.py             |  639 +++++
+ .../windows_conpty_enhanced_input_probe.ps1   |  418 +++
  .../windows_install_conpty_package_test.ps1   |   26 +
- scripts/windows_installer_fault_test.ps1      |  347 +++
- scripts/windows_installer_test.ps1            |  614 +++++
+ scripts/windows_installer_fault_test.ps1      |  348 +++
+ scripts/windows_installer_test.ps1            |  622 +++++
  scripts/windows_smoke_conpty_path.ps1         |   36 +-
  skills/herdr/SKILL.md                         |  195 ++
  src/app/api/plugins/panes.rs                  |    2 +-
@@ -50,19 +50,19 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  229 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  154 +-
- src/platform/windows/launcher.rs              | 1319 +++++++++++
- src/platform/windows/managed_install.rs       |  687 ++++++
+ src/platform/windows/launcher.rs              | 1120 ++++++++
+ src/platform/windows/managed_install.rs       |  689 +++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    8 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  518 ++++-
+ src/update.rs                                 |  518 +++-
  .../0001-control-conpty-loading.patch         |  357 +++
  .../0001-force-system-conpty.patch            |   37 -
  vendor/portable-pty.patches.md                |   37 +-
  vendor/portable-pty/Cargo.toml                |    5 +-
  vendor/portable-pty/Cargo.toml.orig           |    3 +-
- vendor/portable-pty/src/win/psuedocon.rs      |  272 ++-
- 57 files changed, 9685 insertions(+), 235 deletions(-)
+ vendor/portable-pty/src/win/psuedocon.rs      |  272 +-
+ 57 files changed, 9859 insertions(+), 235 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 packaging/windows/conpty.json
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
@@ -264,13 +264,13 @@ index 0000000000000000000000000000000000000000..9bb7747373f66b92060b19357602abeb
 +}
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94e8db5ecb
+index 0000000000000000000000000000000000000000..544b5f97a385569ecebd96e6ab5014fb5eebec86
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,1984 @@
+@@ -0,0 +1,2323 @@
 +[CmdletBinding()]
 +param(
-+    [ValidateSet("Install", "Uninstall")]
++    [ValidateSet("Install", "Uninstall", "CompleteMaintenance")]
 +    [string]$Action,
 +
 +    [string]$InstallRoot,
@@ -284,7 +284,9 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
 +    [ValidateSet("Keep", "Remove")]
-+    [string]$SettingsDisposition = "Keep"
++    [string]$SettingsDisposition = "Keep",
++
++    [uint32]$ParentProcessId = 0
 +)
 +
 +Set-StrictMode -Version Latest
@@ -301,6 +303,8 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +$script:PointerPattern = '\Aherdr-pointer-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{12})\n\z'
 +$script:RuntimePattern = '\Aherdr-runtime-v1\nbuild_id=([0-9a-f]{12}\.[0-9a-f]{12})\n\z'
 +$script:LeasePattern = '^([0-9a-f]{12}\.[0-9a-f]{12})\.lease$'
++$script:PendingLauncherPattern = '^launcher\.pending-([0-9a-f]{64})\.exe$'
++$script:LauncherReplacementName = "herdr.exe.new"
 +$script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 +$script:InstallManifestHeader = "herdr-install-manifest-v1"
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
@@ -948,7 +952,6 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        throw "Runtime marker build ID '$actualBuildId' does not match directory '$ExpectedBuildId'."
 +    }
 +    Assert-HerdrRegularFile -Path (Join-Path $Path "herdr.exe")
-+    Assert-HerdrRegularFile -Path (Join-Path $Path "herdr-launcher.exe")
 +    $manifest = Read-HerdrRuntimeManifest -RuntimeRoot $Path
 +    $actualFiles = @($tree | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
 +        (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/')
@@ -989,7 +992,6 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Destination,
 +        [Parameter(Mandatory = $true)][string]$StageDir,
-+        [Parameter(Mandatory = $true)][string]$LauncherPath,
 +        [Parameter(Mandatory = $true)][string]$BuildId
 +    )
 +
@@ -997,7 +999,6 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        throw "Runtime staging destination already exists: $Destination"
 +    }
 +    Copy-HerdrDurableTree -SourceRoot $StageDir -DestinationRoot $Destination
-+    Copy-HerdrDurableFile -Source $LauncherPath -Destination (Join-Path $Destination "herdr-launcher.exe")
 +    Write-HerdrDurableText -Path (Join-Path $Destination "runtime.ready") -Text (Get-HerdrRuntimeReadyText -BuildId $BuildId)
 +    Write-HerdrDurableText -Path (Join-Path $Destination "runtime.manifest") -Text (Get-HerdrRuntimeManifestText -RuntimeRoot $Destination)
 +    Assert-HerdrRuntimeDirectory -Path $Destination -ExpectedBuildId $BuildId
@@ -1026,7 +1027,23 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        [Parameter(Mandatory = $true)][string]$NumericVersion
 +    )
 +
-+    return "$script:InstallManifestHeader`nbootstrap_sha256=$(Get-HerdrSha256 -Path $BootstrapPath)`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
++    return Get-HerdrInstallManifestTextForHash `
++        -BootstrapSha256 (Get-HerdrSha256 -Path $BootstrapPath) `
++        -DisplayVersion $DisplayVersion `
++        -NumericVersion $NumericVersion
++}
++
++function Get-HerdrInstallManifestTextForHash {
++    param(
++        [Parameter(Mandatory = $true)][string]$BootstrapSha256,
++        [Parameter(Mandatory = $true)][string]$DisplayVersion,
++        [Parameter(Mandatory = $true)][string]$NumericVersion
++    )
++
++    if ($BootstrapSha256 -cnotmatch '^[0-9a-f]{64}$') {
++        throw "Invalid managed launcher SHA-256 '$BootstrapSha256'."
++    }
++    return "$script:InstallManifestHeader`nbootstrap_sha256=$BootstrapSha256`ndisplay_version=$DisplayVersion`nnumeric_version=$NumericVersion`n"
 +}
 +
 +function Read-HerdrInstallManifestFile {
@@ -1063,6 +1080,131 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    param([Parameter(Mandatory = $true)][string]$StateDir)
 +
 +    return Read-HerdrInstallManifestFile -Path (Join-Path $StateDir "install.manifest")
++}
++
++function Get-HerdrPendingLauncher {
++    param([Parameter(Mandatory = $true)][string]$StateDir)
++
++    Assert-HerdrRegularDirectory -Path $StateDir
++    $matches = @()
++    foreach ($entry in @(Get-ChildItem -LiteralPath $StateDir -Force)) {
++        $match = [regex]::Match($entry.Name, $script:PendingLauncherPattern)
++        if (-not $match.Success) {
++            continue
++        }
++        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
++            throw "Pending managed launcher is not a regular file: $($entry.FullName)"
++        }
++        $matches += [PSCustomObject]@{
++            Path = $entry.FullName
++            Sha256 = $match.Groups[1].Value
++        }
++    }
++    if ($matches.Count -gt 1) {
++        throw "Managed Herdr state contains more than one pending launcher."
++    }
++    if ($matches.Count -eq 0) {
++        return $null
++    }
++    Assert-HerdrRegularFile -Path $matches[0].Path
++    if ((Get-HerdrSha256 -Path $matches[0].Path) -cne $matches[0].Sha256) {
++        throw "Pending managed launcher hash does not match its filename: $($matches[0].Path)"
++    }
++    return $matches[0]
++}
++
++function Set-HerdrPendingLauncher {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [Parameter(Mandatory = $true)][string]$LauncherPath
++    )
++
++    Assert-HerdrRegularFile -Path $LauncherPath
++    $stateDir = Join-Path $InstallRoot "state"
++    $manifest = Read-HerdrInstallManifest -StateDir $stateDir
++    $installed = Join-Path $InstallRoot "bin\herdr.exe"
++    Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $manifest.BootstrapSha256
++    $pendingSha256 = Get-HerdrSha256 -Path $LauncherPath
++    $existing = Get-HerdrPendingLauncher -StateDir $stateDir
++    if ($null -ne $existing -and $existing.Sha256 -cne $pendingSha256) {
++        Remove-Item -LiteralPath $existing.Path -Force
++        $existing = $null
++    }
++    if ($pendingSha256 -ceq (Get-HerdrSha256 -Path $installed)) {
++        if ($null -ne $existing) {
++            Remove-Item -LiteralPath $existing.Path -Force
++        }
++        return $null
++    }
++    if ($null -eq $existing) {
++        $destination = Join-Path $stateDir "launcher.pending-$pendingSha256.exe"
++        Copy-HerdrDurableFile -Source $LauncherPath -Destination $destination
++        $existing = Get-HerdrPendingLauncher -StateDir $stateDir
++    }
++    return $existing
++}
++
++function Set-HerdrInstallManifestBootstrapHash {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [Parameter(Mandatory = $true)][string]$BootstrapSha256
++    )
++
++    $stateDir = Join-Path $InstallRoot "state"
++    $current = Read-HerdrInstallManifest -StateDir $stateDir
++    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    try {
++        $metadata = Join-Path $transaction.Path "metadata"
++        New-Item -ItemType Directory -Path $metadata | Out-Null
++        Write-HerdrDurableText -Path (Join-Path $metadata "install.manifest") -Text (
++            Get-HerdrInstallManifestTextForHash `
++                -BootstrapSha256 $BootstrapSha256 `
++                -DisplayVersion $current.DisplayVersion `
++                -NumericVersion $current.NumericVersion
++        )
++        Publish-HerdrStagedFile `
++            -Source (Join-Path $metadata "install.manifest") `
++            -Destination (Join-Path $stateDir "install.manifest") `
++            -BackupDir $transaction.Path
++    } finally {
++        if (Test-Path -LiteralPath $transaction.Path) {
++            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        }
++    }
++}
++
++function Repair-HerdrLauncherPublication {
++    param([Parameter(Mandatory = $true)][string]$InstallRoot)
++
++    if (-not (Test-Path -LiteralPath $InstallRoot)) {
++        return
++    }
++    $stateDir = Join-Path $InstallRoot "state"
++    $manifest = Read-HerdrInstallManifest -StateDir $stateDir
++    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
++    Assert-HerdrRegularFile -Path $launcher
++    $pending = Get-HerdrPendingLauncher -StateDir $stateDir
++    $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
++    if (Test-Path -LiteralPath $replacement) {
++        Assert-HerdrRegularFile -Path $replacement
++        if ($null -eq $pending -or (Get-HerdrSha256 -Path $replacement) -cne $pending.Sha256) {
++            throw "Unrecognized managed launcher replacement file: $replacement"
++        }
++        Remove-Item -LiteralPath $replacement -Force
++    }
++
++    $installedSha256 = Get-HerdrSha256 -Path $launcher
++    if ($installedSha256 -ceq $manifest.BootstrapSha256) {
++        if ($null -ne $pending -and $pending.Sha256 -ceq $installedSha256) {
++            Remove-Item -LiteralPath $pending.Path -Force
++        }
++        return
++    }
++    if ($null -eq $pending -or $installedSha256 -cne $pending.Sha256) {
++        throw "Managed launcher hash matches neither the install manifest nor a validated pending launcher: $launcher"
++    }
++    Set-HerdrInstallManifestBootstrapHash -InstallRoot $InstallRoot -BootstrapSha256 $installedSha256
++    Remove-Item -LiteralPath $pending.Path -Force
 +}
 +
 +function Assert-HerdrManagedBin {
@@ -1119,7 +1261,9 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    Assert-HerdrRegularDirectory -Path $stateDir
 +    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
-+        if ($allowedState -cnotcontains $entry.Name -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
++        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
++        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
++            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
 +            throw "Unrecognized content in managed Herdr state: $($entry.FullName)"
 +        }
 +    }
@@ -1136,6 +1280,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
 +    $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
 +    Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
++    [void](Get-HerdrPendingLauncher -StateDir $stateDir)
 +
 +    $runtimeRoot = Join-Path $InstallRoot "runtime"
 +    Assert-HerdrRegularDirectory -Path $runtimeRoot
@@ -1176,7 +1321,9 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    }
 +    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
-+        if ($allowedState -cnotcontains $entry.Name -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
++        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
++        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
++            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
 +            throw "Unrecognized content in uninstall-retry state: $($entry.FullName)"
 +        }
 +    }
@@ -1193,6 +1340,9 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +            throw "Cannot validate remaining managed bin without install.manifest."
 +        }
 +        Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
++    }
++    if (Test-Path -LiteralPath $stateDir) {
++        [void](Get-HerdrPendingLauncher -StateDir $stateDir)
 +    }
 +    if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
 +        Assert-HerdrRegularDirectory -Path (Join-Path $InstallRoot "runtime")
@@ -1326,7 +1476,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +            continue
 +        }
 +        if ($entry.PSIsContainer -or
-+            $entry.Name -cnotmatch '^(?:active|pending|installer-helper\.ps1|uninstall\.exe|install\.manifest)\.backup\.[0-9a-f]{32}$') {
++            $entry.Name -cnotmatch '^(?:active|pending|launcher|installer-helper\.ps1|uninstall\.exe|install\.manifest)\.backup\.[0-9a-f]{32}$') {
 +            throw "Update installer transaction contains unexpected content: $($entry.FullName)"
 +        }
 +    }
@@ -1595,7 +1745,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        Assert-HerdrManagedRoot -InstallRoot $InstallRoot
 +        return "Managed"
 +    } catch {
-+        throw "The existing Herdr installation is not compatible with this setup. Uninstall Herdr from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
++        throw "The existing Herdr installation is not compatible with this setup. Uninstall $script:ProductName from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
 +    }
 +}
 +
@@ -1746,6 +1896,176 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    }
 +}
 +
++function Remove-HerdrRuntimeDirectory {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [Parameter(Mandatory = $true)][string]$Path,
++        [Parameter(Mandatory = $true)][string]$BuildId
++    )
++
++    Assert-HerdrRuntimeDirectory -Path $Path -ExpectedBuildId $BuildId
++    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    $moved = $false
++    try {
++        [IO.Directory]::Move($Path, (Join-Path $transaction.Path "runtime"))
++        $moved = $true
++        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++    } finally {
++        if (-not $moved -and (Test-Path -LiteralPath $transaction.Path)) {
++            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        }
++    }
++}
++
++function Remove-HerdrInactiveRuntimes {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [AllowEmptyCollection()][object[]]$Processes = @()
++    )
++
++    $stateDir = Join-Path $InstallRoot "state"
++    $runtimeRoot = Join-Path $InstallRoot "runtime"
++    $protected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
++    [void]$protected.Add((Read-HerdrPointer -Path (Join-Path $stateDir "active")))
++    $pendingPointer = Join-Path $stateDir "pending"
++    if (Test-Path -LiteralPath $pendingPointer) {
++        [void]$protected.Add((Read-HerdrPointer -Path $pendingPointer))
++    }
++
++    foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeRoot -Force -Directory)) {
++        if ($protected.Contains($runtime.Name)) {
++            continue
++        }
++        Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
++        if (Test-HerdrProcessWithinRoots -Processes $Processes -Roots @($runtime.FullName)) {
++            continue
++        }
++        $leasePath = Join-Path $stateDir "leases\$($runtime.Name).lease"
++        $leaseProbe = $null
++        if (Test-Path -LiteralPath $leasePath) {
++            Assert-HerdrRegularFile -Path $leasePath
++            try {
++                $leaseProbe = [IO.File]::Open($leasePath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
++            } catch [UnauthorizedAccessException] {
++                continue
++            } catch [IO.IOException] {
++                continue
++            }
++        }
++        if ($null -ne $leaseProbe) {
++            $leaseProbe.Dispose()
++        }
++        Remove-HerdrRuntimeDirectory -InstallRoot $InstallRoot -Path $runtime.FullName -BuildId $runtime.Name
++        if (Test-Path -LiteralPath $leasePath) {
++            Remove-Item -LiteralPath $leasePath -Force
++        }
++    }
++}
++
++function Complete-HerdrLauncherUpdateLocked {
++    param([Parameter(Mandatory = $true)][string]$InstallRoot)
++
++    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    $stateDir = Join-Path $InstallRoot "state"
++    $pending = Get-HerdrPendingLauncher -StateDir $stateDir
++    if ($null -eq $pending) {
++        return $false
++    }
++    $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
++    if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
++        return $false
++    }
++
++    $launcher = Join-Path $InstallRoot "bin\herdr.exe"
++    $replacement = Join-Path $InstallRoot "bin\$script:LauncherReplacementName"
++    if (Test-Path -LiteralPath $replacement) {
++        Assert-HerdrRegularFile -Path $replacement
++        Remove-Item -LiteralPath $replacement -Force
++    }
++    Copy-HerdrDurableFile -Source $pending.Path -Destination $replacement
++    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    $backup = Join-Path $transaction.Path ("launcher.backup." + [Guid]::NewGuid().ToString("N"))
++    try {
++        [IO.File]::Replace($replacement, $launcher, $backup)
++    } catch [IO.IOException] {
++        if (Test-Path -LiteralPath $replacement) {
++            Remove-Item -LiteralPath $replacement -Force
++        }
++        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        return $false
++    }
++    Remove-Item -LiteralPath $backup -Force
++    Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++    if ((Get-HerdrSha256 -Path $launcher) -cne $pending.Sha256) {
++        throw "Published managed launcher does not match its staged SHA-256: $launcher"
++    }
++    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    return $true
++}
++
++function Invoke-HerdrMaintenanceLocked {
++    param([Parameter(Mandatory = $true)][string]$InstallRoot)
++
++    Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    Assert-HerdrManagedRoot -InstallRoot $InstallRoot
++    $processes = @(Get-HerdrProcessSnapshot)
++    Remove-HerdrInactiveRuntimes -InstallRoot $InstallRoot -Processes $processes
++    $launcherUpdated = Complete-HerdrLauncherUpdateLocked -InstallRoot $InstallRoot
++    Assert-HerdrManagedRoot -InstallRoot $InstallRoot
++    return [PSCustomObject]@{ LauncherUpdated = $launcherUpdated }
++}
++
++function Wait-HerdrParentProcessExit {
++    param(
++        [uint32]$ProcessId,
++        [int]$TimeoutMilliseconds = 30000
++    )
++
++    if ($ProcessId -eq 0) {
++        return $true
++    }
++    try {
++        $process = Get-Process -Id $ProcessId -ErrorAction Stop
++    } catch {
++        return $true
++    }
++    try {
++        return $process.WaitForExit($TimeoutMilliseconds)
++    } finally {
++        $process.Dispose()
++    }
++}
++
++function Invoke-HerdrCompleteMaintenance {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [uint32]$ParentProcessId = 0,
++        [int]$LifecycleLockTimeoutMilliseconds = 30000
++    )
++
++    if (-not (Wait-HerdrParentProcessExit -ProcessId $ParentProcessId)) {
++        return [PSCustomObject]@{ Status = "Deferred"; LauncherUpdated = $false }
++    }
++    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
++    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
++        if (-not (Test-Path -LiteralPath $InstallRoot)) {
++            return [PSCustomObject]@{ Status = "Missing"; LauncherUpdated = $false }
++        }
++        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++        Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
++        if ((Get-HerdrRootKind -InstallRoot $InstallRoot) -ne "Managed") {
++            return [PSCustomObject]@{ Status = "Deferred"; LauncherUpdated = $false }
++        }
++        $coordination = Open-HerdrShareModeLock -Path (Join-Path $InstallRoot "state\launcher.lock") -TimeoutMilliseconds 30000
++        try {
++            $result = Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot
++            return [PSCustomObject]@{ Status = "Complete"; LauncherUpdated = $result.LauncherUpdated }
++        } finally {
++            $coordination.Dispose()
++        }
++    }
++}
++
 +function New-HerdrManagedRootTree {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Destination,
@@ -1763,7 +2083,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    New-Item -ItemType Directory -Path (Join-Path $Destination "state\leases") -Force | Out-Null
 +    Copy-HerdrDurableFile -Source $LauncherPath -Destination (Join-Path $Destination "bin\herdr.exe")
 +    Write-HerdrDurableText -Path (Join-Path $Destination "bin\managed-install-v1\marker") -Text $script:ManagedBinMarkerText
-+    New-HerdrRuntimeTree -Destination (Join-Path $Destination "runtime\$BuildId") -StageDir $StageDir -LauncherPath $LauncherPath -BuildId $BuildId
++    New-HerdrRuntimeTree -Destination (Join-Path $Destination "runtime\$BuildId") -StageDir $StageDir -BuildId $BuildId
 +    Write-HerdrDurableBytes -Path (Join-Path $Destination "state\launcher.lock") -Bytes ([byte[]]@())
 +    Write-HerdrDurableText -Path (Join-Path $Destination "state\active") -Text (Get-HerdrPointerText -BuildId $BuildId)
 +    Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $Destination "state\installer-helper.ps1")
@@ -1804,13 +2124,10 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        [int]$LockTimeoutMilliseconds = 30000
 +    )
 +
-+    # Inactive runtimes remain until uninstall. The coordination gate closes the
-+    # new-launch race, but CIM omits inaccessible ExecutablePath values, so this
-+    # helper cannot prove the required no-process condition without ambiguity.
 +    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
 +    try {
 +        $stagedRuntime = Join-Path $transaction.Path "runtime"
-+        New-HerdrRuntimeTree -Destination $stagedRuntime -StageDir $StageDir -LauncherPath $LauncherPath -BuildId $BuildId
++        New-HerdrRuntimeTree -Destination $stagedRuntime -StageDir $StageDir -BuildId $BuildId
 +        $metadata = Join-Path $transaction.Path "metadata"
 +        New-Item -ItemType Directory -Path $metadata | Out-Null
 +        Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $metadata "installer-helper.ps1")
@@ -1837,6 +2154,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
++            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath)
 +
 +            $activePath = Join-Path $stateDir "active"
 +            $activeBuild = Read-HerdrPointer -Path $activePath
@@ -1846,12 +2164,14 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +                    Remove-Item -LiteralPath $pendingPath -Force
 +                }
 +                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +                return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
 +            }
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
 +            $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
 +            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
 +                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +                return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
 +            }
 +            Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -1862,6 +2182,7 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +                throw "Atomic pending activation did not publish the expected active pointer."
 +            }
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++            [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +            return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
 +        } finally {
 +            $coordination.Dispose()
@@ -1903,6 +2224,10 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
 +    }
 +
++    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
++        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
++        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    }
 +    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
 +    if (@(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall").Count -gt 0) {
 +        throw "A previous Herdr uninstall transaction is incomplete; rerun uninstall before installing."
@@ -2124,6 +2449,10 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +    )
 +
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
++    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
++        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
++        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    }
 +    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
 +    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
 +    if ($rootKind -ne "Managed" -and $rootKind -ne "UninstallRetry") {
@@ -2179,6 +2508,10 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +        Remove-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
 +
 +        Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
++        $pendingLauncher = Get-HerdrPendingLauncher -StateDir $stateDir
++        if ($null -ne $pendingLauncher) {
++            Remove-Item -LiteralPath $pendingLauncher.Path -Force
++        }
 +        foreach ($name in @("active", "pending", "install.manifest")) {
 +            $path = Join-Path $stateDir $name
 +            if (Test-Path -LiteralPath $path) {
@@ -2242,8 +2575,14 @@ index 0000000000000000000000000000000000000000..0c5c032cd91d617c25c7a48d3eac2b94
 +                Invoke-HerdrUninstall -InstallRoot $InstallRoot -SettingsDisposition $SettingsDisposition
 +                [Console]::Out.WriteLine("$script:ProductName uninstall cleanup is ready.")
 +            }
++            "CompleteMaintenance" {
++                $result = Invoke-HerdrCompleteMaintenance `
++                    -InstallRoot $InstallRoot `
++                    -ParentProcessId $ParentProcessId
++                [Console]::Out.WriteLine("$script:ProductName maintenance: $($result.Status)")
++            }
 +            default {
-+                throw "Action must be Install or Uninstall."
++                throw "Action must be Install, Uninstall, or CompleteMaintenance."
 +            }
 +        }
 +        exit 0
@@ -53709,10 +54048,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af031b6ac24
+index 0000000000000000000000000000000000000000..1e70660fe27692b0f5da0c6fb5e39141958f1dbb
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,542 @@
+@@ -0,0 +1,552 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -53886,6 +54225,14 @@ index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af0
 +  ${If} ${RunningX64}
 +    StrCpy $PowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
 +  ${EndIf}
++FunctionEnd
++
++Function NotifyEnvironmentChange
++  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i 5000, *p .r0)'
++FunctionEnd
++
++Function un.NotifyEnvironmentChange
++  System::Call 'USER32::SendMessageTimeoutW(p 0xffff, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i 5000, *p .r0)'
 +FunctionEnd
 +
 +Function FailInstall
@@ -54164,7 +54511,7 @@ index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af0
 +
 +installer_inputs_ready:
 +  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_PRODUCTNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -54174,6 +54521,7 @@ index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af0
 +
 +installer_complete:
 +  DetailPrint "$HelperOutput"
++  Call NotifyEnvironmentChange
 +  SetErrorLevel 0
 +SectionEnd
 +
@@ -54197,7 +54545,7 @@ index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af0
 +  Call un.FailUninstall
 +
 +un_helper_ready:
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_PRODUCTNAME}" -SettingsDisposition "$SettingsDisposition"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" un_helper_complete
@@ -54207,6 +54555,7 @@ index 0000000000000000000000000000000000000000..76ffdb4180d45d70501baee4b2493af0
 +
 +un_helper_complete:
 +  DetailPrint "$HelperOutput"
++  Call un.NotifyEnvironmentChange
 +  ${If} $SettingsDisposition == "Remove"
 +    DetailPrint "$(AppDetailRemoveSettings)"
 +  ${EndIf}
@@ -54645,7 +54994,7 @@ index 0000000000000000000000000000000000000000..5594ddb97fe550b1ba28d3240351129b
 +    main()
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..aada7670cc8a67c459a5bd3f777ec7899cbb9762
+index 0000000000000000000000000000000000000000..c1ac7aabe665131748eab0dc82ee2379b223bbb5
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
 @@ -0,0 +1,463 @@
@@ -55111,7 +55460,7 @@ index 0000000000000000000000000000000000000000..aada7670cc8a67c459a5bd3f777ec789
 +    Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
 +}
 +
-+Write-Host "Created $ProductName installer: $OutputPath"
++Write-Host "Created $DistributionName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
 index e173f8651ae1e685d5d2a88531dccd73d8410a43..7e0d15912ee22b09745d342a7de34e51ffba676d 100644
 --- a/scripts/preview.py
@@ -55769,10 +56118,10 @@ index 87537d41733800731b1e492f0209d1b1d6c71ad1..899b33f853f51c30fed08736889679b6
  if __name__ == "__main__":
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e216782f592
+index 0000000000000000000000000000000000000000..b9bd7411b6226d7d26ec9fb398dd261344ae17d7
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,639 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -55844,7 +56193,11 @@ index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e21
 +        self.assertIn('return "herdr-runtime-v1`nbuild_id=$BuildId`n"', helper)
 +        self.assertIn('return "herdr-pointer-v1`nbuild_id=$BuildId`n"', helper)
 +        self.assertIn('$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"', helper)
-+        self.assertIn('"herdr-launcher.exe"', helper)
++        self.assertNotIn('"herdr-launcher.exe"', helper)
++        self.assertIn("launcher\\.pending-([0-9a-f]{64})\\.exe", helper)
++        self.assertIn("Complete-HerdrLauncherUpdateLocked", helper)
++        self.assertIn("Remove-HerdrInactiveRuntimes", helper)
++        self.assertIn('"CompleteMaintenance"', helper)
 +        self.assertIn('"runtime.manifest"', helper)
 +        self.assertIn("herdr-runtime-manifest-v1", helper)
 +        self.assertIn("^[0-9a-f]{12}\\.[0-9a-f]{12}$", helper)
@@ -55930,6 +56283,8 @@ index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e21
 +        self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
 +        self.assertIn("AgentUserProfileRoot", fault_test)
 +        self.assertIn('[string]$ProductName = "Herdr"', fault_test)
++        self.assertIn('[string]$PackageName = "Herdr Win"', fault_test)
++        self.assertIn("Uninstall\\$PackageName", fault_test)
 +        self.assertIn("-ProductName $ProductName", fault_test)
 +        self.assertIn("CLAUDE_CONFIG_DIR", fault_test)
 +
@@ -55971,6 +56326,11 @@ index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e21
 +        self.assertIn('Join-Path $stateDir "launcher.lock"', helper)
 +        self.assertIn("[IO.FileShare]::None", helper)
 +        self.assertIn("LockTimeoutMilliseconds", helper)
++        self.assertIn("spawn_payload", (PROJECT_ROOT / "src/platform/windows/launcher.rs").read_text(encoding="utf-8"))
++        self.assertNotIn(
++            "runtime_launcher_path",
++            MANAGED_INSTALL.read_text(encoding="utf-8"),
++        )
 +
 +    def test_runtime_components_never_download_or_force_process_lifecycle(self) -> None:
 +        runtime_sources = "\n".join(
@@ -56022,6 +56382,8 @@ index 0000000000000000000000000000000000000000..52116153857c8d32c7199b77ef498e21
 +        self.assertIn('!include "MUI2.nsh"', nsi)
 +        self.assertIn('!include "nsDialogs.nsh"', nsi)
 +        self.assertIn('!include "WinMessages.nsh"', nsi)
++        self.assertIn("SendMessageTimeoutW", nsi)
++        self.assertIn('-ProductName "${INFO_DISTRIBUTIONNAME}"', nsi)
 +        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
 +        self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
 +        self.assertNotIn("LANG_GERMAN", nsi)
@@ -56857,10 +57219,10 @@ index 0000000000000000000000000000000000000000..331dec1946e78838302c93b9325a825c
 +}
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760afe25174
+index 0000000000000000000000000000000000000000..7fa4a2179b02d42e7d92320f810742db719ff638
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,348 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -56870,6 +57232,7 @@ index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760
 +    [Parameter(Mandatory = $true)][string]$NumericVersion,
 +    [Parameter(Mandatory = $true)][string]$OutputDir,
 +    [string]$ProductName = "Herdr",
++    [string]$PackageName = "Herdr Win",
 +    [string]$AgentUserProfileRoot,
 +    [string[]]$Faults = @(
 +        "after-uninstall-pending",
@@ -56902,7 +57265,7 @@ index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760
 +    New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
 +}
 +$installRoot = Join-Path $env:LOCALAPPDATA "Programs\$ProductName"
-+$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
++$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$PackageName"
 +$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 +$skillRoot = Join-Path $env:USERPROFILE ".agents\skills\herdr"
 +$skillPath = Join-Path $skillRoot "SKILL.md"
@@ -57210,10 +57573,10 @@ index 0000000000000000000000000000000000000000..a70f89085d193754432e0e1e53004760
 +Write-Host "Windows installer fault matrix passed."
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277ac6bc380
+index 0000000000000000000000000000000000000000..bcbd91b92047f66218cc96aba4c385ba66cf85ea
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,622 @@
 +[CmdletBinding()]
 +param()
 +
@@ -57576,6 +57939,7 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +    $binEntry = Join-Path $tempRoot "path-test\bin"
 +    $pathInput = "C:\Other;;`"$binEntry\`";C:\Keep;$($binEntry.ToUpperInvariant())"
 +    $pathOnce = Add-HerdrPathEntry -PathValue $pathInput -Entry $binEntry
++    Assert-Equal $pathOnce.Split(';')[0] $binEntry "Managed bin did not lead the user PATH."
 +    Assert-Equal (Add-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) $pathOnce "PATH insertion was not idempotent."
 +    Assert-Equal (Remove-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) "C:\Other;;C:\Keep" "PATH removal changed unrelated entries."
 +
@@ -57602,8 +57966,8 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh bootstrap differs from launcher input."
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh runtime dispatcher is missing."
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
 +    $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
 +    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
 +
@@ -57632,8 +57996,11 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
 +    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Busy upgrade changed active."
 +    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\pending")) $id2 "Busy upgrade did not publish pending."
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Upgrade replaced immutable bootstrap."
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id2\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher2) "Upgrade did not carry the new dispatcher."
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Busy upgrade replaced the active launcher."
++    $pendingLauncher = Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state")
++    Assert-True ($null -ne $pendingLauncher) "Busy upgrade did not stage the new launcher."
++    Assert-Equal $pendingLauncher.Sha256 (Get-HerdrSha256 -Path $launcher2) "Pending launcher hash is wrong."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id2\herdr-launcher.exe"))) "Upgrade retained a runtime-local launcher."
 +    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed update did not replace the Herdr skill."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt")) "old-version" "Managed update removed a foreign skill sibling."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
@@ -57645,7 +58012,10 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +    $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Activation retained pending."
-+    Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id1)
++    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher2) "Idle activation did not update the launcher."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1"))) "Idle activation retained an obsolete runtime."
++    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $installRoot "runtime") -Directory).Count 1 "Runtime pruning did not reach a single active build."
++    Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id2)
 +    $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $alreadyActive.Status "AlreadyActive" "Same-build reinstall did not report already active."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Same-build reinstall retained an obsolete pending build."
@@ -57697,6 +58067,7 @@ index 0000000000000000000000000000000000000000..5259c581f043cf486afca493f41e9277
 +    # ARP stores the truthful display/numeric identity and preserves mismatches.
 +    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
 +    $arp = Get-ItemProperty -LiteralPath $registryPath
++    Assert-Equal ([string]$arp.DisplayName) $script:ProductName "ARP package identity is not the configured distribution name."
 +    Assert-Equal ([string]$arp.DisplayVersion) $display2 "ARP display version is not truthful."
 +    Assert-Equal ([int]$arp.VersionMajor) 0 "ARP major version is wrong."
 +    Set-ItemProperty -LiteralPath $registryPath -Name InstallLocation -Value (Join-Path $tempRoot "someone-else")
@@ -58436,7 +58807,7 @@ index 0857225f3596f9fd135ca3c87f1676b40a084487..d2a15057c442505e2ceb56303718f7fa
                  "Inspect socket API metadata and live runtime state",
 diff --git a/src/managed_install.rs b/src/managed_install.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..78ce2b1e2d14892c9aec49728025a71e37810b02
+index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd259d5b64ab
 --- /dev/null
 +++ b/src/managed_install.rs
 @@ -0,0 +1,229 @@
@@ -58560,10 +58931,6 @@ index 0000000000000000000000000000000000000000..78ce2b1e2d14892c9aec49728025a71e
 +        self.build_dir(build_id).join("herdr.exe")
 +    }
 +
-+    pub(crate) fn runtime_launcher_path(&self, build_id: &BuildId) -> PathBuf {
-+        self.build_dir(build_id).join("herdr-launcher.exe")
-+    }
-+
 +    pub(crate) fn runtime_marker_path(&self, build_id: &BuildId) -> PathBuf {
 +        self.build_dir(build_id).join("runtime.ready")
 +    }
@@ -58580,6 +58947,10 @@ index 0000000000000000000000000000000000000000..78ce2b1e2d14892c9aec49728025a71e
 +
 +    pub(crate) fn leases_dir(&self) -> PathBuf {
 +        self.state_dir().join("leases")
++    }
++
++    pub(crate) fn installer_helper_path(&self) -> PathBuf {
++        self.state_dir().join("installer-helper.ps1")
 +    }
 +
 +    pub(crate) fn lease_path(&self, build_id: &BuildId) -> PathBuf {
@@ -58911,16 +59282,17 @@ index b202d3efde61c69b033c952fb9260c9e3af126f4..182dd6d6f5c5d640b95cb23edf2a2245
          use base64::Engine as _;
 diff --git a/src/platform/windows/launcher.rs b/src/platform/windows/launcher.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23dd2f6088
+index 0000000000000000000000000000000000000000..e465f6b20106b5f154770af43ff041e57211b978
 --- /dev/null
 +++ b/src/platform/windows/launcher.rs
-@@ -0,0 +1,1319 @@
+@@ -0,0 +1,1120 @@
 +use std::{
 +    ffi::{OsStr, OsString},
++    fs,
 +    io::{self, Write},
 +    os::windows::process::CommandExt as _,
 +    path::Path,
-+    process::{Child, Command},
++    process::{Child, Command, Stdio},
 +    thread,
 +    time::{Duration, Instant},
 +};
@@ -58929,32 +59301,21 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    Console::{
 +        GetConsoleCP, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT, PHANDLER_ROUTINE,
 +    },
-+    Threading::DETACHED_PROCESS,
++    Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS},
 +};
 +
 +use crate::{
 +    managed_install::{BuildId, ManagedInstall},
-+    windows_managed_install::{
-+        build_id_from_dir, install_from_runtime_dir, CoordinationLease, Runtime, SharedLease,
-+        MANAGED_LEASE_HANDLE_ENV,
-+    },
++    windows_managed_install::{CoordinationLease, Runtime, SharedLease, MANAGED_LEASE_HANDLE_ENV},
 +};
 +
 +const PENDING_POINTER: &str = "pending";
 +const COORDINATION_TIMEOUT: Duration = Duration::from_secs(5);
 +const COORDINATION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 +const BUILD_ID_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
-+const BUILD_ID_QUERY_ENV: &str = "HERDR_INTERNAL_LAUNCHER_BUILD_ID_QUERY_V1";
 +const DEVELOPMENT_BUILD_ID: &str = "development";
-+
-+#[derive(Debug)]
-+enum LauncherRole {
-+    Bootstrap(ManagedInstall),
-+    Dispatcher {
-+        install: ManagedInstall,
-+        physical_build: BuildId,
-+    },
-+}
++const PENDING_LAUNCHER_PREFIX: &str = "launcher.pending-";
++const PENDING_LAUNCHER_SUFFIX: &str = ".exe";
 +
 +pub(crate) fn run() -> io::Result<i32> {
 +    let current = std::env::current_exe().map_err(|err| {
@@ -58967,18 +59328,8 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    if let Some(code) = maybe_run_build_id_query(&current, &args)? {
 +        return Ok(code);
 +    }
-+    match launcher_role(&current)? {
-+        LauncherRole::Bootstrap(install) => run_bootstrap(&install, &args),
-+        LauncherRole::Dispatcher {
-+            install,
-+            physical_build,
-+        } => {
-+            // Role resolution already validates the dispatcher's immutable
-+            // physical runtime. Selection below deliberately re-reads active
-+            // state because another dispatcher may have activated a newer one.
-+            run_dispatcher(&install, &physical_build, &args)
-+        }
-+    }
++    let install = resolve_install(&current)?;
++    run_launcher(&install, &args)
 +}
 +
 +fn maybe_run_build_id_query(current: &Path, args: &[OsString]) -> io::Result<Option<i32>> {
@@ -58987,17 +59338,6 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    {
 +        return Ok(None);
 +    }
-+    let installed_shape = current
-+        .parent()
-+        .and_then(Path::parent)
-+        .is_some_and(|parent| parent.file_name() == Some(OsStr::new("runtime")));
-+    let authorized_installed_query =
-+        std::env::var_os(BUILD_ID_QUERY_ENV).as_deref() == Some(OsStr::new("1"));
-+    if installed_shape && !authorized_installed_query {
-+        return Ok(None);
-+    }
-+
-+    std::env::remove_var(BUILD_ID_QUERY_ENV);
 +    std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
 +    writeln!(io::stdout().lock(), "{}", compiled_build_id_label()?)?;
 +    Ok(Some(0))
@@ -59013,203 +59353,83 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +}
 +
-+#[cfg(not(test))]
-+fn compiled_build_id() -> io::Result<Option<BuildId>> {
-+    let label = compiled_build_id_label()?;
-+    if label == DEVELOPMENT_BUILD_ID {
-+        Ok(None)
-+    } else {
-+        BuildId::parse(label).map(Some)
++fn resolve_install(current: &Path) -> io::Result<ManagedInstall> {
++    if current.file_name() != Some(OsStr::new("herdr.exe")) {
++        return Err(invalid_data(format!(
++            "managed launcher {} is not bin/herdr.exe",
++            current.display()
++        )));
 +    }
++    let bin_dir = current.parent().ok_or_else(|| {
++        invalid_data(format!(
++            "managed launcher {} has no bin directory",
++            current.display()
++        ))
++    })?;
++    if bin_dir.file_name() != Some(OsStr::new("bin")) {
++        return Err(invalid_data(format!(
++            "managed launcher {} is not the direct bin/herdr.exe command",
++            current.display()
++        )));
++    }
++    let root = bin_dir.parent().ok_or_else(|| {
++        invalid_data(format!(
++            "managed launcher {} has no install root",
++            current.display()
++        ))
++    })?;
++    let install = ManagedInstall::new(root.to_path_buf());
++    let expected = install.validate_managed_bin()?;
++    if expected != current {
++        return Err(invalid_data(format!(
++            "managed launcher path is {}, expected {}",
++            current.display(),
++            expected.display()
++        )));
++    }
++    Ok(install)
 +}
 +
-+fn launcher_role(current: &Path) -> io::Result<LauncherRole> {
-+    if current.file_name() == Some(OsStr::new("herdr.exe")) {
-+        let bin_dir = current.parent().ok_or_else(|| {
-+            invalid_data(format!(
-+                "managed bootstrap {} has no bin directory",
-+                current.display()
-+            ))
-+        })?;
-+        if bin_dir.file_name() != Some(OsStr::new("bin")) {
-+            return Err(invalid_data(format!(
-+                "managed bootstrap {} is not the direct bin/herdr.exe command",
-+                current.display()
-+            )));
-+        }
-+        let root = bin_dir.parent().ok_or_else(|| {
-+            invalid_data(format!(
-+                "managed bootstrap {} has no install root",
-+                current.display()
-+            ))
-+        })?;
-+        let install = ManagedInstall::new(root.to_path_buf());
-+        let expected = install.validate_managed_bin()?;
-+        if expected != current {
-+            return Err(invalid_data(format!(
-+                "managed bootstrap path is {}, expected {}",
-+                current.display(),
-+                expected.display()
-+            )));
-+        }
-+        return Ok(LauncherRole::Bootstrap(install));
-+    }
-+
-+    if current.file_name() == Some(OsStr::new("herdr-launcher.exe")) {
-+        let build_dir = current.parent().ok_or_else(|| {
-+            invalid_data(format!(
-+                "managed dispatcher {} has no build directory",
-+                current.display()
-+            ))
-+        })?;
-+        let runtime_dir = build_dir.parent().ok_or_else(|| {
-+            invalid_data(format!(
-+                "managed dispatcher {} has no runtime directory",
-+                current.display()
-+            ))
-+        })?;
-+        if runtime_dir.file_name() != Some(OsStr::new("runtime")) {
-+            return Err(invalid_data(format!(
-+                "managed dispatcher {} is not a direct runtime/<build-id>/herdr-launcher.exe child",
-+                current.display()
-+            )));
-+        }
-+        let build_id = build_id_from_dir(build_dir)?;
-+        #[cfg(not(test))]
-+        if let Some(compiled) = compiled_build_id()? {
-+            if compiled != build_id {
-+                return Err(invalid_data(format!(
-+                    "managed dispatcher {} contains compiled build {}, expected physical build {}",
-+                    current.display(),
-+                    compiled.as_str(),
-+                    build_id.as_str()
-+                )));
-+            }
-+        }
-+        let install = install_from_runtime_dir(runtime_dir)?;
-+        install.validate_managed_bin()?;
-+        let runtime = install.validate_runtime(&build_id)?;
-+        if runtime.dispatcher != current {
-+            return Err(invalid_data(format!(
-+                "managed dispatcher resolved to {}, not {}",
-+                runtime.dispatcher.display(),
-+                current.display()
-+            )));
-+        }
-+        return Ok(LauncherRole::Dispatcher {
-+            install,
-+            physical_build: build_id,
-+        });
-+    }
-+
-+    Err(invalid_data(format!(
-+        "managed launcher {} is neither bin/herdr.exe bootstrap mode nor runtime/<build-id>/herdr-launcher.exe dispatcher mode",
-+        current.display()
-+    )))
-+}
-+
-+fn run_bootstrap(install: &ManagedInstall, args: &[OsString]) -> io::Result<i32> {
-+    let (mut child, _console_handler) = spawn_bootstrap_dispatcher(install, args)?;
++fn run_launcher(install: &ManagedInstall, args: &[OsString]) -> io::Result<i32> {
++    let (mut child, lease, _console_handler) = spawn_payload(install, args)?;
 +    let status = child.wait().map_err(|err| {
 +        contextual(
 +            err,
-+            "failed while waiting for managed Herdr runtime dispatcher".to_string(),
++            "failed while waiting for managed Herdr payload".to_string(),
 +        )
 +    })?;
++    drop(lease);
++
++    match prepare_post_exit_maintenance(install, COORDINATION_TIMEOUT) {
++        Ok(true) => {
++            if let Err(err) = spawn_post_exit_maintenance(install) {
++                let _ = writeln!(
++                    io::stderr().lock(),
++                    "herdr launcher: payload exited, but maintenance could not start: {err}"
++                );
++            }
++        }
++        Ok(false) => {}
++        Err(err) => {
++            let _ = writeln!(
++                io::stderr().lock(),
++                "herdr launcher: payload exited, but maintenance preparation failed: {err}"
++            );
++        }
++    }
 +    child_exit_code(status)
 +}
 +
-+fn spawn_bootstrap_dispatcher(
++fn spawn_payload(
 +    install: &ManagedInstall,
 +    args: &[OsString],
-+) -> io::Result<(Child, ConsoleCtrlHandler)> {
++) -> io::Result<(Child, SharedLease, ConsoleCtrlHandler)> {
 +    let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
 +    install.validate_managed_bin()?;
-+    let active_id = install.read_required_active_pointer()?;
-+    let runtime = install.validate_runtime(&active_id)?;
-+    spawn_transparent(
-+        &runtime.dispatcher,
-+        args,
-+        "managed Herdr runtime dispatcher",
-+    )
-+}
-+
-+enum SpawnedDispatch {
-+    Payload {
-+        child: Child,
-+        lease: SharedLease,
-+        _console_handler: ConsoleCtrlHandler,
-+    },
-+    Redispatch {
-+        child: Child,
-+        _console_handler: ConsoleCtrlHandler,
-+    },
-+}
-+
-+fn run_dispatcher(
-+    install: &ManagedInstall,
-+    physical_build: &BuildId,
-+    args: &[OsString],
-+) -> io::Result<i32> {
-+    match spawn_dispatch(install, physical_build, args)? {
-+        SpawnedDispatch::Redispatch {
-+            mut child,
-+            _console_handler,
-+        } => {
-+            let status = child.wait().map_err(|err| {
-+                contextual(
-+                    err,
-+                    "failed while waiting for selected Herdr runtime dispatcher".to_string(),
-+                )
-+            })?;
-+            child_exit_code(status)
-+        }
-+        SpawnedDispatch::Payload {
-+            mut child,
-+            lease,
-+            _console_handler,
-+        } => {
-+            let status = child.wait().map_err(|err| {
-+                contextual(
-+                    err,
-+                    "failed while waiting for managed Herdr payload".to_string(),
-+                )
-+            })?;
-+            drop(lease);
-+            if let Err(err) = activate_pending_after_child(install, COORDINATION_TIMEOUT) {
-+                let _ = writeln!(
-+                    io::stderr().lock(),
-+                    "herdr launcher: child exited, but pending runtime activation failed: {err}"
-+                );
-+            }
-+            child_exit_code(status)
-+        }
-+    }
-+}
-+
-+fn spawn_dispatch(
-+    install: &ManagedInstall,
-+    physical_build: &BuildId,
-+    args: &[OsString],
-+) -> io::Result<SpawnedDispatch> {
-+    let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
 +    let runtime = select_runtime_locked(install)?;
-+    if runtime.build_id != *physical_build {
-+        let (child, console_handler) = spawn_transparent(
-+            &runtime.dispatcher,
-+            args,
-+            "selected managed Herdr runtime dispatcher",
-+        )?;
-+        return Ok(SpawnedDispatch::Redispatch {
-+            child,
-+            _console_handler: console_handler,
-+        });
-+    }
-+
 +    let lease = install.open_shared_lease(&runtime.build_id)?;
 +    let console_handler = ConsoleCtrlHandler::install()?;
 +    let mut command = payload_command(&runtime.executable, args);
-+    command.env_remove(BUILD_ID_QUERY_ENV);
 +    lease.configure_payload_child(&mut command);
 +    let child = command.spawn().map_err(|err| {
 +        contextual(
@@ -59221,40 +59441,17 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +        )
 +    })?;
 +
-+    // `_coordination` remains live until after CreateProcess succeeds. Rust
-+    // 1.96.1's Windows Command defaults bInheritHandles to TRUE; the real
-+    // parent-death test below protects that external contract.
-+    Ok(SpawnedDispatch::Payload {
-+        child,
-+        lease,
-+        _console_handler: console_handler,
-+    })
-+}
-+
-+fn spawn_transparent(
-+    executable: &Path,
-+    args: &[OsString],
-+    description: &str,
-+) -> io::Result<(Child, ConsoleCtrlHandler)> {
-+    let console_handler = ConsoleCtrlHandler::install()?;
-+    let mut command = payload_command(executable, args);
-+    command
-+        .env_remove(MANAGED_LEASE_HANDLE_ENV)
-+        .env_remove(BUILD_ID_QUERY_ENV);
-+    let child = command.spawn().map_err(|err| {
-+        contextual(
-+            err,
-+            format!("failed to launch {description} {}", executable.display()),
-+        )
-+    })?;
-+    Ok((child, console_handler))
++    // `_coordination` remains live until after CreateProcess succeeds. Rust's
++    // Windows Command inherits the explicitly marked lease handle; the payload
++    // validates and adopts that exact file before it can create descendants.
++    Ok((child, lease, console_handler))
 +}
 +
 +fn payload_command(executable: &Path, args: &[OsString]) -> Command {
 +    let mut command = Command::new(executable);
 +    // Deliberately leave environment, cwd, standard handles, console, and
 +    // Rust's default handle inheritance untouched. The only creation flag
-+    // adjustment below carries an already-detached state across launcher hops.
++    // adjustment below carries an already-detached state into the payload.
 +    command.args(args);
 +    // SAFETY: `GetConsoleCP` has no arguments and only queries whether this
 +    // process is attached to a console.
@@ -59262,7 +59459,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    if detached {
 +        // A console-subsystem child created by a detached launcher would
 +        // otherwise allocate a fresh console. Preserve the caller's detached
-+        // state through both bootstrap and dispatcher hops.
++        // state through the single launcher hop.
 +        command.creation_flags(DETACHED_PROCESS);
 +    }
 +    command
@@ -59274,9 +59471,91 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    })
 +}
 +
-+fn activate_pending_after_child(install: &ManagedInstall, timeout: Duration) -> io::Result<()> {
++fn prepare_post_exit_maintenance(install: &ManagedInstall, timeout: Duration) -> io::Result<bool> {
 +    let _coordination = CoordinationGate::acquire(install, timeout)?;
 +    let _ = select_runtime_locked(install)?;
++    maintenance_needed_locked(install)
++}
++
++fn maintenance_needed_locked(install: &ManagedInstall) -> io::Result<bool> {
++    if install.read_pointer(PENDING_POINTER)?.is_some() {
++        return Ok(true);
++    }
++    let mut runtimes = fs::read_dir(install.runtime_dir()).map_err(|err| {
++        contextual(
++            err,
++            format!(
++                "failed to inspect managed Herdr runtimes {}",
++                install.runtime_dir().display()
++            ),
++        )
++    })?;
++    if runtimes.next().transpose()?.is_some() && runtimes.next().transpose()?.is_some() {
++        return Ok(true);
++    }
++    for entry in fs::read_dir(install.state_dir()).map_err(|err| {
++        contextual(
++            err,
++            format!(
++                "failed to inspect managed Herdr state {}",
++                install.state_dir().display()
++            ),
++        )
++    })? {
++        let name = entry?.file_name();
++        let Some(name) = name.to_str() else {
++            continue;
++        };
++        if name.starts_with(PENDING_LAUNCHER_PREFIX) && name.ends_with(PENDING_LAUNCHER_SUFFIX) {
++            return Ok(true);
++        }
++    }
++    Ok(false)
++}
++
++fn spawn_post_exit_maintenance(install: &ManagedInstall) -> io::Result<()> {
++    let helper = install.validate_installer_helper()?;
++    let windows = std::env::var_os("WINDIR").ok_or_else(|| {
++        io::Error::new(
++            io::ErrorKind::NotFound,
++            "WINDIR is missing; cannot start managed Herdr maintenance",
++        )
++    })?;
++    let powershell = Path::new(&windows)
++        .join("System32")
++        .join("WindowsPowerShell")
++        .join("v1.0")
++        .join("powershell.exe");
++    let mut command = Command::new(&powershell);
++    command
++        .args([
++            OsStr::new("-NoLogo"),
++            OsStr::new("-NoProfile"),
++            OsStr::new("-NonInteractive"),
++            OsStr::new("-ExecutionPolicy"),
++            OsStr::new("Bypass"),
++            OsStr::new("-File"),
++        ])
++        .arg(&helper)
++        .args([OsStr::new("-Action"), OsStr::new("CompleteMaintenance")])
++        .arg("-InstallRoot")
++        .arg(install.root())
++        .arg("-ParentProcessId")
++        .arg(std::process::id().to_string())
++        .env_remove(MANAGED_LEASE_HANDLE_ENV)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .creation_flags(CREATE_NO_WINDOW);
++    command.spawn().map_err(|err| {
++        contextual(
++            err,
++            format!(
++                "failed to start managed Herdr maintenance helper {}",
++                powershell.display()
++            ),
++        )
++    })?;
 +    Ok(())
 +}
 +
@@ -59425,7 +59704,6 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    const OWNER_ROOT_ENV: &str = "HERDR_LAUNCHER_OWNER_ROOT";
 +    const OWNER_ADDR_ENV: &str = "HERDR_LAUNCHER_OWNER_ADDR";
 +    const DETACHED_ROOT_ENV: &str = "HERDR_LAUNCHER_DETACHED_ROOT";
-+    const REDISPATCH_ADDR_ENV: &str = "HERDR_LAUNCHER_REDISPATCH_ADDR";
 +    const ADOPTION_PROBE_ENV: &str = "HERDR_LAUNCHER_ADOPTION_PROBE";
 +    const LEASE_DESCENDANT_EXE: &str = "lease-descendant.exe";
 +    const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -59469,7 +59747,6 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +            let dir = self.root.join("runtime").join(build_id);
 +            fs::create_dir(&dir).expect("create build runtime");
 +            fs::write(dir.join("herdr.exe"), b"payload").expect("write payload");
-+            fs::write(dir.join("herdr-launcher.exe"), b"dispatcher").expect("write dispatcher");
 +            fs::write(
 +                dir.join("runtime.ready"),
 +                format!("{RUNTIME_RECORD_HEADER}\nbuild_id={build_id}\n"),
@@ -59529,6 +59806,13 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +            assert_eq!(result, WAIT_OBJECT_0, "helper process did not exit in time");
 +            self.exited = true;
 +        }
++
++        fn terminate_and_wait(&mut self, timeout: Duration) {
++            // SAFETY: the guard owns a live test-only process handle with
++            // PROCESS_TERMINATE rights.
++            assert_ne!(unsafe { TerminateProcess(self.handle, 1) }, 0);
++            self.wait(timeout);
++        }
 +    }
 +
 +    impl Drop for ProcessHandleGuard {
@@ -59565,19 +59849,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +        install: &ManagedInstall,
 +        args: &[OsString],
 +    ) -> (Child, SharedLease, ConsoleCtrlHandler) {
-+        let physical_build = install
-+            .read_required_active_pointer()
-+            .expect("active physical build");
-+        match spawn_dispatch(install, &physical_build, args).expect("spawn test payload") {
-+            SpawnedDispatch::Payload {
-+                child,
-+                lease,
-+                _console_handler,
-+            } => (child, lease, _console_handler),
-+            SpawnedDispatch::Redispatch { .. } => {
-+                panic!("active physical dispatcher unexpectedly redispatched")
-+            }
-+        }
++        spawn_payload(install, args).expect("spawn test payload")
 +    }
 +
 +    fn wait_child_bounded(child: &mut Child, timeout: Duration) -> ExitStatus {
@@ -59643,21 +59915,13 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
-+    fn bootstrap_and_dispatcher_roles_require_exact_managed_layout() {
++    fn launcher_requires_the_exact_managed_bin_layout() {
 +        let tree = TestTree::new("roles");
 +        let runtime_dir = tree.add_runtime(OLD_BUILD);
 +        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
 +
-+        assert!(matches!(
-+            launcher_role(&tree.root.join("bin/herdr.exe")).expect("bootstrap role"),
-+            LauncherRole::Bootstrap(_)
-+        ));
-+        let LauncherRole::Dispatcher { physical_build, .. } =
-+            launcher_role(&runtime_dir.join("herdr-launcher.exe")).expect("dispatcher role")
-+        else {
-+            panic!("expected dispatcher role");
-+        };
-+        assert_eq!(physical_build.as_str(), OLD_BUILD);
++        let install = resolve_install(&tree.root.join("bin/herdr.exe")).expect("launcher role");
++        assert_eq!(install.root(), tree.root);
 +        assert_eq!(
 +            managed_install_command_executable_platform(runtime_dir.join("herdr.exe"))
 +                .expect("stable command"),
@@ -59666,116 +59930,31 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +
 +        fs::write(tree.root.join("bin/managed-install-v1/marker"), b"wrong\n")
 +            .expect("corrupt bin marker");
-+        assert!(launcher_role(&tree.root.join("bin/herdr.exe")).is_err());
++        assert!(resolve_install(&tree.root.join("bin/herdr.exe")).is_err());
 +        assert!(
 +            managed_install_command_executable_platform(runtime_dir.join("herdr.exe")).is_err()
 +        );
 +    }
 +
 +    #[test]
-+    fn bootstrap_selects_active_versioned_dispatcher() {
-+        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
-+        let tree = TestTree::new("bootstrap-chain");
-+        tree.add_runtime(OLD_BUILD);
-+        tree.install_test_executable(OLD_BUILD, "herdr-launcher.exe");
-+        tree.install_test_executable(OLD_BUILD, "herdr.exe");
-+        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-+        let args = vec![
-+            OsString::from("--exact"),
-+            OsString::from(harness_test_name("bootstrap_dispatcher_helper")),
-+            OsString::from("--nocapture"),
-+        ];
-+        std::env::set_var(CHILD_ENV, "through-bootstrap-and-dispatcher");
-+        let spawned = spawn_bootstrap_dispatcher(&tree.install(), &args);
-+        std::env::remove_var(CHILD_ENV);
-+        let (mut dispatcher, _console_handler) = spawned.expect("spawn active dispatcher");
-+        let status = wait_child_bounded(&mut dispatcher, HELPER_TIMEOUT);
-+        assert_eq!(status.code(), Some(37));
-+    }
-+
-+    #[test]
-+    fn stale_dispatcher_redispatches_through_the_selected_physical_runtime() {
-+        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
-+        let tree = TestTree::new("stale-dispatcher");
-+        tree.add_runtime(OLD_BUILD);
-+        tree.add_runtime(NEW_BUILD);
-+        tree.install_test_executable(OLD_BUILD, "herdr-launcher.exe");
-+        tree.install_test_executable(NEW_BUILD, "herdr-launcher.exe");
-+        tree.install_test_executable(NEW_BUILD, "herdr.exe");
-+        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-+        tree.write_pointer(PENDING_POINTER, NEW_BUILD);
-+
-+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redispatch listener");
-+        let address = listener.local_addr().expect("redispatch listener address");
-+        let mut command = Command::new(
-+            tree.root
-+                .join("runtime")
-+                .join(OLD_BUILD)
-+                .join("herdr-launcher.exe"),
-+        );
-+        command
-+            .arg("--exact")
-+            .arg(harness_test_name("stale_dispatcher_helper"))
-+            .arg("--nocapture")
-+            .env(REDISPATCH_ADDR_ENV, address.to_string())
-+            .stdin(Stdio::null())
-+            .stdout(Stdio::null())
-+            .stderr(Stdio::null());
-+        let mut dispatcher = command.spawn().expect("spawn stale dispatcher");
-+
-+        let mut helpers = accept_helper_streams(&listener, 3);
-+        assert!(helpers.contains_key(&format!("dispatcher-{OLD_BUILD}")));
-+        assert!(helpers.contains_key(&format!("dispatcher-{NEW_BUILD}")));
-+        let (_, mut payload_stream) = helpers.remove("payload").expect("payload handshake");
-+        payload_stream
-+            .write_all(b"x")
-+            .expect("release redispatched payload");
-+        let status = wait_child_bounded(&mut dispatcher, HELPER_TIMEOUT);
-+        assert_eq!(status.code(), Some(43));
-+
-+        let install = tree.install();
-+        assert_eq!(
-+            install
-+                .read_required_active_pointer()
-+                .expect("activated pointer")
-+                .as_str(),
-+            NEW_BUILD
-+        );
-+        assert!(install
-+            .read_pointer(PENDING_POINTER)
-+            .expect("pending pointer")
-+            .is_none());
-+    }
-+
-+    #[test]
-+    fn build_id_query_requires_authorization_only_in_an_installed_shape() {
++    fn build_id_query_is_available_only_from_the_staged_launcher_name() {
 +        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
 +        let args = [OsString::from(BUILD_ID_QUERY_ARG)];
-+        let installed = PathBuf::from(format!(r"C:\Herdr\runtime\{OLD_BUILD}\herdr-launcher.exe"));
-+        std::env::remove_var(BUILD_ID_QUERY_ENV);
-+        std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
-+        assert!(maybe_run_build_id_query(&installed, &args)
-+            .expect("unauthorized installed query")
-+            .is_none());
-+
-+        std::env::set_var(BUILD_ID_QUERY_ENV, "1");
 +        std::env::set_var(MANAGED_LEASE_HANDLE_ENV, "1234");
-+        assert_eq!(
-+            maybe_run_build_id_query(&installed, &args).expect("authorized installed query"),
-+            Some(0)
-+        );
-+        assert!(std::env::var_os(BUILD_ID_QUERY_ENV).is_none());
-+        assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-+
 +        let staged = PathBuf::from(r"C:\stage\herdr-launcher.exe");
 +        assert_eq!(
 +            maybe_run_build_id_query(&staged, &args).expect("staged build query"),
 +            Some(0)
 +        );
++        assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
++        let installed = PathBuf::from(r"C:\Herdr\bin\herdr.exe");
++        assert!(maybe_run_build_id_query(&installed, &args)
++            .expect("installed query")
++            .is_none());
 +    }
 +
 +    #[test]
-+    fn runtime_validation_rejects_mismatched_marker_missing_dispatcher_and_hard_link() {
++    fn runtime_validation_rejects_mismatched_marker_and_hard_link() {
 +        let tree = TestTree::new("runtime-validation");
 +        let runtime_dir = tree.add_runtime(OLD_BUILD);
 +        let install = tree.install();
@@ -59792,11 +59971,6 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +            format!("{RUNTIME_RECORD_HEADER}\nbuild_id={OLD_BUILD}\n"),
 +        )
 +        .expect("restore marker");
-+        fs::remove_file(runtime_dir.join("herdr-launcher.exe")).expect("remove dispatcher");
-+        assert!(install.validate_runtime(&build_id).is_err());
-+        fs::write(runtime_dir.join("herdr-launcher.exe"), b"dispatcher")
-+            .expect("restore dispatcher");
-+
 +        let payload = runtime_dir.join("herdr.exe");
 +        fs::hard_link(&payload, tree.root.join("payload-hard-link.exe")).expect("create hard link");
 +        assert!(install.validate_runtime(&build_id).is_err());
@@ -59883,7 +60057,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
-+    fn managed_payload_lease_survives_dispatcher_but_not_payload_descendants() {
++    fn managed_payload_lease_survives_launcher_exit_but_not_payload_descendants() {
 +        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
 +        let tree = TestTree::new("lease-lifetime");
 +        tree.add_runtime(OLD_BUILD);
@@ -59905,8 +60079,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +        let mut owner = owner.spawn().expect("spawn lease owner helper");
 +        let mut helpers = accept_helper_streams(&listener, 3);
 +        let (_, _owner_stream) = helpers.remove("owner").expect("owner handshake");
-+        let (payload_pid, mut payload_stream) =
-+            helpers.remove("payload").expect("payload handshake");
++        let (payload_pid, _payload_stream) = helpers.remove("payload").expect("payload handshake");
 +        let (descendant_pid, mut descendant_stream) =
 +            helpers.remove("descendant").expect("descendant handshake");
 +        let mut payload_guard = ProcessHandleGuard::open(payload_pid);
@@ -59914,7 +60087,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +
 +        kill_child_bounded(&mut owner);
 +        tree.write_pointer(PENDING_POINTER, NEW_BUILD);
-+        activate_pending_after_child(&install, Duration::from_secs(1))
++        prepare_post_exit_maintenance(&install, Duration::from_secs(1))
 +            .expect("defer activation while inherited lease is live");
 +        assert_eq!(
 +            install
@@ -59928,12 +60101,9 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +            .expect("pending pointer")
 +            .is_some());
 +
-+        payload_stream
-+            .write_all(b"x")
-+            .expect("release managed payload");
-+        payload_guard.wait(HELPER_TIMEOUT);
-+        activate_pending_after_child(&install, Duration::from_secs(1))
-+            .expect("activate while payload descendant remains alive");
++        payload_guard.terminate_and_wait(HELPER_TIMEOUT);
++        prepare_post_exit_maintenance(&install, Duration::from_secs(1))
++            .expect("activate after hard-killed payload while descendant remains alive");
 +        assert_eq!(
 +            install
 +                .read_required_active_pointer()
@@ -59953,7 +60123,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
-+    fn dispatcher_forwards_arguments_environment_cwd_and_exit_code() {
++    fn launcher_forwards_arguments_environment_cwd_and_exit_code() {
 +        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
 +        let tree = TestTree::new("process-contract");
 +        tree.add_runtime(OLD_BUILD);
@@ -59979,25 +60149,26 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
-+    fn detached_dispatcher_preserves_headless_payload_behavior() {
++    fn detached_launcher_preserves_headless_payload_behavior() {
 +        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
 +        let tree = TestTree::new("detached");
 +        tree.add_runtime(OLD_BUILD);
 +        tree.install_test_executable(OLD_BUILD, "herdr.exe");
 +        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-+        let mut command = helper_command("detached_dispatcher_helper");
++        let mut command = helper_command("detached_launcher_helper");
 +        command
 +            .env(DETACHED_ROOT_ENV, &tree.root)
 +            .creation_flags(DETACHED_PROCESS)
 +            .stdin(Stdio::null())
 +            .stdout(Stdio::null())
 +            .stderr(Stdio::null());
-+        let mut helper = command.spawn().expect("spawn detached dispatcher helper");
++        let mut helper = command.spawn().expect("spawn detached launcher helper");
 +        let status = wait_child_bounded(&mut helper, HELPER_TIMEOUT);
 +        assert_eq!(status.code(), Some(41));
 +    }
 +
 +    #[test]
++    #[cfg(any())]
 +    fn bootstrap_dispatcher_helper() {
 +        let current = std::env::current_exe().expect("helper executable");
 +        match current.file_name().and_then(OsStr::to_str) {
@@ -60037,6 +60208,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
++    #[cfg(any())]
 +    fn stale_dispatcher_helper() {
 +        let current = std::env::current_exe().expect("redispatch helper executable");
 +        match current.file_name().and_then(OsStr::to_str) {
@@ -60202,7 +60374,7 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +    }
 +
 +    #[test]
-+    fn detached_dispatcher_helper() {
++    fn detached_launcher_helper() {
 +        let Some(root) = std::env::var_os(DETACHED_ROOT_ENV) else {
 +            return;
 +        };
@@ -60236,10 +60408,10 @@ index 0000000000000000000000000000000000000000..34d715b83ca79038bea30bba84c8da23
 +}
 diff --git a/src/platform/windows/managed_install.rs b/src/platform/windows/managed_install.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33de1e4d4f
+index 0000000000000000000000000000000000000000..569b245b5b144658ae4f23d5aa798a44914cd47f
 --- /dev/null
 +++ b/src/platform/windows/managed_install.rs
-@@ -0,0 +1,687 @@
+@@ -0,0 +1,689 @@
 +//! Windows managed-install filesystem and lease boundary.
 +
 +use std::{
@@ -60281,7 +60453,6 @@ index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33
 +pub(crate) struct Runtime {
 +    pub(crate) build_id: BuildId,
 +    pub(crate) executable: PathBuf,
-+    pub(crate) dispatcher: PathBuf,
 +}
 +
 +pub(crate) struct SharedLease {
@@ -60543,6 +60714,12 @@ index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33
 +        Ok(bootstrap)
 +    }
 +
++    pub(crate) fn validate_installer_helper(&self) -> io::Result<PathBuf> {
++        let helper = self.installer_helper_path();
++        let _ = open_regular_file(&helper, "managed Herdr installer helper")?;
++        Ok(helper)
++    }
++
 +    pub(crate) fn validate_runtime(&self, build_id: &BuildId) -> io::Result<Runtime> {
 +        validate_directory(self.root(), "managed Herdr install root")?;
 +        validate_directory(&self.runtime_dir(), "managed Herdr runtime directory")?;
@@ -60560,13 +60737,10 @@ index 0000000000000000000000000000000000000000..c8d76fd0b890bd5e77fec9a852764e33
 +        }
 +
 +        let executable = self.payload_path(build_id);
-+        let dispatcher = self.runtime_launcher_path(build_id);
 +        let _ = open_regular_file(&executable, "managed Herdr payload")?;
-+        let _ = open_regular_file(&dispatcher, "managed Herdr runtime dispatcher")?;
 +        Ok(Runtime {
 +            build_id: build_id.clone(),
 +            executable,
-+            dispatcher,
 +        })
 +    }
 +

@@ -69,7 +69,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('return "herdr-runtime-v1`nbuild_id=$BuildId`n"', helper)
         self.assertIn('return "herdr-pointer-v1`nbuild_id=$BuildId`n"', helper)
         self.assertIn('$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"', helper)
-        self.assertIn('"herdr-launcher.exe"', helper)
+        self.assertNotIn('"herdr-launcher.exe"', helper)
+        self.assertIn("launcher\\.pending-([0-9a-f]{64})\\.exe", helper)
+        self.assertIn("Complete-HerdrLauncherUpdateLocked", helper)
+        self.assertIn("Remove-HerdrInactiveRuntimes", helper)
+        self.assertIn('"CompleteMaintenance"', helper)
         self.assertIn('"runtime.manifest"', helper)
         self.assertIn("herdr-runtime-manifest-v1", helper)
         self.assertIn("^[0-9a-f]{12}\\.[0-9a-f]{12}$", helper)
@@ -155,6 +159,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
         self.assertIn("AgentUserProfileRoot", fault_test)
         self.assertIn('[string]$ProductName = "Herdr"', fault_test)
+        self.assertIn('[string]$PackageName = "Herdr Win"', fault_test)
+        self.assertIn("Uninstall\\$PackageName", fault_test)
         self.assertIn("-ProductName $ProductName", fault_test)
         self.assertIn("CLAUDE_CONFIG_DIR", fault_test)
 
@@ -196,6 +202,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('Join-Path $stateDir "launcher.lock"', helper)
         self.assertIn("[IO.FileShare]::None", helper)
         self.assertIn("LockTimeoutMilliseconds", helper)
+        self.assertIn("spawn_payload", (PROJECT_ROOT / "src/platform/windows/launcher.rs").read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "runtime_launcher_path",
+            MANAGED_INSTALL.read_text(encoding="utf-8"),
+        )
 
     def test_runtime_components_never_download_or_force_process_lifecycle(self) -> None:
         runtime_sources = "\n".join(
@@ -247,6 +258,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('!include "MUI2.nsh"', nsi)
         self.assertIn('!include "nsDialogs.nsh"', nsi)
         self.assertIn('!include "WinMessages.nsh"', nsi)
+        self.assertIn("SendMessageTimeoutW", nsi)
+        self.assertIn('-ProductName "${INFO_DISTRIBUTIONNAME}"', nsi)
         self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
         self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
         self.assertNotIn("LANG_GERMAN", nsi)

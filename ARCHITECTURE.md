@@ -52,23 +52,39 @@ behavior; code and tests remain the detailed implementation truth.
 
 ## Managed Windows Distribution
 
-- The managed install uses one stable launcher and immutable
-  `runtime/<build-id>` payloads. Strict Active/Pending records and per-build leases
-  prevent old and new runtime components from mixing while sessions remain active.
+- The managed install uses exactly one stable launcher at `bin/herdr.exe` and
+  immutable `runtime/<build-id>` payloads. The launcher starts the selected payload
+  directly; runtime directories contain no dispatcher or second launcher. Strict
+  Active/Pending records and per-build leases prevent old and new runtime components
+  from mixing while sessions remain active.
 - The launcher owns runtime selection, process forwarding, lease inheritance, and
-  opportunistic activation after the final old lease. It does not terminate user
-  sessions or require a service/background poller.
+  opportunistic activation after the final old lease. On a normal payload exit, it
+  invokes the existing installer helper only when pending launcher publication or
+  runtime pruning is needed. It does not terminate user sessions or require a
+  service, reparse point, reboot replacement, or background poller.
+- Setup serializes launcher changes with `state/launcher.lock`. It replaces an idle
+  launcher atomically or writes one hash-addressed `launcher.pending-<sha256>.exe`
+  plus a strict pending record while the launcher is in use. The post-exit helper
+  waits for its launcher parent, validates the pending hash and private build ID,
+  then publishes through the existing transaction/backup boundary without first
+  deleting the working launcher. Setup and later safe exits repair a hard-kill
+  interruption from the same pending state.
+- Active plus optional Pending are the only retained runtime identities. Under the
+  existing coordination lock, post-exit/setup maintenance transactionally removes
+  every other exact runtime whose lease can be acquired exclusively. Busy,
+  malformed, reparse-point, or otherwise ambiguous content is preserved and causes
+  the maintenance attempt to report failure rather than broadening deletion.
 - NSIS owns the setup/uninstall executable shell, embedded inputs, user-visible
   progress/error boundary, and final self-cleanup. The packaged PowerShell helper
-  owns filesystem lifecycle, validation, PATH/Installed Apps integration,
-  optional user-settings removal, and recoverable install/uninstall state. Rust
-  owns runtime selection and downloading/verifying/launching the immutable
-  installer asset.
+  owns filesystem lifecycle, validation, launcher publication, runtime pruning,
+  PATH/Installed Apps integration, optional user-settings removal, and recoverable
+  install/uninstall state. Rust owns runtime selection and
+  downloading/verifying/launching the immutable installer asset.
 - The packager owns installer-facing product identity inputs. It passes one runtime
   product name into NSIS and the helper, plus one title-cased human distribution
   display name, a derived short UI version, and the fork and official-upstream URLs
-  into NSIS, so setup copy, install location, executable metadata, and Installed Apps
-  registration do not maintain separate product-name literals. The NSIS presentation
+  into NSIS. The runtime/install-root identity remains Herdr, while executable
+  metadata and Installed Apps consistently present **Herdr Win**. The NSIS presentation
   uses standard MUI2 Welcome/License/Files/Finish pages plus the existing custom
   uninstall choice. Window, Welcome, progress, and Finish presentation reuse that
   one display name; Welcome and Finish titles reuse the same derived base version.
@@ -80,6 +96,11 @@ behavior; code and tests remain the detailed implementation truth.
   the branded Welcome/Finish artwork; five checked-in BMP3 derivatives provide
   native 100–200% DPI buckets without runtime resampling. Installer compression
   uses datablock optimization, an 8 MiB LZMA dictionary, and solid final LZMA settings.
+- Install/update canonicalizes the managed `bin` path as the first user-PATH entry,
+  removes only duplicate spellings of that same managed path, preserves every
+  unrelated entry and its order, and broadcasts a real environment change.
+  Uninstall removes only that managed entry, restoring any previously shadowed
+  upstream/native command for newly started processes.
 - Interactive and silent uninstall both preserve `%USERPROFILE%\.herdr` by
   default; the interactive checkbox or `/REMOVE_SETTINGS` explicitly authorizes
   deletion. Settings cleanup stays in the helper's validated filesystem boundary

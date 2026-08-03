@@ -39,7 +39,6 @@ const PENDING_POINTER: &str = "pending";
 pub(crate) struct Runtime {
     pub(crate) build_id: BuildId,
     pub(crate) executable: PathBuf,
-    pub(crate) dispatcher: PathBuf,
 }
 
 pub(crate) struct SharedLease {
@@ -301,6 +300,12 @@ impl ManagedInstall {
         Ok(bootstrap)
     }
 
+    pub(crate) fn validate_installer_helper(&self) -> io::Result<PathBuf> {
+        let helper = self.installer_helper_path();
+        let _ = open_regular_file(&helper, "managed Herdr installer helper")?;
+        Ok(helper)
+    }
+
     pub(crate) fn validate_runtime(&self, build_id: &BuildId) -> io::Result<Runtime> {
         validate_directory(self.root(), "managed Herdr install root")?;
         validate_directory(&self.runtime_dir(), "managed Herdr runtime directory")?;
@@ -318,13 +323,10 @@ impl ManagedInstall {
         }
 
         let executable = self.payload_path(build_id);
-        let dispatcher = self.runtime_launcher_path(build_id);
         let _ = open_regular_file(&executable, "managed Herdr payload")?;
-        let _ = open_regular_file(&dispatcher, "managed Herdr runtime dispatcher")?;
         Ok(Runtime {
             build_id: build_id.clone(),
             executable,
-            dispatcher,
         })
     }
 

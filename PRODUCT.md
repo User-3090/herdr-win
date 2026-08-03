@@ -12,9 +12,10 @@ tests remain the detailed implementation truth.
 - herdr-win is an unofficial, upstream-first Windows distribution of Herdr, not a
   separate product line. It exists to advance Herdr's Windows support through a
   small patch set designed to remain reviewable and suitable for upstream.
-- Fork identity appears in repository, release, and update-channel presentation.
-  The package, executable, command, configuration, state, sessions, sockets, and
-  protocol remain `herdr` and stay compatible with upstream.
+- Fork identity appears in repository, release, update-channel, Windows setup, and
+  Installed Apps presentation. The Windows package entry is **Herdr Win**; the
+  executable, command, configuration, state, sessions, sockets, and protocol remain
+  `herdr` and stay compatible with upstream.
 - herdr-win snapshots currently target Windows x86_64. General CLI, TUI,
   configuration, integration, and issue behavior remains documented and owned
   upstream unless a maintained Windows delta explicitly changes it.
@@ -25,9 +26,10 @@ tests remain the detailed implementation truth.
 ## Installation, Update, and Uninstall
 
 - The normal managed installation is per-user under
-  `%LOCALAPPDATA%\Programs\Herdr`, exposes the stable `herdr` command on user
-  `PATH`, and registers Herdr in Windows Installed Apps without requiring
-  administrator privileges. The installer interface is English-only. Its branded,
+  `%LOCALAPPDATA%\Programs\Herdr`, places its stable `bin` directory first on user
+  `PATH` so it shadows without changing any existing upstream/native `herdr`, and
+  registers **Herdr Win** in Windows Installed Apps without requiring administrator
+  privileges. The installer interface is English-only. Its branded,
   keyboard-operable Windows setup uses the human-facing display name **Herdr Win**
   consistently while the repository and release slug remains `herdr-win`. Welcome
   and Finish include the current reviewed Herdr base version. Setup identifies the
@@ -44,6 +46,10 @@ tests remain the detailed implementation truth.
   it also copies the skill below `CLAUDE_CONFIG_DIR` or
   `%USERPROFILE%\.claude`. Install/update overwrites only `SKILL.md` and
   preserves every sibling file and directory.
+- The managed installation has exactly one launcher at `bin\herdr.exe`. It starts
+  the selected immutable runtime payload directly; runtime directories never carry
+  a second launcher. Setup replaces the launcher immediately when idle or stages a
+  validated replacement for publication after the final managed payload exits.
 - Setup updates only an exact current managed installation. Any other existing
   install layout is preserved and rejected with instructions to uninstall Herdr
   from Windows Installed Apps before running setup again; setup never migrates,
@@ -51,17 +57,21 @@ tests remain the detailed implementation truth.
 - Snapshot updates use only the fork-owned immutable setup asset and verified
   digest through the fork-owned update feed. Existing managed sessions continue on
   their current runtime; a newer runtime may remain staged until old sessions exit,
-  after which future launches switch atomically. Update never terminates active
-  Herdr sessions.
+  after which future launches switch atomically. The post-exit maintenance path
+  then publishes any pending launcher and removes every exact unleased runtime
+  except Active and optional Pending. Busy or ambiguous content is preserved and
+  reported. A hard process-tree kill leaves pending state recoverable for the next
+  safe launch or setup. Update never terminates active Herdr sessions.
 - Uninstall requires managed sessions to be closed and never terminates them. It
-  removes the managed program, user `PATH` entry, Installed Apps registration, and
-  `SKILL.md` at its managed universal and Claude locations even when that file was
-  edited after installation. Other skill-directory content is preserved, and an
-  empty `herdr` skill directory is removed. The interactive uninstaller preserves
-  configuration and session data under `%USERPROFILE%\.herdr` by default; users
-  must explicitly select the removal checkbox to delete it. Silent uninstall uses
-  the same preserve-by-default policy and accepts `/REMOVE_SETTINGS` as the explicit
-  deletion choice.
+  removes the managed program, only its own user `PATH` entry, **Herdr Win** Installed
+  Apps registration, and `SKILL.md` at its managed universal and Claude locations
+  even when that file was edited after installation. Other PATH entries and
+  skill-directory content are preserved, so a previously shadowed upstream/native
+  `herdr` becomes visible to new processes again. An empty `herdr` skill directory
+  is removed. The interactive uninstaller preserves configuration and session data
+  under `%USERPROFILE%\.herdr` by default; users must explicitly select the removal
+  checkbox to delete it. Silent uninstall uses the same preserve-by-default policy
+  and accepts `/REMOVE_SETTINGS` as the explicit deletion choice.
 - The executable and setup are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.

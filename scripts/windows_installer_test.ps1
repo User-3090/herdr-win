@@ -360,6 +360,7 @@ try {
     $binEntry = Join-Path $tempRoot "path-test\bin"
     $pathInput = "C:\Other;;`"$binEntry\`";C:\Keep;$($binEntry.ToUpperInvariant())"
     $pathOnce = Add-HerdrPathEntry -PathValue $pathInput -Entry $binEntry
+    Assert-Equal $pathOnce.Split(';')[0] $binEntry "Managed bin did not lead the user PATH."
     Assert-Equal (Add-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) $pathOnce "PATH insertion was not idempotent."
     Assert-Equal (Remove-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) "C:\Other;;C:\Keep" "PATH removal changed unrelated entries."
 
@@ -386,8 +387,8 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
     Assert-HerdrManagedRoot -InstallRoot $installRoot
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh bootstrap differs from launcher input."
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh runtime dispatcher is missing."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
 
@@ -416,8 +417,11 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
     Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Busy upgrade changed active."
     Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\pending")) $id2 "Busy upgrade did not publish pending."
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Upgrade replaced immutable bootstrap."
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "runtime\$id2\herdr-launcher.exe")) (Get-HerdrSha256 -Path $launcher2) "Upgrade did not carry the new dispatcher."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Busy upgrade replaced the active launcher."
+    $pendingLauncher = Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state")
+    Assert-True ($null -ne $pendingLauncher) "Busy upgrade did not stage the new launcher."
+    Assert-Equal $pendingLauncher.Sha256 (Get-HerdrSha256 -Path $launcher2) "Pending launcher hash is wrong."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id2\herdr-launcher.exe"))) "Upgrade retained a runtime-local launcher."
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $skillSource2) "Managed update did not replace the Herdr skill."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete.txt")) "old-version" "Managed update removed a foreign skill sibling."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt")) "old-resource" "Managed update removed a foreign nested skill sibling."
@@ -429,7 +433,10 @@ try {
     $activated = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $activated.Status "Activated" "Released lease did not activate pending."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Activation retained pending."
-    Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id1)
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher2) "Idle activation did not update the launcher."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1"))) "Idle activation retained an obsolete runtime."
+    Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $installRoot "runtime") -Directory).Count 1 "Runtime pruning did not reach a single active build."
+    Write-HerdrDurableText -Path (Join-Path $installRoot "state\pending") -Text (Get-HerdrPointerText -BuildId $id2)
     $alreadyActive = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $alreadyActive.Status "AlreadyActive" "Same-build reinstall did not report already active."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending"))) "Same-build reinstall retained an obsolete pending build."
@@ -481,6 +488,7 @@ try {
     # ARP stores the truthful display/numeric identity and preserves mismatches.
     Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
     $arp = Get-ItemProperty -LiteralPath $registryPath
+    Assert-Equal ([string]$arp.DisplayName) $script:ProductName "ARP package identity is not the configured distribution name."
     Assert-Equal ([string]$arp.DisplayVersion) $display2 "ARP display version is not truthful."
     Assert-Equal ([int]$arp.VersionMajor) 0 "ARP major version is wrong."
     Set-ItemProperty -LiteralPath $registryPath -Name InstallLocation -Value (Join-Path $tempRoot "someone-else")

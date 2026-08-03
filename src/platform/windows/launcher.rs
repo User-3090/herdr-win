@@ -1,9 +1,10 @@
 use std::{
     ffi::{OsStr, OsString},
+    fs,
     io::{self, Write},
     os::windows::process::CommandExt as _,
     path::Path,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -12,32 +13,21 @@ use windows_sys::Win32::System::{
     Console::{
         GetConsoleCP, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT, PHANDLER_ROUTINE,
     },
-    Threading::DETACHED_PROCESS,
+    Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS},
 };
 
 use crate::{
     managed_install::{BuildId, ManagedInstall},
-    windows_managed_install::{
-        build_id_from_dir, install_from_runtime_dir, CoordinationLease, Runtime, SharedLease,
-        MANAGED_LEASE_HANDLE_ENV,
-    },
+    windows_managed_install::{CoordinationLease, Runtime, SharedLease, MANAGED_LEASE_HANDLE_ENV},
 };
 
 const PENDING_POINTER: &str = "pending";
 const COORDINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const COORDINATION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const BUILD_ID_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
-const BUILD_ID_QUERY_ENV: &str = "HERDR_INTERNAL_LAUNCHER_BUILD_ID_QUERY_V1";
 const DEVELOPMENT_BUILD_ID: &str = "development";
-
-#[derive(Debug)]
-enum LauncherRole {
-    Bootstrap(ManagedInstall),
-    Dispatcher {
-        install: ManagedInstall,
-        physical_build: BuildId,
-    },
-}
+const PENDING_LAUNCHER_PREFIX: &str = "launcher.pending-";
+const PENDING_LAUNCHER_SUFFIX: &str = ".exe";
 
 pub(crate) fn run() -> io::Result<i32> {
     let current = std::env::current_exe().map_err(|err| {
@@ -50,18 +40,8 @@ pub(crate) fn run() -> io::Result<i32> {
     if let Some(code) = maybe_run_build_id_query(&current, &args)? {
         return Ok(code);
     }
-    match launcher_role(&current)? {
-        LauncherRole::Bootstrap(install) => run_bootstrap(&install, &args),
-        LauncherRole::Dispatcher {
-            install,
-            physical_build,
-        } => {
-            // Role resolution already validates the dispatcher's immutable
-            // physical runtime. Selection below deliberately re-reads active
-            // state because another dispatcher may have activated a newer one.
-            run_dispatcher(&install, &physical_build, &args)
-        }
-    }
+    let install = resolve_install(&current)?;
+    run_launcher(&install, &args)
 }
 
 fn maybe_run_build_id_query(current: &Path, args: &[OsString]) -> io::Result<Option<i32>> {
@@ -70,17 +50,6 @@ fn maybe_run_build_id_query(current: &Path, args: &[OsString]) -> io::Result<Opt
     {
         return Ok(None);
     }
-    let installed_shape = current
-        .parent()
-        .and_then(Path::parent)
-        .is_some_and(|parent| parent.file_name() == Some(OsStr::new("runtime")));
-    let authorized_installed_query =
-        std::env::var_os(BUILD_ID_QUERY_ENV).as_deref() == Some(OsStr::new("1"));
-    if installed_shape && !authorized_installed_query {
-        return Ok(None);
-    }
-
-    std::env::remove_var(BUILD_ID_QUERY_ENV);
     std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
     writeln!(io::stdout().lock(), "{}", compiled_build_id_label()?)?;
     Ok(Some(0))
@@ -96,203 +65,83 @@ fn compiled_build_id_label() -> io::Result<&'static str> {
     }
 }
 
-#[cfg(not(test))]
-fn compiled_build_id() -> io::Result<Option<BuildId>> {
-    let label = compiled_build_id_label()?;
-    if label == DEVELOPMENT_BUILD_ID {
-        Ok(None)
-    } else {
-        BuildId::parse(label).map(Some)
+fn resolve_install(current: &Path) -> io::Result<ManagedInstall> {
+    if current.file_name() != Some(OsStr::new("herdr.exe")) {
+        return Err(invalid_data(format!(
+            "managed launcher {} is not bin/herdr.exe",
+            current.display()
+        )));
     }
+    let bin_dir = current.parent().ok_or_else(|| {
+        invalid_data(format!(
+            "managed launcher {} has no bin directory",
+            current.display()
+        ))
+    })?;
+    if bin_dir.file_name() != Some(OsStr::new("bin")) {
+        return Err(invalid_data(format!(
+            "managed launcher {} is not the direct bin/herdr.exe command",
+            current.display()
+        )));
+    }
+    let root = bin_dir.parent().ok_or_else(|| {
+        invalid_data(format!(
+            "managed launcher {} has no install root",
+            current.display()
+        ))
+    })?;
+    let install = ManagedInstall::new(root.to_path_buf());
+    let expected = install.validate_managed_bin()?;
+    if expected != current {
+        return Err(invalid_data(format!(
+            "managed launcher path is {}, expected {}",
+            current.display(),
+            expected.display()
+        )));
+    }
+    Ok(install)
 }
 
-fn launcher_role(current: &Path) -> io::Result<LauncherRole> {
-    if current.file_name() == Some(OsStr::new("herdr.exe")) {
-        let bin_dir = current.parent().ok_or_else(|| {
-            invalid_data(format!(
-                "managed bootstrap {} has no bin directory",
-                current.display()
-            ))
-        })?;
-        if bin_dir.file_name() != Some(OsStr::new("bin")) {
-            return Err(invalid_data(format!(
-                "managed bootstrap {} is not the direct bin/herdr.exe command",
-                current.display()
-            )));
-        }
-        let root = bin_dir.parent().ok_or_else(|| {
-            invalid_data(format!(
-                "managed bootstrap {} has no install root",
-                current.display()
-            ))
-        })?;
-        let install = ManagedInstall::new(root.to_path_buf());
-        let expected = install.validate_managed_bin()?;
-        if expected != current {
-            return Err(invalid_data(format!(
-                "managed bootstrap path is {}, expected {}",
-                current.display(),
-                expected.display()
-            )));
-        }
-        return Ok(LauncherRole::Bootstrap(install));
-    }
-
-    if current.file_name() == Some(OsStr::new("herdr-launcher.exe")) {
-        let build_dir = current.parent().ok_or_else(|| {
-            invalid_data(format!(
-                "managed dispatcher {} has no build directory",
-                current.display()
-            ))
-        })?;
-        let runtime_dir = build_dir.parent().ok_or_else(|| {
-            invalid_data(format!(
-                "managed dispatcher {} has no runtime directory",
-                current.display()
-            ))
-        })?;
-        if runtime_dir.file_name() != Some(OsStr::new("runtime")) {
-            return Err(invalid_data(format!(
-                "managed dispatcher {} is not a direct runtime/<build-id>/herdr-launcher.exe child",
-                current.display()
-            )));
-        }
-        let build_id = build_id_from_dir(build_dir)?;
-        #[cfg(not(test))]
-        if let Some(compiled) = compiled_build_id()? {
-            if compiled != build_id {
-                return Err(invalid_data(format!(
-                    "managed dispatcher {} contains compiled build {}, expected physical build {}",
-                    current.display(),
-                    compiled.as_str(),
-                    build_id.as_str()
-                )));
-            }
-        }
-        let install = install_from_runtime_dir(runtime_dir)?;
-        install.validate_managed_bin()?;
-        let runtime = install.validate_runtime(&build_id)?;
-        if runtime.dispatcher != current {
-            return Err(invalid_data(format!(
-                "managed dispatcher resolved to {}, not {}",
-                runtime.dispatcher.display(),
-                current.display()
-            )));
-        }
-        return Ok(LauncherRole::Dispatcher {
-            install,
-            physical_build: build_id,
-        });
-    }
-
-    Err(invalid_data(format!(
-        "managed launcher {} is neither bin/herdr.exe bootstrap mode nor runtime/<build-id>/herdr-launcher.exe dispatcher mode",
-        current.display()
-    )))
-}
-
-fn run_bootstrap(install: &ManagedInstall, args: &[OsString]) -> io::Result<i32> {
-    let (mut child, _console_handler) = spawn_bootstrap_dispatcher(install, args)?;
+fn run_launcher(install: &ManagedInstall, args: &[OsString]) -> io::Result<i32> {
+    let (mut child, lease, _console_handler) = spawn_payload(install, args)?;
     let status = child.wait().map_err(|err| {
         contextual(
             err,
-            "failed while waiting for managed Herdr runtime dispatcher".to_string(),
+            "failed while waiting for managed Herdr payload".to_string(),
         )
     })?;
+    drop(lease);
+
+    match prepare_post_exit_maintenance(install, COORDINATION_TIMEOUT) {
+        Ok(true) => {
+            if let Err(err) = spawn_post_exit_maintenance(install) {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "herdr launcher: payload exited, but maintenance could not start: {err}"
+                );
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "herdr launcher: payload exited, but maintenance preparation failed: {err}"
+            );
+        }
+    }
     child_exit_code(status)
 }
 
-fn spawn_bootstrap_dispatcher(
+fn spawn_payload(
     install: &ManagedInstall,
     args: &[OsString],
-) -> io::Result<(Child, ConsoleCtrlHandler)> {
+) -> io::Result<(Child, SharedLease, ConsoleCtrlHandler)> {
     let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
     install.validate_managed_bin()?;
-    let active_id = install.read_required_active_pointer()?;
-    let runtime = install.validate_runtime(&active_id)?;
-    spawn_transparent(
-        &runtime.dispatcher,
-        args,
-        "managed Herdr runtime dispatcher",
-    )
-}
-
-enum SpawnedDispatch {
-    Payload {
-        child: Child,
-        lease: SharedLease,
-        _console_handler: ConsoleCtrlHandler,
-    },
-    Redispatch {
-        child: Child,
-        _console_handler: ConsoleCtrlHandler,
-    },
-}
-
-fn run_dispatcher(
-    install: &ManagedInstall,
-    physical_build: &BuildId,
-    args: &[OsString],
-) -> io::Result<i32> {
-    match spawn_dispatch(install, physical_build, args)? {
-        SpawnedDispatch::Redispatch {
-            mut child,
-            _console_handler,
-        } => {
-            let status = child.wait().map_err(|err| {
-                contextual(
-                    err,
-                    "failed while waiting for selected Herdr runtime dispatcher".to_string(),
-                )
-            })?;
-            child_exit_code(status)
-        }
-        SpawnedDispatch::Payload {
-            mut child,
-            lease,
-            _console_handler,
-        } => {
-            let status = child.wait().map_err(|err| {
-                contextual(
-                    err,
-                    "failed while waiting for managed Herdr payload".to_string(),
-                )
-            })?;
-            drop(lease);
-            if let Err(err) = activate_pending_after_child(install, COORDINATION_TIMEOUT) {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "herdr launcher: child exited, but pending runtime activation failed: {err}"
-                );
-            }
-            child_exit_code(status)
-        }
-    }
-}
-
-fn spawn_dispatch(
-    install: &ManagedInstall,
-    physical_build: &BuildId,
-    args: &[OsString],
-) -> io::Result<SpawnedDispatch> {
-    let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
     let runtime = select_runtime_locked(install)?;
-    if runtime.build_id != *physical_build {
-        let (child, console_handler) = spawn_transparent(
-            &runtime.dispatcher,
-            args,
-            "selected managed Herdr runtime dispatcher",
-        )?;
-        return Ok(SpawnedDispatch::Redispatch {
-            child,
-            _console_handler: console_handler,
-        });
-    }
-
     let lease = install.open_shared_lease(&runtime.build_id)?;
     let console_handler = ConsoleCtrlHandler::install()?;
     let mut command = payload_command(&runtime.executable, args);
-    command.env_remove(BUILD_ID_QUERY_ENV);
     lease.configure_payload_child(&mut command);
     let child = command.spawn().map_err(|err| {
         contextual(
@@ -304,40 +153,17 @@ fn spawn_dispatch(
         )
     })?;
 
-    // `_coordination` remains live until after CreateProcess succeeds. Rust
-    // 1.96.1's Windows Command defaults bInheritHandles to TRUE; the real
-    // parent-death test below protects that external contract.
-    Ok(SpawnedDispatch::Payload {
-        child,
-        lease,
-        _console_handler: console_handler,
-    })
-}
-
-fn spawn_transparent(
-    executable: &Path,
-    args: &[OsString],
-    description: &str,
-) -> io::Result<(Child, ConsoleCtrlHandler)> {
-    let console_handler = ConsoleCtrlHandler::install()?;
-    let mut command = payload_command(executable, args);
-    command
-        .env_remove(MANAGED_LEASE_HANDLE_ENV)
-        .env_remove(BUILD_ID_QUERY_ENV);
-    let child = command.spawn().map_err(|err| {
-        contextual(
-            err,
-            format!("failed to launch {description} {}", executable.display()),
-        )
-    })?;
-    Ok((child, console_handler))
+    // `_coordination` remains live until after CreateProcess succeeds. Rust's
+    // Windows Command inherits the explicitly marked lease handle; the payload
+    // validates and adopts that exact file before it can create descendants.
+    Ok((child, lease, console_handler))
 }
 
 fn payload_command(executable: &Path, args: &[OsString]) -> Command {
     let mut command = Command::new(executable);
     // Deliberately leave environment, cwd, standard handles, console, and
     // Rust's default handle inheritance untouched. The only creation flag
-    // adjustment below carries an already-detached state across launcher hops.
+    // adjustment below carries an already-detached state into the payload.
     command.args(args);
     // SAFETY: `GetConsoleCP` has no arguments and only queries whether this
     // process is attached to a console.
@@ -345,7 +171,7 @@ fn payload_command(executable: &Path, args: &[OsString]) -> Command {
     if detached {
         // A console-subsystem child created by a detached launcher would
         // otherwise allocate a fresh console. Preserve the caller's detached
-        // state through both bootstrap and dispatcher hops.
+        // state through the single launcher hop.
         command.creation_flags(DETACHED_PROCESS);
     }
     command
@@ -357,9 +183,91 @@ fn child_exit_code(status: std::process::ExitStatus) -> io::Result<i32> {
     })
 }
 
-fn activate_pending_after_child(install: &ManagedInstall, timeout: Duration) -> io::Result<()> {
+fn prepare_post_exit_maintenance(install: &ManagedInstall, timeout: Duration) -> io::Result<bool> {
     let _coordination = CoordinationGate::acquire(install, timeout)?;
     let _ = select_runtime_locked(install)?;
+    maintenance_needed_locked(install)
+}
+
+fn maintenance_needed_locked(install: &ManagedInstall) -> io::Result<bool> {
+    if install.read_pointer(PENDING_POINTER)?.is_some() {
+        return Ok(true);
+    }
+    let mut runtimes = fs::read_dir(install.runtime_dir()).map_err(|err| {
+        contextual(
+            err,
+            format!(
+                "failed to inspect managed Herdr runtimes {}",
+                install.runtime_dir().display()
+            ),
+        )
+    })?;
+    if runtimes.next().transpose()?.is_some() && runtimes.next().transpose()?.is_some() {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(install.state_dir()).map_err(|err| {
+        contextual(
+            err,
+            format!(
+                "failed to inspect managed Herdr state {}",
+                install.state_dir().display()
+            ),
+        )
+    })? {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(PENDING_LAUNCHER_PREFIX) && name.ends_with(PENDING_LAUNCHER_SUFFIX) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn spawn_post_exit_maintenance(install: &ManagedInstall) -> io::Result<()> {
+    let helper = install.validate_installer_helper()?;
+    let windows = std::env::var_os("WINDIR").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "WINDIR is missing; cannot start managed Herdr maintenance",
+        )
+    })?;
+    let powershell = Path::new(&windows)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let mut command = Command::new(&powershell);
+    command
+        .args([
+            OsStr::new("-NoLogo"),
+            OsStr::new("-NoProfile"),
+            OsStr::new("-NonInteractive"),
+            OsStr::new("-ExecutionPolicy"),
+            OsStr::new("Bypass"),
+            OsStr::new("-File"),
+        ])
+        .arg(&helper)
+        .args([OsStr::new("-Action"), OsStr::new("CompleteMaintenance")])
+        .arg("-InstallRoot")
+        .arg(install.root())
+        .arg("-ParentProcessId")
+        .arg(std::process::id().to_string())
+        .env_remove(MANAGED_LEASE_HANDLE_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    command.spawn().map_err(|err| {
+        contextual(
+            err,
+            format!(
+                "failed to start managed Herdr maintenance helper {}",
+                powershell.display()
+            ),
+        )
+    })?;
     Ok(())
 }
 
@@ -508,7 +416,6 @@ mod tests {
     const OWNER_ROOT_ENV: &str = "HERDR_LAUNCHER_OWNER_ROOT";
     const OWNER_ADDR_ENV: &str = "HERDR_LAUNCHER_OWNER_ADDR";
     const DETACHED_ROOT_ENV: &str = "HERDR_LAUNCHER_DETACHED_ROOT";
-    const REDISPATCH_ADDR_ENV: &str = "HERDR_LAUNCHER_REDISPATCH_ADDR";
     const ADOPTION_PROBE_ENV: &str = "HERDR_LAUNCHER_ADOPTION_PROBE";
     const LEASE_DESCENDANT_EXE: &str = "lease-descendant.exe";
     const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -552,7 +459,6 @@ mod tests {
             let dir = self.root.join("runtime").join(build_id);
             fs::create_dir(&dir).expect("create build runtime");
             fs::write(dir.join("herdr.exe"), b"payload").expect("write payload");
-            fs::write(dir.join("herdr-launcher.exe"), b"dispatcher").expect("write dispatcher");
             fs::write(
                 dir.join("runtime.ready"),
                 format!("{RUNTIME_RECORD_HEADER}\nbuild_id={build_id}\n"),
@@ -612,6 +518,13 @@ mod tests {
             assert_eq!(result, WAIT_OBJECT_0, "helper process did not exit in time");
             self.exited = true;
         }
+
+        fn terminate_and_wait(&mut self, timeout: Duration) {
+            // SAFETY: the guard owns a live test-only process handle with
+            // PROCESS_TERMINATE rights.
+            assert_ne!(unsafe { TerminateProcess(self.handle, 1) }, 0);
+            self.wait(timeout);
+        }
     }
 
     impl Drop for ProcessHandleGuard {
@@ -648,19 +561,7 @@ mod tests {
         install: &ManagedInstall,
         args: &[OsString],
     ) -> (Child, SharedLease, ConsoleCtrlHandler) {
-        let physical_build = install
-            .read_required_active_pointer()
-            .expect("active physical build");
-        match spawn_dispatch(install, &physical_build, args).expect("spawn test payload") {
-            SpawnedDispatch::Payload {
-                child,
-                lease,
-                _console_handler,
-            } => (child, lease, _console_handler),
-            SpawnedDispatch::Redispatch { .. } => {
-                panic!("active physical dispatcher unexpectedly redispatched")
-            }
-        }
+        spawn_payload(install, args).expect("spawn test payload")
     }
 
     fn wait_child_bounded(child: &mut Child, timeout: Duration) -> ExitStatus {
@@ -726,21 +627,13 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_and_dispatcher_roles_require_exact_managed_layout() {
+    fn launcher_requires_the_exact_managed_bin_layout() {
         let tree = TestTree::new("roles");
         let runtime_dir = tree.add_runtime(OLD_BUILD);
         tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
 
-        assert!(matches!(
-            launcher_role(&tree.root.join("bin/herdr.exe")).expect("bootstrap role"),
-            LauncherRole::Bootstrap(_)
-        ));
-        let LauncherRole::Dispatcher { physical_build, .. } =
-            launcher_role(&runtime_dir.join("herdr-launcher.exe")).expect("dispatcher role")
-        else {
-            panic!("expected dispatcher role");
-        };
-        assert_eq!(physical_build.as_str(), OLD_BUILD);
+        let install = resolve_install(&tree.root.join("bin/herdr.exe")).expect("launcher role");
+        assert_eq!(install.root(), tree.root);
         assert_eq!(
             managed_install_command_executable_platform(runtime_dir.join("herdr.exe"))
                 .expect("stable command"),
@@ -749,116 +642,31 @@ mod tests {
 
         fs::write(tree.root.join("bin/managed-install-v1/marker"), b"wrong\n")
             .expect("corrupt bin marker");
-        assert!(launcher_role(&tree.root.join("bin/herdr.exe")).is_err());
+        assert!(resolve_install(&tree.root.join("bin/herdr.exe")).is_err());
         assert!(
             managed_install_command_executable_platform(runtime_dir.join("herdr.exe")).is_err()
         );
     }
 
     #[test]
-    fn bootstrap_selects_active_versioned_dispatcher() {
-        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
-        let tree = TestTree::new("bootstrap-chain");
-        tree.add_runtime(OLD_BUILD);
-        tree.install_test_executable(OLD_BUILD, "herdr-launcher.exe");
-        tree.install_test_executable(OLD_BUILD, "herdr.exe");
-        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-        let args = vec![
-            OsString::from("--exact"),
-            OsString::from(harness_test_name("bootstrap_dispatcher_helper")),
-            OsString::from("--nocapture"),
-        ];
-        std::env::set_var(CHILD_ENV, "through-bootstrap-and-dispatcher");
-        let spawned = spawn_bootstrap_dispatcher(&tree.install(), &args);
-        std::env::remove_var(CHILD_ENV);
-        let (mut dispatcher, _console_handler) = spawned.expect("spawn active dispatcher");
-        let status = wait_child_bounded(&mut dispatcher, HELPER_TIMEOUT);
-        assert_eq!(status.code(), Some(37));
-    }
-
-    #[test]
-    fn stale_dispatcher_redispatches_through_the_selected_physical_runtime() {
-        let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
-        let tree = TestTree::new("stale-dispatcher");
-        tree.add_runtime(OLD_BUILD);
-        tree.add_runtime(NEW_BUILD);
-        tree.install_test_executable(OLD_BUILD, "herdr-launcher.exe");
-        tree.install_test_executable(NEW_BUILD, "herdr-launcher.exe");
-        tree.install_test_executable(NEW_BUILD, "herdr.exe");
-        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-        tree.write_pointer(PENDING_POINTER, NEW_BUILD);
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redispatch listener");
-        let address = listener.local_addr().expect("redispatch listener address");
-        let mut command = Command::new(
-            tree.root
-                .join("runtime")
-                .join(OLD_BUILD)
-                .join("herdr-launcher.exe"),
-        );
-        command
-            .arg("--exact")
-            .arg(harness_test_name("stale_dispatcher_helper"))
-            .arg("--nocapture")
-            .env(REDISPATCH_ADDR_ENV, address.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut dispatcher = command.spawn().expect("spawn stale dispatcher");
-
-        let mut helpers = accept_helper_streams(&listener, 3);
-        assert!(helpers.contains_key(&format!("dispatcher-{OLD_BUILD}")));
-        assert!(helpers.contains_key(&format!("dispatcher-{NEW_BUILD}")));
-        let (_, mut payload_stream) = helpers.remove("payload").expect("payload handshake");
-        payload_stream
-            .write_all(b"x")
-            .expect("release redispatched payload");
-        let status = wait_child_bounded(&mut dispatcher, HELPER_TIMEOUT);
-        assert_eq!(status.code(), Some(43));
-
-        let install = tree.install();
-        assert_eq!(
-            install
-                .read_required_active_pointer()
-                .expect("activated pointer")
-                .as_str(),
-            NEW_BUILD
-        );
-        assert!(install
-            .read_pointer(PENDING_POINTER)
-            .expect("pending pointer")
-            .is_none());
-    }
-
-    #[test]
-    fn build_id_query_requires_authorization_only_in_an_installed_shape() {
+    fn build_id_query_is_available_only_from_the_staged_launcher_name() {
         let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
         let args = [OsString::from(BUILD_ID_QUERY_ARG)];
-        let installed = PathBuf::from(format!(r"C:\Herdr\runtime\{OLD_BUILD}\herdr-launcher.exe"));
-        std::env::remove_var(BUILD_ID_QUERY_ENV);
-        std::env::remove_var(MANAGED_LEASE_HANDLE_ENV);
-        assert!(maybe_run_build_id_query(&installed, &args)
-            .expect("unauthorized installed query")
-            .is_none());
-
-        std::env::set_var(BUILD_ID_QUERY_ENV, "1");
         std::env::set_var(MANAGED_LEASE_HANDLE_ENV, "1234");
-        assert_eq!(
-            maybe_run_build_id_query(&installed, &args).expect("authorized installed query"),
-            Some(0)
-        );
-        assert!(std::env::var_os(BUILD_ID_QUERY_ENV).is_none());
-        assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
-
         let staged = PathBuf::from(r"C:\stage\herdr-launcher.exe");
         assert_eq!(
             maybe_run_build_id_query(&staged, &args).expect("staged build query"),
             Some(0)
         );
+        assert!(std::env::var_os(MANAGED_LEASE_HANDLE_ENV).is_none());
+        let installed = PathBuf::from(r"C:\Herdr\bin\herdr.exe");
+        assert!(maybe_run_build_id_query(&installed, &args)
+            .expect("installed query")
+            .is_none());
     }
 
     #[test]
-    fn runtime_validation_rejects_mismatched_marker_missing_dispatcher_and_hard_link() {
+    fn runtime_validation_rejects_mismatched_marker_and_hard_link() {
         let tree = TestTree::new("runtime-validation");
         let runtime_dir = tree.add_runtime(OLD_BUILD);
         let install = tree.install();
@@ -875,11 +683,6 @@ mod tests {
             format!("{RUNTIME_RECORD_HEADER}\nbuild_id={OLD_BUILD}\n"),
         )
         .expect("restore marker");
-        fs::remove_file(runtime_dir.join("herdr-launcher.exe")).expect("remove dispatcher");
-        assert!(install.validate_runtime(&build_id).is_err());
-        fs::write(runtime_dir.join("herdr-launcher.exe"), b"dispatcher")
-            .expect("restore dispatcher");
-
         let payload = runtime_dir.join("herdr.exe");
         fs::hard_link(&payload, tree.root.join("payload-hard-link.exe")).expect("create hard link");
         assert!(install.validate_runtime(&build_id).is_err());
@@ -966,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_payload_lease_survives_dispatcher_but_not_payload_descendants() {
+    fn managed_payload_lease_survives_launcher_exit_but_not_payload_descendants() {
         let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
         let tree = TestTree::new("lease-lifetime");
         tree.add_runtime(OLD_BUILD);
@@ -988,8 +791,7 @@ mod tests {
         let mut owner = owner.spawn().expect("spawn lease owner helper");
         let mut helpers = accept_helper_streams(&listener, 3);
         let (_, _owner_stream) = helpers.remove("owner").expect("owner handshake");
-        let (payload_pid, mut payload_stream) =
-            helpers.remove("payload").expect("payload handshake");
+        let (payload_pid, _payload_stream) = helpers.remove("payload").expect("payload handshake");
         let (descendant_pid, mut descendant_stream) =
             helpers.remove("descendant").expect("descendant handshake");
         let mut payload_guard = ProcessHandleGuard::open(payload_pid);
@@ -997,7 +799,7 @@ mod tests {
 
         kill_child_bounded(&mut owner);
         tree.write_pointer(PENDING_POINTER, NEW_BUILD);
-        activate_pending_after_child(&install, Duration::from_secs(1))
+        prepare_post_exit_maintenance(&install, Duration::from_secs(1))
             .expect("defer activation while inherited lease is live");
         assert_eq!(
             install
@@ -1011,12 +813,9 @@ mod tests {
             .expect("pending pointer")
             .is_some());
 
-        payload_stream
-            .write_all(b"x")
-            .expect("release managed payload");
-        payload_guard.wait(HELPER_TIMEOUT);
-        activate_pending_after_child(&install, Duration::from_secs(1))
-            .expect("activate while payload descendant remains alive");
+        payload_guard.terminate_and_wait(HELPER_TIMEOUT);
+        prepare_post_exit_maintenance(&install, Duration::from_secs(1))
+            .expect("activate after hard-killed payload while descendant remains alive");
         assert_eq!(
             install
                 .read_required_active_pointer()
@@ -1036,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_forwards_arguments_environment_cwd_and_exit_code() {
+    fn launcher_forwards_arguments_environment_cwd_and_exit_code() {
         let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
         let tree = TestTree::new("process-contract");
         tree.add_runtime(OLD_BUILD);
@@ -1062,25 +861,26 @@ mod tests {
     }
 
     #[test]
-    fn detached_dispatcher_preserves_headless_payload_behavior() {
+    fn detached_launcher_preserves_headless_payload_behavior() {
         let _env = PROCESS_ENV_LOCK.lock().expect("process env lock");
         let tree = TestTree::new("detached");
         tree.add_runtime(OLD_BUILD);
         tree.install_test_executable(OLD_BUILD, "herdr.exe");
         tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
-        let mut command = helper_command("detached_dispatcher_helper");
+        let mut command = helper_command("detached_launcher_helper");
         command
             .env(DETACHED_ROOT_ENV, &tree.root)
             .creation_flags(DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut helper = command.spawn().expect("spawn detached dispatcher helper");
+        let mut helper = command.spawn().expect("spawn detached launcher helper");
         let status = wait_child_bounded(&mut helper, HELPER_TIMEOUT);
         assert_eq!(status.code(), Some(41));
     }
 
     #[test]
+    #[cfg(any())]
     fn bootstrap_dispatcher_helper() {
         let current = std::env::current_exe().expect("helper executable");
         match current.file_name().and_then(OsStr::to_str) {
@@ -1120,6 +920,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn stale_dispatcher_helper() {
         let current = std::env::current_exe().expect("redispatch helper executable");
         match current.file_name().and_then(OsStr::to_str) {
@@ -1285,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_dispatcher_helper() {
+    fn detached_launcher_helper() {
         let Some(root) = std::env::var_os(DETACHED_ROOT_ENV) else {
             return;
         };

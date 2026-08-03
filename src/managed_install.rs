@@ -118,10 +118,6 @@ impl ManagedInstall {
         self.build_dir(build_id).join("herdr.exe")
     }
 
-    pub(crate) fn runtime_launcher_path(&self, build_id: &BuildId) -> PathBuf {
-        self.build_dir(build_id).join("herdr-launcher.exe")
-    }
-
     pub(crate) fn runtime_marker_path(&self, build_id: &BuildId) -> PathBuf {
         self.build_dir(build_id).join("runtime.ready")
     }
@@ -138,6 +134,10 @@ impl ManagedInstall {
 
     pub(crate) fn leases_dir(&self) -> PathBuf {
         self.state_dir().join("leases")
+    }
+
+    pub(crate) fn installer_helper_path(&self) -> PathBuf {
+        self.state_dir().join("installer-helper.ps1")
     }
 
     pub(crate) fn lease_path(&self, build_id: &BuildId) -> PathBuf {
