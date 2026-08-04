@@ -237,8 +237,8 @@ class DeltaPatchTests(unittest.TestCase):
         screenshot = PROJECT_ROOT / "docs" / "assets" / "herdr-win-setup-welcome.png"
         screenshot_bytes = screenshot.read_bytes()
         self.assertEqual(screenshot_bytes[:8], b"\x89PNG\r\n\x1a\n")
-        self.assertEqual(int.from_bytes(screenshot_bytes[16:20], "big"), 585)
-        self.assertEqual(int.from_bytes(screenshot_bytes[20:24], "big"), 479)
+        self.assertEqual(int.from_bytes(screenshot_bytes[16:20], "big"), 581)
+        self.assertEqual(int.from_bytes(screenshot_bytes[20:24], "big"), 477)
         workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         self.assertFalse(
