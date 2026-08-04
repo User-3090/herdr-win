@@ -82,8 +82,10 @@ herdr
 For setup downloaded directly from Releases, use `herdr update` from an ordinary terminal after detaching from active Herdr sessions. Updates preserve running sessions and activate the new verified snapshot when it is safe. A WinGet-owned installation instead updates through:
 
 ```powershell
-winget upgrade --id hdosys.herdr-win --exact
+winget upgrade --id hdosys.herdr-win --exact --source winget
 ```
+
+GitHub may publish a snapshot before the WinGet catalog finishes accepting it. A WinGet-owned copy shows an update only after the official `winget` source contains that exact release version, so its update action always points to installable bytes.
 
 Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
 

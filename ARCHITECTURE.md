@@ -91,6 +91,14 @@ behavior; code and tests remain the detailed implementation truth.
   the validated current managed-install root; malformed or unreadable records fail
   closed rather than being inferred from PATH, ARP, process ancestry, or WinGet
   metadata.
+- The existing startup update thread remains feed-driven for direct installs. For
+  an exact WinGet-owned root, it takes the target CalVer from the validated preview
+  feed and runs one bounded, non-interactive `winget show` query for that exact
+  package, official source, version, x64 architecture, and user scope. The query is
+  contained in a kill-on-close Windows job. Only success publishes release notes and
+  an update event; package/version absence is pending, while launch, source, timeout,
+  containment, and other failures suppress the action and are logged. No polling,
+  second availability feed, or package-manager state is added.
 - The persistent sibling lifecycle lock distinguishes a live operation from a dead
   transaction. Once that exclusive lock is acquired, setup and uninstall validate
   every matching transaction marker, root manifest, remaining managed tree, lease,

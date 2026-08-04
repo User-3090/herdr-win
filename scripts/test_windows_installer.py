@@ -129,8 +129,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn("current_install_is_winget", managed_install)
         self.assertIn(
-            'winget upgrade --id hdosys.herdr-win --exact', update
+            'winget upgrade --id hdosys.herdr-win --exact --source winget', update
         )
+        self.assertIn("winget_catalog_has_release", update)
+        self.assertIn('"--disable-interactivity"', update)
+        self.assertIn("new GitHub release is not yet available through WinGet", update)
         self.assertIn("self-update is disabled for WinGet installs", update)
         self.assertIn("Direct setup removed WinGet ownership", lifecycle)
         self.assertIn("Malformed package-manager ownership was accepted", lifecycle)

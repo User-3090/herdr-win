@@ -1,4 +1,4 @@
-From bb255eac09311be4baafc796a725007366c631a5 Mon Sep 17 00:00:00 2001
+From 6fe863dcf7012d2fea2884f7e57e70b2d2b8f962 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -25,7 +25,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  800 +++++
+ scripts/test_windows_installer.py             |  803 +++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  441 +++
  scripts/windows_installer_test.ps1            |  978 +++++
@@ -48,8 +48,8 @@ Refs ogulcancelik/herdr#1947
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  606 +++-
- 44 files changed, 9571 insertions(+), 391 deletions(-)
+ src/update.rs                                 |  878 ++++-
+ 44 files changed, 9845 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -56390,10 +56390,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..55c89bb8fc57caf83e5151a49b23540d7fc1c273
+index 0000000000000000000000000000000000000000..27f183fcd07f6f62490ad3cbd9b384c070983f15
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,800 @@
+@@ -0,0 +1,803 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56525,8 +56525,11 @@ index 0000000000000000000000000000000000000000..55c89bb8fc57caf83e5151a49b23540d
 +        )
 +        self.assertIn("current_install_is_winget", managed_install)
 +        self.assertIn(
-+            'winget upgrade --id hdosys.herdr-win --exact', update
++            'winget upgrade --id hdosys.herdr-win --exact --source winget', update
 +        )
++        self.assertIn("winget_catalog_has_release", update)
++        self.assertIn('"--disable-interactivity"', update)
++        self.assertIn("new GitHub release is not yet available through WinGet", update)
 +        self.assertIn("self-update is disabled for WinGet installs", update)
 +        self.assertIn("Direct setup removed WinGet ownership", lifecycle)
 +        self.assertIn("Malformed package-manager ownership was accepted", lifecycle)
@@ -61614,7 +61617,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d73ae98463 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..6cb62f46daafa763deab9fc83aa0d3ede39cb7c5 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -61633,10 +61636,12 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  use std::fs;
  #[cfg(not(windows))]
  use std::io;
-@@ -16,17 +15,17 @@ use std::io;
+@@ -16,17 +15,31 @@ use std::io;
  use std::io::{BufRead, BufReader, IsTerminal, Write};
  use std::path::{Path, PathBuf};
  use std::process::Command;
++#[cfg(windows)]
++use std::process::Stdio;
 +use std::time::Duration;
  #[cfg(not(windows))]
 -use std::time::{Duration, Instant};
@@ -61650,11 +61655,23 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 -const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
  const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
  const HERDR_UPDATE_COMMAND: &str = "herdr update";
-+const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact";
++#[cfg(windows)]
++const WINGET_PACKAGE_ID: &str = "hdosys.herdr-win";
++#[cfg(windows)]
++const WINGET_SOURCE: &str = "winget";
++const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact --source winget";
++#[cfg(any(windows, test))]
++const WINGET_NO_APPLICATIONS_FOUND: i32 = 0x8A15_0014_u32 as i32;
++#[cfg(any(windows, test))]
++const WINGET_NO_MANIFEST_FOUND: i32 = 0x8A15_0017_u32 as i32;
++#[cfg(windows)]
++const WINGET_CATALOG_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
++#[cfg(windows)]
++const WINGET_CATALOG_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
  const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
  const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
  const NIX_UPDATE_COMMAND: &str = "update through Nix";
-@@ -42,6 +41,17 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+@@ -42,6 +55,17 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
  const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
  #[cfg(not(windows))]
  const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -61672,7 +61689,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  fn fake_release_notes_body(version: &str) -> String {
      let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
          .ok()
-@@ -107,9 +117,9 @@ enum UpdateChannel {
+@@ -107,9 +131,9 @@ enum UpdateChannel {
  
  impl UpdateChannel {
      fn configured() -> Self {
@@ -61685,7 +61702,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
          }
      }
  
-@@ -125,6 +135,7 @@ impl UpdateChannel {
+@@ -125,6 +149,7 @@ impl UpdateChannel {
  struct AssetRef {
      url: String,
      sha256: Option<String>,
@@ -61693,7 +61710,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  }
  
  impl<'de> Deserialize<'de> for AssetRef {
-@@ -137,6 +148,7 @@ impl<'de> Deserialize<'de> for AssetRef {
+@@ -137,6 +162,7 @@ impl<'de> Deserialize<'de> for AssetRef {
              serde_json::Value::String(url) if !url.trim().is_empty() => Ok(Self {
                  url: url.trim().to_string(),
                  sha256: None,
@@ -61701,7 +61718,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              }),
              serde_json::Value::Object(mut object) => {
                  let url = object
-@@ -146,12 +158,16 @@ impl<'de> Deserialize<'de> for AssetRef {
+@@ -146,12 +172,16 @@ impl<'de> Deserialize<'de> for AssetRef {
                  let sha256 = object
                      .remove("sha256")
                      .and_then(|value| value.as_str().map(str::to_string));
@@ -61718,7 +61735,23 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
                  })
              }
              _ => Err(serde::de::Error::custom(
-@@ -273,6 +289,7 @@ struct ReleaseInfo {
+@@ -198,6 +228,7 @@ struct PreviewManifest {
+     channel: String,
+     base_version: String,
+     build_id: String,
++    release_version: String,
+     commit: String,
+     built_at: String,
+     protocol: u32,
+@@ -266,6 +297,7 @@ impl ManifestReleaseMetadata {
+ struct ReleaseInfo {
+     version: Version,
+     identity: String,
++    package_version: Option<String>,
+     channel: UpdateChannel,
+     build_id: Option<String>,
+     commit: Option<String>,
+@@ -273,6 +305,7 @@ struct ReleaseInfo {
      target_protocol: Option<u32>,
      download_url: String,
      sha256: Option<String>,
@@ -61726,7 +61759,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      notes_body: String,
  }
  
-@@ -283,11 +300,11 @@ impl ReleaseInfo {
+@@ -283,11 +316,11 @@ impl ReleaseInfo {
  }
  
  fn fetch_update_manifest() -> Result<UpdateManifest, String> {
@@ -61740,7 +61773,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  }
  
  fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
-@@ -297,6 +314,8 @@ where
+@@ -297,6 +330,8 @@ where
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -61749,7 +61782,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              "--retry",
              "3",
              "--connect-timeout",
-@@ -338,6 +357,94 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
+@@ -338,6 +373,94 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
      }
  }
  
@@ -61844,7 +61877,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
      let current = Version::current();
      let latest = Version::parse(&manifest.version)
-@@ -356,11 +463,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+@@ -356,16 +479,19 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
      }
  
      let (os, arch) = platform_target();
@@ -61859,7 +61892,13 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -373,6 +482,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+         identity: latest.to_string(),
+         version: latest,
++        package_version: None,
+         channel: UpdateChannel::Stable,
+         build_id: None,
+         commit: None,
+@@ -373,6 +499,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
          target_protocol: manifest.protocol,
          download_url,
          sha256: asset.sha256.clone(),
@@ -61867,7 +61906,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
          notes_body,
      }))
  }
-@@ -393,6 +503,32 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
+@@ -393,6 +520,61 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
      )
  }
  
@@ -61890,6 +61929,35 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 +}
 +
++fn is_herdr_win_release_version(value: &str) -> bool {
++    let mut parts = value.split('.');
++    let Some(year) = parts.next() else {
++        return false;
++    };
++    let Some(month) = parts.next() else {
++        return false;
++    };
++    let Some(day) = parts.next() else {
++        return false;
++    };
++    let Some(revision) = parts.next() else {
++        return false;
++    };
++
++    parts.next().is_none()
++        && year.len() == 4
++        && month.len() == 2
++        && day.len() == 2
++        && year.bytes().all(|byte| byte.is_ascii_digit())
++        && month.bytes().all(|byte| byte.is_ascii_digit())
++        && day.bytes().all(|byte| byte.is_ascii_digit())
++        && revision
++            .bytes()
++            .next()
++            .is_some_and(|byte| (b'1'..=b'9').contains(&byte))
++        && revision.bytes().all(|byte| byte.is_ascii_digit())
++}
++
 +fn preview_transition_may_be_stale(current: &str, latest: &str, current_is_archived: bool) -> bool {
 +    current != latest
 +        && is_fork_build_id(current)
@@ -61900,7 +61968,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  fn release_info_from_preview_manifest(
      manifest: &PreviewManifest,
  ) -> Result<Option<ReleaseInfo>, String> {
-@@ -403,14 +539,24 @@ fn release_info_from_preview_manifest(
+@@ -403,14 +585,24 @@ fn release_info_from_preview_manifest(
          ));
      }
      let build_id = manifest.build_id.trim();
@@ -61927,7 +61995,18 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  
      let version = Version::parse(&manifest.base_version).ok_or_else(|| {
          format!(
-@@ -423,7 +569,7 @@ fn release_info_from_preview_manifest(
+@@ -418,12 +610,18 @@ fn release_info_from_preview_manifest(
+             manifest.base_version
+         )
+     })?;
++    if !is_herdr_win_release_version(&manifest.release_version) {
++        return Err(format!(
++            "invalid herdr-win release_version in preview manifest: {}",
++            manifest.release_version
++        ));
++    }
+     let notes_body = manifest.notes.trim().to_string();
+     if notes_body.is_empty() {
          return Err("preview manifest notes are empty".into());
      }
      let (os, arch) = platform_target();
@@ -61936,7 +62015,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      if let Some(archived) = manifest.builds.get(build_id) {
          if archived.base_version != manifest.base_version
              || archived.commit != manifest.commit
-@@ -446,6 +592,8 @@ fn release_info_from_preview_manifest(
+@@ -446,11 +644,14 @@ fn release_info_from_preview_manifest(
                  .and_then(|build| build.assets.get(&asset_key))
          })
          .ok_or_else(|| format!("no binary for {asset_key} in preview manifest"))?;
@@ -61945,7 +62024,13 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -458,6 +606,7 @@ fn release_info_from_preview_manifest(
+         identity: preview_display_version(&manifest.base_version, build_id),
+         version,
++        package_version: Some(manifest.release_version.clone()),
+         channel: UpdateChannel::Preview,
+         build_id: Some(build_id.to_string()),
+         commit: Some(manifest.commit.clone()),
+@@ -458,6 +659,7 @@ fn release_info_from_preview_manifest(
          target_protocol: Some(manifest.protocol),
          download_url,
          sha256: asset.sha256.clone(),
@@ -61953,7 +62038,101 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
          notes_body,
      }))
  }
-@@ -628,53 +777,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -529,6 +731,93 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
+     homebrew_update_from_formula_json(&output.stdout, &current)
+ }
+ 
++#[cfg(any(windows, test))]
++fn winget_catalog_query_result(exit_code: Option<i32>) -> Result<bool, String> {
++    match exit_code {
++        Some(0) => Ok(true),
++        Some(WINGET_NO_APPLICATIONS_FOUND | WINGET_NO_MANIFEST_FOUND) => Ok(false),
++        Some(code) => Err(format!(
++            "WinGet catalog query failed with exit code 0x{:08X}",
++            code as u32
++        )),
++        None => Err("WinGet catalog query ended without an exit code".into()),
++    }
++}
++
++#[cfg(windows)]
++fn winget_catalog_command(release_version: &str) -> Command {
++    let mut command = crate::noninteractive_process::command("winget");
++    command
++        .args([
++            "show",
++            "--id",
++            WINGET_PACKAGE_ID,
++            "--exact",
++            "--source",
++            WINGET_SOURCE,
++            "--version",
++            release_version,
++            "--architecture",
++            "x64",
++            "--scope",
++            "user",
++            "--disable-interactivity",
++        ])
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null());
++    command
++}
++
++#[cfg(windows)]
++fn winget_catalog_has_release(release_version: &str) -> Result<bool, String> {
++    if !is_herdr_win_release_version(release_version) {
++        return Err(format!(
++            "cannot query WinGet for invalid herdr-win release version {release_version}"
++        ));
++    }
++
++    let job = crate::platform::ChildProcessJob::new_kill_on_close()
++        .map_err(|err| format!("failed to create WinGet catalog query job: {err}"))?;
++    let mut child = winget_catalog_command(release_version)
++        .spawn()
++        .map_err(|err| format!("failed to start WinGet catalog query: {err}"))?;
++
++    if let Err(err) = job.assign(&child) {
++        let _ = child.kill();
++        let _ = child.wait();
++        return Err(format!(
++            "failed to contain WinGet catalog query process: {err}"
++        ));
++    }
++
++    let status = match crate::platform::wait_child_bounded(&mut child, WINGET_CATALOG_QUERY_TIMEOUT)
++    {
++        Ok(Some(status)) => status,
++        Ok(None) => {
++            return match job.terminate_and_wait(&mut child, WINGET_CATALOG_CLEANUP_TIMEOUT) {
++                Ok(()) => Err(format!(
++                    "WinGet catalog query timed out after {} seconds",
++                    WINGET_CATALOG_QUERY_TIMEOUT.as_secs()
++                )),
++                Err(err) => Err(format!(
++                    "WinGet catalog query timed out and cleanup failed: {err}"
++                )),
++            };
++        }
++        Err(wait_err) => {
++            return match job.terminate_and_wait(&mut child, WINGET_CATALOG_CLEANUP_TIMEOUT) {
++                Ok(()) => Err(format!("failed to wait for WinGet catalog query: {wait_err}")),
++                Err(cleanup_err) => Err(format!(
++                    "failed to wait for WinGet catalog query ({wait_err}); cleanup also failed: {cleanup_err}"
++                )),
++            };
++        }
++    };
++
++    winget_catalog_query_result(status.code())
++}
++
+ // ---------------------------------------------------------------------------
+ // Download + install
+ // ---------------------------------------------------------------------------
+@@ -628,53 +917,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
@@ -61994,7 +62173,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +        let _ = fs::remove_dir_all(&self.root);
 +    }
 +}
-+
+ 
 +#[cfg(windows)]
 +fn create_windows_update_temp_root() -> Result<PathBuf, String> {
 +    let nonce = std::time::SystemTime::now()
@@ -62038,7 +62217,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +        .ok_or("selected Windows update asset has an invalid setup filename")?;
 +    let path = root.join(asset_name);
 +    let download = DownloadedWindowsInstaller { root, path };
- 
++
 +    let status = crate::noninteractive_process::curl_command()
 +        .args(["-sfL", "--max-time", "120", "-o"])
 +        .arg(&download.path)
@@ -62140,7 +62319,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  }
  
  // ---------------------------------------------------------------------------
-@@ -1732,7 +1976,9 @@ fn print_running_session_update_outcomes(
+@@ -1732,7 +2116,9 @@ fn print_running_session_update_outcomes(
  // ---------------------------------------------------------------------------
  
  pub(crate) fn update_install_command() -> &'static str {
@@ -62151,17 +62330,19 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
          HOMEBREW_UPDATE_COMMAND
      } else if is_mise_managed_install() {
          MISE_UPDATE_COMMAND
-@@ -1748,6 +1994,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
+@@ -1748,6 +2134,11 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
          HERDR_UPDATE_COMMAND => {
              "detach, run `herdr update`, then follow its restart guidance".to_string()
          }
 +        WINGET_UPDATE_COMMAND => {
-+            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready".to_string()
++            format!(
++                "detach, run `{WINGET_UPDATE_COMMAND}`, then restart this Herdr session when ready"
++            )
 +        }
          HOMEBREW_UPDATE_COMMAND => {
              "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
          }
-@@ -1786,6 +2035,28 @@ fn is_mise_managed_install() -> bool {
+@@ -1786,6 +2177,28 @@ fn is_mise_managed_install() -> bool {
      is_mise_managed_exe_path_following_links(&current_exe)
  }
  
@@ -62190,18 +62371,20 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
      let Ok(current_exe) = env::current_exe() else {
          return None;
-@@ -1796,7 +2067,9 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
+@@ -1796,7 +2209,11 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
  
  pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
  {
 -    if is_homebrew_managed_install() {
 +    if winget_managed_install_for_guidance() {
-+        Some("Use `winget upgrade --id hdosys.herdr-win --exact` to update WinGet installs.")
++        Some(
++            "Use `winget upgrade --id hdosys.herdr-win --exact --source winget` to update WinGet installs.",
++        )
 +    } else if is_homebrew_managed_install() {
          Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
      } else if is_mise_managed_install() {
          Some("Use `mise upgrade herdr` to update mise installs.")
-@@ -1958,6 +2231,11 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
+@@ -1958,6 +2375,11 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
  /// Manual self-update command (`herdr update`).
  pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      let channel = UpdateChannel::configured();
@@ -62213,7 +62396,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      #[cfg(windows)]
      if channel == UpdateChannel::Stable {
          return Err(
-@@ -2024,22 +2302,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2024,22 +2446,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      #[cfg(windows)]
      {
          let _ = options;
@@ -62248,7 +62431,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      }
  
      #[cfg(not(windows))]
-@@ -2079,6 +2355,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2079,6 +2499,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      Ok(release.version)
  }
  
@@ -62256,7 +62439,82 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2523,173 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2137,6 +2558,17 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+         return;
+     }
+ 
++    #[cfg(windows)]
++    let winget_managed_install = match is_winget_managed_install() {
++        Ok(managed) => managed,
++        Err(err) => {
++            crate::logging::update_check_failed(&format!(
++                "failed to inspect WinGet install ownership: {err}"
++            ));
++            return;
++        }
++    };
++
+     let release = match check_latest() {
+         Ok(Some(r)) => r,
+         Ok(None) => return,
+@@ -2146,8 +2578,37 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+         }
+     };
+ 
++    #[cfg(windows)]
++    if winget_managed_install {
++        let Some(release_version) = release.package_version.as_deref() else {
++            crate::logging::update_check_failed(
++                "preview feed did not identify the target herdr-win release version",
++            );
++            return;
++        };
++        match winget_catalog_has_release(release_version) {
++            Ok(true) => {}
++            Ok(false) => {
++                tracing::info!(
++                    package = WINGET_PACKAGE_ID,
++                    source = WINGET_SOURCE,
++                    release_version,
++                    "new GitHub release is not yet available through WinGet"
++                );
++                return;
++            }
++            Err(err) => {
++                crate::logging::update_check_failed(&format!(
++                    "failed to confirm WinGet release availability: {err}"
++                ));
++                return;
++            }
++        }
++    }
++
+     crate::logging::update_available(release.label());
+     tracing::info!(
++        package_version = ?release.package_version,
+         "new {} build available at {}",
+         release.channel.as_str(),
+         release.download_url
+@@ -2163,9 +2624,17 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+     );
+ 
+     // Notify the TUI — blocking_send is safe from a std::thread
++    #[cfg(windows)]
++    let install_command = if winget_managed_install {
++        WINGET_UPDATE_COMMAND
++    } else {
++        update_install_command()
++    };
++    #[cfg(not(windows))]
++    let install_command = update_install_command();
+     let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
+         version: release.label().to_string(),
+-        install_command: update_install_command().to_string(),
++        install_command: install_command.to_string(),
+     });
+ }
+ 
+@@ -2246,6 +2715,245 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -62286,6 +62544,40 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +        ));
 +    }
 +
++    #[test]
++    fn herdr_win_release_version_requires_exact_calver() {
++        for valid in ["2026.08.04.1", "2026.08.04.4294967296"] {
++            assert!(is_herdr_win_release_version(valid), "{valid}");
++        }
++        for invalid in [
++            "v2026.08.04.1",
++            "2026.8.04.1",
++            "2026.08.4.1",
++            "2026.08.04.0",
++            "2026.08.04.01",
++            "2026.08.04.-1",
++            "2026.08.04.1 ",
++            "2026.08.04.1.2",
++        ] {
++            assert!(!is_herdr_win_release_version(invalid), "{invalid}");
++        }
++    }
++
++    #[test]
++    fn winget_catalog_result_distinguishes_absence_from_failure() {
++        assert_eq!(winget_catalog_query_result(Some(0)), Ok(true));
++        assert_eq!(
++            winget_catalog_query_result(Some(WINGET_NO_APPLICATIONS_FOUND)),
++            Ok(false)
++        );
++        assert_eq!(
++            winget_catalog_query_result(Some(WINGET_NO_MANIFEST_FOUND)),
++            Ok(false)
++        );
++        assert!(winget_catalog_query_result(Some(1)).is_err());
++        assert!(winget_catalog_query_result(None).is_err());
++    }
++
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_installer_command_uses_verified_local_asset_and_start_gate() {
@@ -62305,6 +62597,42 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +                .and_then(|(_, value)| value),
 +            Some(start_gate.as_os_str())
 +        );
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn winget_catalog_query_is_exact_noninteractive_and_source_scoped() {
++        let command = winget_catalog_command("2026.08.04.3");
++        assert_eq!(command.get_program(), "winget");
++        let arguments = command
++            .get_args()
++            .map(|argument| argument.to_string_lossy())
++            .collect::<Vec<_>>();
++        assert_eq!(
++            arguments,
++            [
++                "show",
++                "--id",
++                "hdosys.herdr-win",
++                "--exact",
++                "--source",
++                "winget",
++                "--version",
++                "2026.08.04.3",
++                "--architecture",
++                "x64",
++                "--scope",
++                "user",
++                "--disable-interactivity",
++            ]
++        );
++    }
++
++    #[cfg(windows)]
++    #[test]
++    #[ignore = "queries the configured WinGet source"]
++    fn live_winget_catalog_query_treats_an_unpublished_version_as_pending() {
++        assert_eq!(winget_catalog_has_release("9999.12.31.1"), Ok(false));
 +    }
 +
 +    #[cfg(windows)]
@@ -62373,6 +62701,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +            channel: "preview".to_string(),
 +            base_version: "9.9.9".to_string(),
 +            build_id: build_id.to_string(),
++            release_version: "2026.07.31.1".to_string(),
 +            commit: "b".repeat(40),
 +            built_at: "2026-07-28T00:00:00Z".to_string(),
 +            protocol: 77,
@@ -62400,6 +62729,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +            .download_url
 +            .ends_with("herdr-win_v2026.07.31.1_windows_amd64_setup.exe"));
 +        assert_eq!(release.asset_format.as_deref(), Some("nsis"));
++        assert_eq!(release.package_version.as_deref(), Some("2026.07.31.1"));
 +        assert_eq!(
 +            release.sha256.as_deref(),
 +            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -62414,7 +62744,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
 +        );
 +        assert_eq!(
 +            update_install_instruction(WINGET_UPDATE_COMMAND),
-+            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready"
++            "detach, run `winget upgrade --id hdosys.herdr-win --exact --source winget`, then restart this Herdr session when ready"
 +        );
 +        assert_eq!(
 +            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
@@ -62430,7 +62760,14 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2769,7 @@ mod tests {
+@@ -2319,12 +3027,14 @@ mod tests {
+         ReleaseInfo {
+             version: Version::parse(version).unwrap(),
+             identity: version.to_string(),
++            package_version: None,
+             channel: UpdateChannel::Stable,
+             build_id: None,
+             commit: None,
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62438,7 +62775,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2598,22 +3043,6 @@ mod tests {
+@@ -2598,22 +3308,6 @@ mod tests {
          assert_eq!(body, "### Fixed\n- Brew notes");
      }
  
@@ -62461,7 +62798,14 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
      #[test]
      fn fake_release_notes_default_to_real_large_changelog_section() {
          let _guard = env_lock().lock().unwrap();
-@@ -2702,6 +3131,7 @@ mod tests {
+@@ -2696,12 +3390,14 @@ mod tests {
+         let compatible_release = ReleaseInfo {
+             version: Version::parse("0.5.6").unwrap(),
+             identity: "0.5.6".to_string(),
++            package_version: None,
+             channel: UpdateChannel::Stable,
+             build_id: None,
+             commit: None,
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62469,7 +62813,14 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3374,7 @@ mod tests {
+@@ -2938,12 +3634,14 @@ mod tests {
+         let release = ReleaseInfo {
+             version: Version::parse("0.5.6").unwrap(),
+             identity: "0.5.6".to_string(),
++            package_version: None,
+             channel: UpdateChannel::Stable,
+             build_id: None,
+             commit: None,
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62477,7 +62828,14 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3510,7 @@ mod tests {
+@@ -3073,12 +3771,14 @@ mod tests {
+         let release = ReleaseInfo {
+             version: Version::parse("9.8.7").unwrap(),
+             identity: "9.8.7".to_string(),
++            package_version: None,
+             channel: UpdateChannel::Stable,
+             build_id: None,
+             commit: None,
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62485,16 +62843,17 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3819,7 @@ mod tests {
+@@ -3387,7 +4087,8 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
 -                "build_id": "2026-06-02-abcdef123456",
 +                "build_id": "abcdef123456.7890abcdef12",
++                "release_version": "2026.08.04.3",
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3831,7 @@ mod tests {
+@@ -3399,7 +4100,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -62503,12 +62862,13 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d7
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3853,7 @@ mod tests {
+@@ -3421,7 +4122,8 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);
 -        assert_eq!(release.identity, "9.9.9-preview.2026-06-02-abcdef123456");
 +        assert_eq!(release.identity, "9.9.9-preview.abcdef123456.7890abcdef12");
++        assert_eq!(release.package_version.as_deref(), Some("2026.08.04.3"));
          assert_eq!(release.target_protocol, Some(77));
          assert_eq!(release.sha256.as_deref(), Some("deadbeef"));
      }

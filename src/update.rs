@@ -15,6 +15,8 @@ use std::io;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::process::Stdio;
 use std::time::Duration;
 #[cfg(not(windows))]
 use std::time::Instant;
@@ -25,7 +27,19 @@ use serde::{Deserialize, Deserializer};
 
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
-const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact";
+#[cfg(windows)]
+const WINGET_PACKAGE_ID: &str = "hdosys.herdr-win";
+#[cfg(windows)]
+const WINGET_SOURCE: &str = "winget";
+const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact --source winget";
+#[cfg(any(windows, test))]
+const WINGET_NO_APPLICATIONS_FOUND: i32 = 0x8A15_0014_u32 as i32;
+#[cfg(any(windows, test))]
+const WINGET_NO_MANIFEST_FOUND: i32 = 0x8A15_0017_u32 as i32;
+#[cfg(windows)]
+const WINGET_CATALOG_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const WINGET_CATALOG_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
@@ -214,6 +228,7 @@ struct PreviewManifest {
     channel: String,
     base_version: String,
     build_id: String,
+    release_version: String,
     commit: String,
     built_at: String,
     protocol: u32,
@@ -282,6 +297,7 @@ impl ManifestReleaseMetadata {
 struct ReleaseInfo {
     version: Version,
     identity: String,
+    package_version: Option<String>,
     channel: UpdateChannel,
     build_id: Option<String>,
     commit: Option<String>,
@@ -475,6 +491,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
     Ok(Some(ReleaseInfo {
         identity: latest.to_string(),
         version: latest,
+        package_version: None,
         channel: UpdateChannel::Stable,
         build_id: None,
         commit: None,
@@ -522,6 +539,35 @@ fn is_fork_build_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_herdr_win_release_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(year) = parts.next() else {
+        return false;
+    };
+    let Some(month) = parts.next() else {
+        return false;
+    };
+    let Some(day) = parts.next() else {
+        return false;
+    };
+    let Some(revision) = parts.next() else {
+        return false;
+    };
+
+    parts.next().is_none()
+        && year.len() == 4
+        && month.len() == 2
+        && day.len() == 2
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && month.bytes().all(|byte| byte.is_ascii_digit())
+        && day.bytes().all(|byte| byte.is_ascii_digit())
+        && revision
+            .bytes()
+            .next()
+            .is_some_and(|byte| (b'1'..=b'9').contains(&byte))
+        && revision.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn preview_transition_may_be_stale(current: &str, latest: &str, current_is_archived: bool) -> bool {
     current != latest
         && is_fork_build_id(current)
@@ -564,6 +610,12 @@ fn release_info_from_preview_manifest(
             manifest.base_version
         )
     })?;
+    if !is_herdr_win_release_version(&manifest.release_version) {
+        return Err(format!(
+            "invalid herdr-win release_version in preview manifest: {}",
+            manifest.release_version
+        ));
+    }
     let notes_body = manifest.notes.trim().to_string();
     if notes_body.is_empty() {
         return Err("preview manifest notes are empty".into());
@@ -599,6 +651,7 @@ fn release_info_from_preview_manifest(
     Ok(Some(ReleaseInfo {
         identity: preview_display_version(&manifest.base_version, build_id),
         version,
+        package_version: Some(manifest.release_version.clone()),
         channel: UpdateChannel::Preview,
         build_id: Some(build_id.to_string()),
         commit: Some(manifest.commit.clone()),
@@ -676,6 +729,93 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
     }
 
     homebrew_update_from_formula_json(&output.stdout, &current)
+}
+
+#[cfg(any(windows, test))]
+fn winget_catalog_query_result(exit_code: Option<i32>) -> Result<bool, String> {
+    match exit_code {
+        Some(0) => Ok(true),
+        Some(WINGET_NO_APPLICATIONS_FOUND | WINGET_NO_MANIFEST_FOUND) => Ok(false),
+        Some(code) => Err(format!(
+            "WinGet catalog query failed with exit code 0x{:08X}",
+            code as u32
+        )),
+        None => Err("WinGet catalog query ended without an exit code".into()),
+    }
+}
+
+#[cfg(windows)]
+fn winget_catalog_command(release_version: &str) -> Command {
+    let mut command = crate::noninteractive_process::command("winget");
+    command
+        .args([
+            "show",
+            "--id",
+            WINGET_PACKAGE_ID,
+            "--exact",
+            "--source",
+            WINGET_SOURCE,
+            "--version",
+            release_version,
+            "--architecture",
+            "x64",
+            "--scope",
+            "user",
+            "--disable-interactivity",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(windows)]
+fn winget_catalog_has_release(release_version: &str) -> Result<bool, String> {
+    if !is_herdr_win_release_version(release_version) {
+        return Err(format!(
+            "cannot query WinGet for invalid herdr-win release version {release_version}"
+        ));
+    }
+
+    let job = crate::platform::ChildProcessJob::new_kill_on_close()
+        .map_err(|err| format!("failed to create WinGet catalog query job: {err}"))?;
+    let mut child = winget_catalog_command(release_version)
+        .spawn()
+        .map_err(|err| format!("failed to start WinGet catalog query: {err}"))?;
+
+    if let Err(err) = job.assign(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "failed to contain WinGet catalog query process: {err}"
+        ));
+    }
+
+    let status = match crate::platform::wait_child_bounded(&mut child, WINGET_CATALOG_QUERY_TIMEOUT)
+    {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            return match job.terminate_and_wait(&mut child, WINGET_CATALOG_CLEANUP_TIMEOUT) {
+                Ok(()) => Err(format!(
+                    "WinGet catalog query timed out after {} seconds",
+                    WINGET_CATALOG_QUERY_TIMEOUT.as_secs()
+                )),
+                Err(err) => Err(format!(
+                    "WinGet catalog query timed out and cleanup failed: {err}"
+                )),
+            };
+        }
+        Err(wait_err) => {
+            return match job.terminate_and_wait(&mut child, WINGET_CATALOG_CLEANUP_TIMEOUT) {
+                Ok(()) => Err(format!("failed to wait for WinGet catalog query: {wait_err}")),
+                Err(cleanup_err) => Err(format!(
+                    "failed to wait for WinGet catalog query ({wait_err}); cleanup also failed: {cleanup_err}"
+                )),
+            };
+        }
+    };
+
+    winget_catalog_query_result(status.code())
 }
 
 // ---------------------------------------------------------------------------
@@ -1995,7 +2135,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
             "detach, run `herdr update`, then follow its restart guidance".to_string()
         }
         WINGET_UPDATE_COMMAND => {
-            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready".to_string()
+            format!(
+                "detach, run `{WINGET_UPDATE_COMMAND}`, then restart this Herdr session when ready"
+            )
         }
         HOMEBREW_UPDATE_COMMAND => {
             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
@@ -2068,7 +2210,9 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
 pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
 {
     if winget_managed_install_for_guidance() {
-        Some("Use `winget upgrade --id hdosys.herdr-win --exact` to update WinGet installs.")
+        Some(
+            "Use `winget upgrade --id hdosys.herdr-win --exact --source winget` to update WinGet installs.",
+        )
     } else if is_homebrew_managed_install() {
         Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
     } else if is_mise_managed_install() {
@@ -2414,6 +2558,17 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
         return;
     }
 
+    #[cfg(windows)]
+    let winget_managed_install = match is_winget_managed_install() {
+        Ok(managed) => managed,
+        Err(err) => {
+            crate::logging::update_check_failed(&format!(
+                "failed to inspect WinGet install ownership: {err}"
+            ));
+            return;
+        }
+    };
+
     let release = match check_latest() {
         Ok(Some(r)) => r,
         Ok(None) => return,
@@ -2423,8 +2578,37 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
         }
     };
 
+    #[cfg(windows)]
+    if winget_managed_install {
+        let Some(release_version) = release.package_version.as_deref() else {
+            crate::logging::update_check_failed(
+                "preview feed did not identify the target herdr-win release version",
+            );
+            return;
+        };
+        match winget_catalog_has_release(release_version) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    package = WINGET_PACKAGE_ID,
+                    source = WINGET_SOURCE,
+                    release_version,
+                    "new GitHub release is not yet available through WinGet"
+                );
+                return;
+            }
+            Err(err) => {
+                crate::logging::update_check_failed(&format!(
+                    "failed to confirm WinGet release availability: {err}"
+                ));
+                return;
+            }
+        }
+    }
+
     crate::logging::update_available(release.label());
     tracing::info!(
+        package_version = ?release.package_version,
         "new {} build available at {}",
         release.channel.as_str(),
         release.download_url
@@ -2440,9 +2624,17 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     );
 
     // Notify the TUI — blocking_send is safe from a std::thread
+    #[cfg(windows)]
+    let install_command = if winget_managed_install {
+        WINGET_UPDATE_COMMAND
+    } else {
+        update_install_command()
+    };
+    #[cfg(not(windows))]
+    let install_command = update_install_command();
     let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
         version: release.label().to_string(),
-        install_command: update_install_command().to_string(),
+        install_command: install_command.to_string(),
     });
 }
 
@@ -2549,6 +2741,40 @@ mod cross_platform_tests {
         ));
     }
 
+    #[test]
+    fn herdr_win_release_version_requires_exact_calver() {
+        for valid in ["2026.08.04.1", "2026.08.04.4294967296"] {
+            assert!(is_herdr_win_release_version(valid), "{valid}");
+        }
+        for invalid in [
+            "v2026.08.04.1",
+            "2026.8.04.1",
+            "2026.08.4.1",
+            "2026.08.04.0",
+            "2026.08.04.01",
+            "2026.08.04.-1",
+            "2026.08.04.1 ",
+            "2026.08.04.1.2",
+        ] {
+            assert!(!is_herdr_win_release_version(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn winget_catalog_result_distinguishes_absence_from_failure() {
+        assert_eq!(winget_catalog_query_result(Some(0)), Ok(true));
+        assert_eq!(
+            winget_catalog_query_result(Some(WINGET_NO_APPLICATIONS_FOUND)),
+            Ok(false)
+        );
+        assert_eq!(
+            winget_catalog_query_result(Some(WINGET_NO_MANIFEST_FOUND)),
+            Ok(false)
+        );
+        assert!(winget_catalog_query_result(Some(1)).is_err());
+        assert!(winget_catalog_query_result(None).is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_installer_command_uses_verified_local_asset_and_start_gate() {
@@ -2568,6 +2794,42 @@ mod cross_platform_tests {
                 .and_then(|(_, value)| value),
             Some(start_gate.as_os_str())
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn winget_catalog_query_is_exact_noninteractive_and_source_scoped() {
+        let command = winget_catalog_command("2026.08.04.3");
+        assert_eq!(command.get_program(), "winget");
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "show",
+                "--id",
+                "hdosys.herdr-win",
+                "--exact",
+                "--source",
+                "winget",
+                "--version",
+                "2026.08.04.3",
+                "--architecture",
+                "x64",
+                "--scope",
+                "user",
+                "--disable-interactivity",
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "queries the configured WinGet source"]
+    fn live_winget_catalog_query_treats_an_unpublished_version_as_pending() {
+        assert_eq!(winget_catalog_has_release("9999.12.31.1"), Ok(false));
     }
 
     #[cfg(windows)]
@@ -2636,6 +2898,7 @@ mod cross_platform_tests {
             channel: "preview".to_string(),
             base_version: "9.9.9".to_string(),
             build_id: build_id.to_string(),
+            release_version: "2026.07.31.1".to_string(),
             commit: "b".repeat(40),
             built_at: "2026-07-28T00:00:00Z".to_string(),
             protocol: 77,
@@ -2663,6 +2926,7 @@ mod cross_platform_tests {
             .download_url
             .ends_with("herdr-win_v2026.07.31.1_windows_amd64_setup.exe"));
         assert_eq!(release.asset_format.as_deref(), Some("nsis"));
+        assert_eq!(release.package_version.as_deref(), Some("2026.07.31.1"));
         assert_eq!(
             release.sha256.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -2677,7 +2941,7 @@ mod cross_platform_tests {
         );
         assert_eq!(
             update_install_instruction(WINGET_UPDATE_COMMAND),
-            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready"
+            "detach, run `winget upgrade --id hdosys.herdr-win --exact --source winget`, then restart this Herdr session when ready"
         );
         assert_eq!(
             update_install_instruction(HOMEBREW_UPDATE_COMMAND),
@@ -2763,6 +3027,7 @@ mod tests {
         ReleaseInfo {
             version: Version::parse(version).unwrap(),
             identity: version.to_string(),
+            package_version: None,
             channel: UpdateChannel::Stable,
             build_id: None,
             commit: None,
@@ -3125,6 +3390,7 @@ mod tests {
         let compatible_release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
             identity: "0.5.6".to_string(),
+            package_version: None,
             channel: UpdateChannel::Stable,
             build_id: None,
             commit: None,
@@ -3368,6 +3634,7 @@ mod tests {
         let release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
             identity: "0.5.6".to_string(),
+            package_version: None,
             channel: UpdateChannel::Stable,
             build_id: None,
             commit: None,
@@ -3504,6 +3771,7 @@ mod tests {
         let release = ReleaseInfo {
             version: Version::parse("9.8.7").unwrap(),
             identity: "9.8.7".to_string(),
+            package_version: None,
             channel: UpdateChannel::Stable,
             build_id: None,
             commit: None,
@@ -3820,6 +4088,7 @@ mod tests {
                 "channel": "preview",
                 "base_version": "9.9.9",
                 "build_id": "abcdef123456.7890abcdef12",
+                "release_version": "2026.08.04.3",
                 "commit": "abcdef1234567890",
                 "built_at": "2026-06-02T03:00:00Z",
                 "protocol": 77,
@@ -3854,6 +4123,7 @@ mod tests {
 
         assert_eq!(release.channel, UpdateChannel::Preview);
         assert_eq!(release.identity, "9.9.9-preview.abcdef123456.7890abcdef12");
+        assert_eq!(release.package_version.as_deref(), Some("2026.08.04.3"));
         assert_eq!(release.target_protocol, Some(77));
         assert_eq!(release.sha256.as_deref(), Some("deadbeef"));
     }

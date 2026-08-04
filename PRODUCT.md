@@ -75,11 +75,13 @@ tests remain the detailed implementation truth.
   reported. A hard process-tree kill leaves pending state recoverable for the next
   safe launch or setup. Update never terminates active Herdr sessions.
 - A copy installed by WinGet updates only through
-  `winget upgrade --id hdosys.herdr-win --exact`; `herdr update` refuses to
-  replace package-managed bytes and user-facing update actions show that WinGet
-  command. Running direct setup over the exact current managed root preserves
-  existing WinGet ownership rather than creating competing update paths. Uninstall
-  removes that ownership with the managed program.
+  `winget upgrade --id hdosys.herdr-win --exact --source winget`; `herdr update`
+  refuses to replace package-managed bytes. A newer GitHub release does not create
+  an update badge or release-note action for that copy until the official WinGet
+  source exposes the exact target release version; then user-facing update actions
+  show the WinGet command. Running direct setup over the exact current managed root
+  preserves existing WinGet ownership rather than creating competing update paths.
+  Uninstall removes that ownership with the managed program.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, only its own user `PATH` entry, **Herdr Win** Installed
   Apps registration, and installer-known `SKILL.md` copies at its managed universal
