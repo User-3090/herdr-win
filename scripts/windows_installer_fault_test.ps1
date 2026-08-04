@@ -202,7 +202,14 @@ function Remove-TestInstallIfPresent {
 }
 
 function Assert-TestSkillInstalled {
-    $expected = [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillSource))
+    $skillText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillSource))
+    $skillValidationText = $skillText.Replace("`r`n", "`n")
+    if ($skillValidationText.Contains("`r") -or
+        -not $skillValidationText.EndsWith("`n", [StringComparison]::Ordinal)) {
+        throw "Managed skill source must use valid line endings and end with a newline."
+    }
+    $expectedBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillValidationText)
+    $expected = [Convert]::ToBase64String($expectedBytes)
     foreach ($candidate in @($skillPath, $claudeSkillPath)) {
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             throw "Managed installer did not publish SKILL.md: $candidate"
@@ -374,7 +381,9 @@ try {
         throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
     }
     Wait-TestCondition -Description "modified-tree uninstall" -Condition {
-        -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+        -not (Test-Path -LiteralPath $installRoot) -and
+            -not (Test-Path -LiteralPath $arpKey) -and
+            -not (Test-Path -LiteralPath $settingsRoot)
     }
     Wait-TestUninstallerIdle
     if (Test-Path -LiteralPath $skillPath) {

@@ -1,4 +1,4 @@
-From 573bd9ae2bf49ebb1e08dffb867604e7b8567898 Mon Sep 17 00:00:00 2001
+From e35375d89ddc16f76c50730021fae9aeca28aa74 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -25,9 +25,9 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  772 ++++
+ scripts/test_windows_installer.py             |  773 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
- scripts/windows_installer_fault_test.ps1      |  432 +++
+ scripts/windows_installer_fault_test.ps1      |  441 +++
  scripts/windows_installer_test.ps1            |  956 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  531 ++-
- 44 files changed, 9309 insertions(+), 371 deletions(-)
+ 44 files changed, 9319 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -56319,10 +56319,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..17aa6f5e596cfdd8fff75d7163a856f292d94c18
+index 0000000000000000000000000000000000000000..dccb53f4ff9f3ab1813e3b7ac84a2d32725db92a
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,772 @@
+@@ -0,0 +1,773 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56524,6 +56524,7 @@ index 0000000000000000000000000000000000000000..17aa6f5e596cfdd8fff75d7163a856f2
 +        self.assertIn("Uninstall removed a modified Herdr skill", lifecycle)
 +        fault_test = FAULT_TEST.read_text(encoding="utf-8")
 +        self.assertIn("Assert-TestSkillInstalled", fault_test)
++        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', fault_test)
 +        self.assertIn("retained universal SKILL.md", fault_test)
 +        self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
 +        self.assertIn("AgentUserProfileRoot", fault_test)
@@ -57318,10 +57319,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..331dec1946e78838302c93b9325a825c
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d3081e7e0e1c1062a2cc74004f7342958b59c5c
+index 0000000000000000000000000000000000000000..8cb8aee7f6b8fe2b3952c4e7891033ea6ac3dfd5
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,441 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57526,7 +57527,14 @@ index 0000000000000000000000000000000000000000..6d3081e7e0e1c1062a2cc74004f73429
 +}
 +
 +function Assert-TestSkillInstalled {
-+    $expected = [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillSource))
++    $skillText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillSource))
++    $skillValidationText = $skillText.Replace("`r`n", "`n")
++    if ($skillValidationText.Contains("`r") -or
++        -not $skillValidationText.EndsWith("`n", [StringComparison]::Ordinal)) {
++        throw "Managed skill source must use valid line endings and end with a newline."
++    }
++    $expectedBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillValidationText)
++    $expected = [Convert]::ToBase64String($expectedBytes)
 +    foreach ($candidate in @($skillPath, $claudeSkillPath)) {
 +        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
 +            throw "Managed installer did not publish SKILL.md: $candidate"
@@ -57698,7 +57706,9 @@ index 0000000000000000000000000000000000000000..6d3081e7e0e1c1062a2cc74004f73429
 +        throw "Modified-tree uninstaller exited with $modifiedUninstallExit."
 +    }
 +    Wait-TestCondition -Description "modified-tree uninstall" -Condition {
-+        -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
++        -not (Test-Path -LiteralPath $installRoot) -and
++            -not (Test-Path -LiteralPath $arpKey) -and
++            -not (Test-Path -LiteralPath $settingsRoot)
 +    }
 +    Wait-TestUninstallerIdle
 +    if (Test-Path -LiteralPath $skillPath) {

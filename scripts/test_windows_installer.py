@@ -197,6 +197,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("Uninstall removed a modified Herdr skill", lifecycle)
         fault_test = FAULT_TEST.read_text(encoding="utf-8")
         self.assertIn("Assert-TestSkillInstalled", fault_test)
+        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', fault_test)
         self.assertIn("retained universal SKILL.md", fault_test)
         self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
         self.assertIn("AgentUserProfileRoot", fault_test)
