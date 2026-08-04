@@ -234,11 +234,22 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("## Identity and compatibility", readme)
         self.assertNotIn("Get-FileHash", readme)
         self.assertNotIn("platform-Windows%20x64", readme)
+        self.assertIn(
+            '<img src="https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png" alt="Herdr Win setup welcome page">',
+            readme,
+        )
         screenshot = PROJECT_ROOT / "docs" / "assets" / "herdr-win-setup-welcome.png"
         screenshot_bytes = screenshot.read_bytes()
         self.assertEqual(screenshot_bytes[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(int.from_bytes(screenshot_bytes[16:20], "big"), 581)
         self.assertEqual(int.from_bytes(screenshot_bytes[20:24], "big"), 477)
+        chunk_types = []
+        offset = 8
+        while offset < len(screenshot_bytes):
+            chunk_length = int.from_bytes(screenshot_bytes[offset : offset + 4], "big")
+            chunk_types.append(screenshot_bytes[offset + 4 : offset + 8])
+            offset += 12 + chunk_length
+        self.assertEqual(set(chunk_types), {b"IHDR", b"IDAT", b"IEND"})
         workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         self.assertFalse(
