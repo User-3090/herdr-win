@@ -235,7 +235,7 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("Get-FileHash", readme)
         self.assertNotIn("platform-Windows%20x64", readme)
         self.assertIn(
-            '<img src="https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png" alt="Herdr Win setup welcome page" width="465">',
+            '<img src="https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png" alt="Herdr Win setup welcome page">',
             readme,
         )
         screenshot = PROJECT_ROOT / "docs" / "assets" / "herdr-win-setup-welcome.png"
