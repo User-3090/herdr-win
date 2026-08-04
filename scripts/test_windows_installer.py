@@ -247,6 +247,27 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertNotIn("Remove-Item -LiteralPath $lockPath", helper)
 
+    def test_path_updates_preserve_raw_registry_ownership(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
+        for required in (
+            "Resolve-HerdrUserPathUpdate",
+            "RegistryValueOptions]::DoNotExpandEnvironmentNames",
+            "RegistryValueKind]::ExpandString",
+            'GetValueKind("PathAdded")',
+            "RegistryValueKind]::DWord",
+            "Get-HerdrArpPathOwnership",
+            'Name "PathAdded"',
+            "-InstallerOwned $pathOwned",
+        ):
+            self.assertIn(required, helper)
+        self.assertNotIn('[Environment]::SetEnvironmentVariable("Path"', helper)
+        self.assertIn("Equivalent user PATH entry was claimed", lifecycle)
+        self.assertIn("remove exactly one owned literal entry", lifecycle)
+        self.assertIn("PATH registry kind changed after removal", lifecycle)
+        self.assertIn("REG_SZ PATH ownership was accepted", lifecycle)
+        self.assertIn("REG_QWORD PATH ownership was accepted", lifecycle)
+
     def test_helper_matches_the_launcher_lock_and_lease_contract(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
         launcher_contract = MANAGED_INSTALL.read_text(encoding="utf-8")

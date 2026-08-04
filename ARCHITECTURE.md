@@ -105,11 +105,11 @@ behavior; code and tests remain the detailed implementation truth.
   the branded Welcome/Finish artwork; five checked-in BMP3 derivatives provide
   native 100–200% DPI buckets without runtime resampling. Installer compression
   uses datablock optimization, an 8 MiB LZMA dictionary, and solid final LZMA settings.
-- Install/update canonicalizes the managed `bin` path as the first user-PATH entry,
-  removes only duplicate spellings of that same managed path, preserves every
-  unrelated entry and its order, and broadcasts a real environment change.
-  Uninstall removes only that managed entry, restoring any previously shadowed
-  upstream/native command for newly started processes.
+- Install/update preserves the raw user-PATH registry kind and bytes. It adds the
+  literal managed `bin` path first only when no effective equivalent exists, records
+  that exact ownership in ARP, and never claims or rewrites an equivalent user-owned
+  spelling. Uninstall removes at most one exact literal entry only when ARP proves
+  this installer added it, preserving every other entry and its order.
 - Interactive and silent uninstall both preserve `%USERPROFILE%\.herdr` by
   default; the interactive checkbox or `/REMOVE_SETTINGS` explicitly authorizes
   deletion. Settings cleanup stays in the helper's validated filesystem boundary

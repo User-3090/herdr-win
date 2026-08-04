@@ -27,8 +27,10 @@ tests remain the detailed implementation truth.
 
 - The normal managed installation is per-user under
   `%LOCALAPPDATA%\Programs\Herdr`, places its stable `bin` directory first on user
-  `PATH` so it shadows without changing any existing upstream/native `herdr`, and
-  registers **Herdr Win** in Windows Installed Apps without requiring administrator
+  `PATH` when no effective equivalent is already present, never claims or rewrites
+  an equivalent user-owned entry, and otherwise shadows without changing any
+  existing upstream/native `herdr`. It registers **Herdr Win** in Windows Installed
+  Apps without requiring administrator
   privileges. The installer interface is English-only. Its branded,
   keyboard-operable Windows setup uses the human-facing display name **Herdr Win**
   consistently while the repository and release slug remains `herdr-win`. Welcome

@@ -465,12 +465,67 @@ try {
             [IO.Directory]::Delete($reparseSkill)
         }
     }
+    # PATH updates preserve the raw registry kind and unrelated bytes. Equivalent
+    # user-owned entries are never claimed, and uninstall removes only one exact
+    # literal entry that ARP records as installer-owned.
     $binEntry = Join-Path $tempRoot "path-test\bin"
-    $pathInput = "C:\Other;;`"$binEntry\`";C:\Keep;$($binEntry.ToUpperInvariant())"
-    $pathOnce = Add-HerdrPathEntry -PathValue $pathInput -Entry $binEntry
-    Assert-Equal $pathOnce.Split(';')[0] $binEntry "Managed bin did not lead the user PATH."
-    Assert-Equal (Add-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) $pathOnce "PATH insertion was not idempotent."
-    Assert-Equal (Remove-HerdrPathEntry -PathValue $pathOnce -Entry $binEntry) "C:\Other;;C:\Keep" "PATH removal changed unrelated entries."
+    $pathVariableName = "HERDR_WIN_PATH_TEST_" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $pathVariableRoot = Split-Path -Parent $binEntry
+    $oldPathVariable = [Environment]::GetEnvironmentVariable($pathVariableName, "Process")
+    $pathRegistrySubKey = "Software\HerdrWinInstallerTests\" + [Guid]::NewGuid().ToString("N")
+    try {
+        [Environment]::SetEnvironmentVariable($pathVariableName, $pathVariableRoot, "Process")
+        $rawVariableEntry = "%$pathVariableName%\bin"
+        $variableCurrent = "C:\Other;;$rawVariableEntry;C:\Keep"
+        $expandedEquivalent = Resolve-HerdrUserPathUpdate -Current $variableCurrent -Entry $binEntry -RequestedAction Add -ExpandVariables $true -InstallerOwned $false
+        Assert-True (-not $expandedEquivalent.Changed) "REG_EXPAND_SZ equivalent PATH entry was rewritten."
+        Assert-True (-not $expandedEquivalent.Owned) "Equivalent user PATH entry was claimed as installer-owned."
+        Assert-Equal $expandedEquivalent.Value $variableCurrent "Equivalent raw PATH bytes changed."
+
+        $literalVariable = Resolve-HerdrUserPathUpdate -Current $variableCurrent -Entry $binEntry -RequestedAction Add -ExpandVariables $false -InstallerOwned $false
+        Assert-True $literalVariable.Changed "REG_SZ variable text was incorrectly expanded."
+        Assert-True $literalVariable.Owned "New exact PATH entry was not marked installer-owned."
+        Assert-Equal $literalVariable.Value "$binEntry;$variableCurrent" "New managed PATH entry did not preserve existing order and bytes."
+
+        $duplicateCurrent = "$binEntry;C:\Keep;$binEntry"
+        $removedExact = Resolve-HerdrUserPathUpdate -Current $duplicateCurrent -Entry $binEntry -RequestedAction Remove -ExpandVariables $false -InstallerOwned $true
+        Assert-Equal $removedExact.Value "C:\Keep;$binEntry" "PATH removal did not remove exactly one owned literal entry."
+        $unownedRemoval = Resolve-HerdrUserPathUpdate -Current $duplicateCurrent -Entry $binEntry -RequestedAction Remove -ExpandVariables $false -InstallerOwned $false
+        Assert-Equal $unownedRemoval.Value $duplicateCurrent "Unowned PATH removal changed user entries."
+
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($pathRegistrySubKey)
+        try {
+            $key.SetValue("Path", $variableCurrent, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        } finally {
+            $key.Dispose()
+        }
+        $equivalentRegistryUpdate = Set-HerdrUserPath -BinDir $binEntry -PreviouslyOwned $false -RegistrySubKey $pathRegistrySubKey
+        Assert-True (-not $equivalentRegistryUpdate.Changed) "Equivalent registry PATH entry was rewritten."
+        Assert-True (-not $equivalentRegistryUpdate.Owned) "Equivalent registry PATH entry was claimed."
+
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($pathRegistrySubKey, $true)
+        try {
+            Assert-Equal $key.GetValueKind("Path") ([Microsoft.Win32.RegistryValueKind]::ExpandString) "PATH registry kind changed."
+            Assert-Equal ([string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) $variableCurrent "Raw expanded PATH changed."
+            $key.SetValue("Path", "C:\Keep", [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        } finally {
+            $key.Dispose()
+        }
+        $addedRegistryPath = Set-HerdrUserPath -BinDir $binEntry -PreviouslyOwned $false -RegistrySubKey $pathRegistrySubKey
+        Assert-True ($addedRegistryPath.Changed -and $addedRegistryPath.Owned) "Fresh registry PATH entry was not owned."
+        $removedRegistryPath = Remove-HerdrUserPath -BinDir $binEntry -InstallerOwned $true -RegistrySubKey $pathRegistrySubKey
+        Assert-True $removedRegistryPath.Changed "Owned registry PATH entry was not removed."
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($pathRegistrySubKey, $false)
+        try {
+            Assert-Equal $key.GetValueKind("Path") ([Microsoft.Win32.RegistryValueKind]::ExpandString) "PATH registry kind changed after removal."
+            Assert-Equal ([string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) "C:\Keep" "Registry PATH removal changed unrelated bytes."
+        } finally {
+            $key.Dispose()
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable($pathVariableName, $oldPathVariable, "Process")
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($pathRegistrySubKey, $false)
+    }
 
     # A complete fresh tree is built in a sibling transaction and retries clean
     # both complete and partial pre-publication artifacts.
@@ -750,11 +805,20 @@ try {
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 
     # ARP stores the truthful display/numeric identity and preserves mismatches.
-    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -RegistryPath $registryPath
+    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -PathAdded $true -RegistryPath $registryPath
     $arp = Get-ItemProperty -LiteralPath $registryPath
     Assert-Equal ([string]$arp.DisplayName) $script:ProductName "ARP package identity is not the configured distribution name."
     Assert-Equal ([string]$arp.DisplayVersion) $display2 "ARP display version is not truthful."
     Assert-Equal ([int]$arp.VersionMajor) 0 "ARP major version is wrong."
+    Assert-True (Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath) "ARP did not retain exact PATH ownership."
+    Remove-ItemProperty -LiteralPath $registryPath -Name PathAdded
+    Assert-True (-not (Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath)) "Missing legacy PATH ownership was claimed."
+    New-ItemProperty -LiteralPath $registryPath -Name PathAdded -Value "1" -PropertyType String | Out-Null
+    Assert-Throws { Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath } "must be REG_DWORD" "REG_SZ PATH ownership was accepted."
+    Remove-ItemProperty -LiteralPath $registryPath -Name PathAdded
+    New-ItemProperty -LiteralPath $registryPath -Name PathAdded -Value ([long]1) -PropertyType QWord | Out-Null
+    Assert-Throws { Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath } "must be REG_DWORD" "REG_QWORD PATH ownership was accepted."
+    Remove-ItemProperty -LiteralPath $registryPath -Name PathAdded
     Set-ItemProperty -LiteralPath $registryPath -Name InstallLocation -Value (Join-Path $tempRoot "someone-else")
     Assert-Throws { Remove-HerdrArpRegistration -InstallRoot $installRoot -RegistryPath $registryPath } "not owned" "Mismatched ARP key was removed."
     Remove-Item -LiteralPath $registryPath -Recurse -Force

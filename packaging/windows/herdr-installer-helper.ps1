@@ -2590,7 +2590,7 @@ function Install-HerdrLayout {
 }
 
 function Get-HerdrComparablePathEntry {
-    param([AllowNull()][string]$Entry)
+    param([AllowNull()][string]$Entry, [bool]$ExpandVariables = $true)
 
     if ([string]::IsNullOrWhiteSpace($Entry)) {
         return $null
@@ -2599,7 +2599,9 @@ function Get-HerdrComparablePathEntry {
     if ($candidate.Length -ge 2 -and $candidate[0] -eq '"' -and $candidate[$candidate.Length - 1] -eq '"') {
         $candidate = $candidate.Substring(1, $candidate.Length - 2)
     }
-    $candidate = [Environment]::ExpandEnvironmentVariables($candidate)
+    if ($ExpandVariables) {
+        $candidate = [Environment]::ExpandEnvironmentVariables($candidate)
+    }
     try {
         return [IO.Path]::GetFullPath($candidate).TrimEnd('\')
     } catch {
@@ -2608,61 +2610,139 @@ function Get-HerdrComparablePathEntry {
 }
 
 function Test-HerdrPathEntryEqual {
-    param([AllowNull()][string]$Left, [AllowNull()][string]$Right)
+    param([AllowNull()][string]$Left, [AllowNull()][string]$Right, [bool]$ExpandVariables = $true)
 
-    $leftComparable = Get-HerdrComparablePathEntry -Entry $Left
-    $rightComparable = Get-HerdrComparablePathEntry -Entry $Right
+    $leftComparable = Get-HerdrComparablePathEntry -Entry $Left -ExpandVariables $ExpandVariables
+    $rightComparable = Get-HerdrComparablePathEntry -Entry $Right -ExpandVariables $ExpandVariables
     return $null -ne $leftComparable -and $null -ne $rightComparable -and
         $leftComparable.Equals($rightComparable, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Add-HerdrPathEntry {
-    param([AllowNull()][string]$PathValue, [Parameter(Mandatory = $true)][string]$Entry)
+function Resolve-HerdrUserPathUpdate {
+    param(
+        [AllowEmptyString()][string]$Current,
+        [Parameter(Mandatory = $true)][string]$Entry,
+        [Parameter(Mandatory = $true)][ValidateSet("Add", "Remove")][string]$RequestedAction,
+        [bool]$ExpandVariables,
+        [bool]$InstallerOwned
+    )
 
-    $segments = if ($null -eq $PathValue) { @() } else { @($PathValue.Split([char[]]@(';'), [StringSplitOptions]::None)) }
-    $result = New-Object System.Collections.Generic.List[string]
-    $result.Add($Entry)
-    foreach ($segment in $segments) {
-        if (-not (Test-HerdrPathEntryEqual -Left $segment -Right $Entry)) {
-            $result.Add($segment)
+    $segments = @($Current.Split([char[]]@(';'), [StringSplitOptions]::None))
+    if ($RequestedAction -ceq "Add") {
+        $equivalent = @($segments | Where-Object {
+            Test-HerdrPathEntryEqual -Left $_ -Right $Entry -ExpandVariables $ExpandVariables
+        })
+        if ($equivalent.Count -gt 0) {
+            $exactExists = @($segments | Where-Object { [string]$_ -ceq $Entry }).Count -gt 0
+            return [PSCustomObject]@{
+                Changed = $false
+                Value = $Current
+                Owned = $InstallerOwned -and $exactExists
+            }
+        }
+        $updated = if ([string]::IsNullOrEmpty($Current)) { $Entry } else { "$Entry;$Current" }
+        return [PSCustomObject]@{ Changed = $true; Value = $updated; Owned = $true }
+    }
+
+    if (-not $InstallerOwned) {
+        return [PSCustomObject]@{ Changed = $false; Value = $Current; Owned = $false }
+    }
+    $removeIndex = -1
+    for ($index = 0; $index -lt $segments.Count; $index += 1) {
+        if ([string]$segments[$index] -ceq $Entry) {
+            $removeIndex = $index
+            break
         }
     }
-    return $result.ToArray() -join ';'
+    if ($removeIndex -lt 0) {
+        return [PSCustomObject]@{ Changed = $false; Value = $Current; Owned = $false }
+    }
+    $kept = New-Object System.Collections.Generic.List[string]
+    for ($index = 0; $index -lt $segments.Count; $index += 1) {
+        if ($index -ne $removeIndex) {
+            [void]$kept.Add([string]$segments[$index])
+        }
+    }
+    return [PSCustomObject]@{
+        Changed = $true
+        Value = [string]::Join(';', [string[]]$kept)
+        Owned = $false
+    }
 }
 
-function Remove-HerdrPathEntry {
-    param([AllowNull()][string]$PathValue, [Parameter(Mandatory = $true)][string]$Entry)
+function Update-HerdrUserPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BinDir,
+        [Parameter(Mandatory = $true)][ValidateSet("Add", "Remove")][string]$RequestedAction,
+        [bool]$InstallerOwned,
+        [string]$RegistrySubKey = "Environment"
+    )
 
-    if ($null -eq $PathValue) {
-        return $null
+    if ($RequestedAction -ceq "Remove" -and -not $InstallerOwned) {
+        return [PSCustomObject]@{ Changed = $false; Owned = $false }
     }
-    $result = New-Object System.Collections.Generic.List[string]
-    foreach ($segment in @($PathValue.Split([char[]]@(';'), [StringSplitOptions]::None))) {
-        if (-not (Test-HerdrPathEntryEqual -Left $segment -Right $Entry)) {
-            $result.Add($segment)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($RegistrySubKey, $true)
+    if ($null -eq $key -and $RequestedAction -ceq "Remove") {
+        return [PSCustomObject]@{ Changed = $false; Owned = $false }
+    }
+    if ($null -eq $key) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($RegistrySubKey)
+    }
+    if ($null -eq $key) {
+        throw "Could not open the current-user Environment registry key."
+    }
+    try {
+        $hasPath = @($key.GetValueNames()) -contains "Path"
+        if (-not $hasPath -and $RequestedAction -ceq "Remove") {
+            return [PSCustomObject]@{ Changed = $false; Owned = $false }
         }
+        $kind = if ($hasPath) {
+            $key.GetValueKind("Path")
+        } else {
+            [Microsoft.Win32.RegistryValueKind]::ExpandString
+        }
+        if ($kind -ne [Microsoft.Win32.RegistryValueKind]::String -and
+            $kind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+            throw "The current-user Path has unsupported registry kind '$kind'."
+        }
+        $current = if ($hasPath) {
+            [string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        } else {
+            ""
+        }
+        $update = Resolve-HerdrUserPathUpdate `
+            -Current $current `
+            -Entry $BinDir `
+            -RequestedAction $RequestedAction `
+            -ExpandVariables ($kind -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) `
+            -InstallerOwned $InstallerOwned
+        if ([bool]$update.Changed) {
+            $key.SetValue("Path", [string]$update.Value, $kind)
+        }
+        return [PSCustomObject]@{ Changed = [bool]$update.Changed; Owned = [bool]$update.Owned }
+    } finally {
+        $key.Dispose()
     }
-    return $result.ToArray() -join ';'
 }
 
 function Set-HerdrUserPath {
-    param([Parameter(Mandatory = $true)][string]$BinDir)
+    param(
+        [Parameter(Mandatory = $true)][string]$BinDir,
+        [bool]$PreviouslyOwned = $false,
+        [string]$RegistrySubKey = "Environment"
+    )
 
-    $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    $updated = Add-HerdrPathEntry -PathValue $current -Entry $BinDir
-    if ($updated -cne $current) {
-        [Environment]::SetEnvironmentVariable("Path", $updated, "User")
-    }
+    return Update-HerdrUserPath -BinDir $BinDir -RequestedAction Add -InstallerOwned $PreviouslyOwned -RegistrySubKey $RegistrySubKey
 }
 
 function Remove-HerdrUserPath {
-    param([Parameter(Mandatory = $true)][string]$BinDir)
+    param(
+        [Parameter(Mandatory = $true)][string]$BinDir,
+        [bool]$InstallerOwned,
+        [string]$RegistrySubKey = "Environment"
+    )
 
-    $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    $updated = Remove-HerdrPathEntry -PathValue $current -Entry $BinDir
-    if ($updated -cne $current) {
-        [Environment]::SetEnvironmentVariable("Path", $updated, "User")
-    }
+    return Update-HerdrUserPath -BinDir $BinDir -RequestedAction Remove -InstallerOwned $InstallerOwned -RegistrySubKey $RegistrySubKey
 }
 
 function Assert-HerdrArpOwnership {
@@ -2677,11 +2757,37 @@ function Assert-HerdrArpOwnership {
     }
 }
 
+function Get-HerdrArpPathOwnership {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot, [string]$RegistryPath = $script:ArpKey)
+
+    Assert-HerdrArpOwnership -InstallRoot $InstallRoot -RegistryPath $RegistryPath
+    if (-not (Test-Path -LiteralPath $RegistryPath)) {
+        return $false
+    }
+    $registration = Get-Item -LiteralPath $RegistryPath
+    try {
+        if (@($registration.GetValueNames()) -notcontains "PathAdded") {
+            return $false
+        }
+        if ($registration.GetValueKind("PathAdded") -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            throw "The Herdr ARP PathAdded ownership value must be REG_DWORD."
+        }
+        $value = [int]$registration.GetValue("PathAdded")
+        if ($value -ne 0 -and $value -ne 1) {
+            throw "The Herdr ARP PathAdded ownership value is invalid."
+        }
+        return $value -eq 1
+    } finally {
+        $registration.Dispose()
+    }
+}
+
 function Set-HerdrArpRegistration {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
+        [bool]$PathAdded,
         [string]$RegistryPath = $script:ArpKey
     )
 
@@ -2706,6 +2812,7 @@ function Set-HerdrArpRegistration {
     New-ItemProperty -LiteralPath $RegistryPath -Name "VersionMinor" -Value ([int]$numeric[1]) -PropertyType DWord -Force | Out-Null
     New-ItemProperty -LiteralPath $RegistryPath -Name "NoModify" -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -LiteralPath $RegistryPath -Name "NoRepair" -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -LiteralPath $RegistryPath -Name "PathAdded" -Value ([int]$PathAdded) -PropertyType DWord -Force | Out-Null
 }
 
 function Remove-HerdrArpRegistration {
@@ -2735,6 +2842,7 @@ function Invoke-HerdrInstall {
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
+        $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot
         $agentSkillsRoot = Get-HerdrAgentSkillsRoot
         $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled) { Get-HerdrClaudeSkillsRoot } else { $null }
         $result = Install-HerdrLayout `
@@ -2750,8 +2858,12 @@ function Invoke-HerdrInstall {
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion
-        Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
-        Set-HerdrArpRegistration -InstallRoot $InstallRoot -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion
+        $pathUpdate = Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -PreviouslyOwned $previousPathOwnership
+        Set-HerdrArpRegistration `
+            -InstallRoot $InstallRoot `
+            -DisplayVersion $DisplayVersion `
+            -NumericVersion $NumericVersion `
+            -PathAdded ([bool]$pathUpdate.Owned)
         return $result
     }
 }
@@ -2900,6 +3012,7 @@ function Invoke-HerdrUninstall {
     $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
+        $pathOwned = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot
         $preservedSkillPaths = @(
             Invoke-HerdrUninstallLayout `
                 -InstallRoot $InstallRoot `
@@ -2910,7 +3023,7 @@ function Invoke-HerdrUninstall {
                 -UninstallFault $UninstallFault `
                 -UninstallFaultMarkerPrefix $UninstallFaultMarkerPrefix
         )
-        Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin")
+        [void](Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -InstallerOwned $pathOwned)
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
         if ($SettingsDisposition -ceq "Remove") {
             Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
