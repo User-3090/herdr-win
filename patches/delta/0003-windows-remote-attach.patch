@@ -1,9 +1,11 @@
-From 21bfdec0bb3246404ed562e996aea7e249b48e35 Mon Sep 17 00:00:00 2001
+From 0549ee366c94d9895803fa846989ae8f91c70758 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
 
 Share remote attach orchestration across platforms, enable the Windows SSH bridge with bounded named-pipe handshakes, and transport clipboard or dropped images through the existing client protocol. Keep package-manager detection and automatic remote installation Unix-specific; Windows remote hosts resolve herdr.exe from the SSH user's PATH.
+
+Refs ogulcancelik/herdr#1947
 ---
  Cargo.lock                                    |    1 +
  Cargo.toml                                    |    1 +
@@ -25,7 +27,7 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/app/input/modal.rs                        |   22 +-
  src/app/state.rs                              |   11 +-
  src/cli/status.rs                             |   12 +
- src/client/mod.rs                             |  293 +-
+ src/client/mod.rs                             |  294 +-
  src/ipc.rs                                    |  176 +-
  src/main.rs                                   |    1 -
  src/platform/fallback.rs                      |   54 +
@@ -35,10 +37,10 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/platform/unix_common.rs                   |  123 +
  src/platform/windows.rs                       |  192 +-
  src/platform/windows/clipboard_image.rs       |  535 +++
- src/plugin_command.rs                         |    2 +-
+ src/plugin_command.rs                         |    3 +-
  src/remote.rs                                 |  149 +-
  src/remote/attach.rs                          | 3622 +++++++++++++++++
- src/remote/unix.rs                            | 3081 +-------------
+ src/remote/unix.rs                            | 3091 +-------------
  src/remote/windows.rs                         |  129 +
  src/server/autodetect.rs                      |   46 +-
  src/server/client_transport.rs                |   51 +-
@@ -46,38 +48,38 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/server/headless.rs                        |  248 +-
  src/ui.rs                                     |   69 +-
  src/update.rs                                 |    5 +
- 41 files changed, 5661 insertions(+), 3427 deletions(-)
+ 41 files changed, 5664 insertions(+), 3436 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
  create mode 100644 src/remote/windows.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 6cfdbd0c1d868103e7d446afba28a7351915a1a1..9268d0b3c9ddf89ca3ba3a929b0209e77e14f59f 100644
+index 980fcb5d966bd6ce04bbe1445ff3a087636c5a7c..fbf3ebcfbea2f8cf905e5308780409f8ccefbef2 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -608,6 +608,7 @@ dependencies = [
+@@ -697,6 +697,7 @@ dependencies = [
   "tracing",
   "tracing-subscriber",
   "unicode-width",
 + "widestring",
   "windows-sys",
+  "wmi",
  ]
- 
 diff --git a/Cargo.toml b/Cargo.toml
-index e1363129ebc865ba33e699024559e70ddfd876dd..e6fa57c1e94d72c962294731f9a793da41f40828 100644
+index 84949e2de62652b0202051e106a71711ef5f1c5c..91627ca457ae6a1a782c6c91588d03573ac6cb60 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -47,6 +47,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
- portable-pty = { path = "vendor/portable-pty" }
+@@ -50,6 +50,7 @@ portable-pty = { path = "vendor/portable-pty" }
  
  [target.'cfg(windows)'.dependencies]
+ wmi = { version = "0.18.4", default-features = false }
 +widestring = "1.2.1"
  windows-sys = { version = "0.61.2", features = [
      "Wdk_System_Threading",
      "Win32_Foundation",
 diff --git a/docs/next/website/src/content/docs/configuration.mdx b/docs/next/website/src/content/docs/configuration.mdx
-index 32592650485612d84f9a320029c5a70b129abed4..f36be9e441311c29b8d3954b70015067f85f7e69 100644
+index 69b2b9ed50a086caa14a1853d5eb50c73764b321..42b80bf7f6beff2f7f83e1aa3dd63e67ef277896 100644
 --- a/docs/next/website/src/content/docs/configuration.mdx
 +++ b/docs/next/website/src/content/docs/configuration.mdx
 @@ -98,14 +98,14 @@ Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a
@@ -98,7 +100,7 @@ index 32592650485612d84f9a320029c5a70b129abed4..f36be9e441311c29b8d3954b70015067
  ## Keybindings
  
 diff --git a/docs/next/website/src/content/docs/ja/configuration.mdx b/docs/next/website/src/content/docs/ja/configuration.mdx
-index 4e50c675eee01ef64dd788d9a5c190086abd6988..67e07a9c70f1d1c8f31c390e2a332e9cc6c5ba56 100644
+index dda1629c537c6807c3a903cc22a5601c4dc9c2b0..137ed74cbcc199d65fb1cb64deca2fde7ac1b59c 100644
 --- a/docs/next/website/src/content/docs/ja/configuration.mdx
 +++ b/docs/next/website/src/content/docs/ja/configuration.mdx
 @@ -98,14 +98,14 @@ worktree チェックアウトの削除は明示的に行います。グルー
@@ -142,7 +144,7 @@ index f8d3ff02f5be343971171672c9f1793384f3357d..8313d6c3ea082a2ef2009ee08bc62387
  デフォルトでは、実行中のリモートサーバーの置き換えや再起動が必要な場合、リモートアタッチは通常の再起動/停止フローを使います。対応する実行中リモートサーバーで実験的なライブハンドオフにオプトインするには `--handoff` を渡します:
  
 diff --git a/docs/next/website/src/content/docs/ja/windows-beta.mdx b/docs/next/website/src/content/docs/ja/windows-beta.mdx
-index fa526872336a21f22732503b6bccdb6d20b9c2d1..c6623602c12af99c285abfe0e2f4be6cd2fd51f2 100644
+index ee0f85679b531a3cf8c470b603375dfb6bf86665..076e92bd7679c2ff4afbdeb32434e56d51ec8225 100644
 --- a/docs/next/website/src/content/docs/ja/windows-beta.mdx
 +++ b/docs/next/website/src/content/docs/ja/windows-beta.mdx
 @@ -36,6 +36,7 @@ Windows ベータビルドはプレビューチャンネルでのみ提供され
@@ -170,7 +172,7 @@ index fa526872336a21f22732503b6bccdb6d20b9c2d1..c6623602c12af99c285abfe0e2f4be6c
  
  Kitty graphics は実験的なままで、まだ Windows でのサポートを謳っていません。Windows Terminal での画像レンダリングを特にテストしているのでない限り、`experimental.kitty_graphics = false` のままにしてください。
  
-@@ -90,22 +91,19 @@ Herdr のペインテキストコピーは Windows ベータで動作します
+@@ -92,22 +93,19 @@ Herdr のペインテキストコピーは Windows ベータで動作します
  | 機能 | 状況 |
  | --- | --- |
  | ダイレクトターミナルアタッチ | 未サポート |
@@ -217,7 +219,7 @@ index a365ac8838673144952ce0b6dcf92d3125e27360..50b8f099a565180dc05996497c7391a2
  Remote attach uses your normal OpenSSH authentication. If the target uses a passphrase-protected key in a non-interactive shell, script, CI job, or mobile terminal that cannot show the passphrase prompt, load the key into ssh-agent first:
  
 diff --git a/docs/next/website/src/content/docs/windows-beta.mdx b/docs/next/website/src/content/docs/windows-beta.mdx
-index 696a77be41d6669c237afa798b896960081da75d..a8bbffa8e9c7c2478a701b821b4e35c01b740f1f 100644
+index 6533ca6fb31b84245d723dcd4962d9be89f6a1b6..d26db9a63fc8f406f4ae8eba07dc9d24b3e29de3 100644
 --- a/docs/next/website/src/content/docs/windows-beta.mdx
 +++ b/docs/next/website/src/content/docs/windows-beta.mdx
 @@ -36,6 +36,7 @@ For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a cus
@@ -245,7 +247,7 @@ index 696a77be41d6669c237afa798b896960081da75d..a8bbffa8e9c7c2478a701b821b4e35c0
  
  Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
  
-@@ -90,22 +91,19 @@ For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is
+@@ -92,22 +93,19 @@ For text paste, use `ctrl+shift+v` in Windows Terminal. Multiline text paste is
  | Capability | Status |
  | --- | --- |
  | Direct terminal attach | unsupported |
@@ -272,7 +274,7 @@ index 696a77be41d6669c237afa798b896960081da75d..a8bbffa8e9c7c2478a701b821b4e35c0
  Windows updates run through the Windows installer and update the versioned install junction. Restart running Herdr sessions after updating. Live handoff is Unix-only.
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/configuration.mdx b/docs/next/website/src/content/docs/zh-cn/configuration.mdx
-index ce5852b94055385831d6637c8dc5a4ddb824e5dd..d1d47dfb8daf1fe5b734a2975e19163334d41f6f 100644
+index 237c53b484abb82ecc21052ffc9e68291fbbf86b..15cfd738d0d39a302937d9875762c67cd385f635 100644
 --- a/docs/next/website/src/content/docs/zh-cn/configuration.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/configuration.mdx
 @@ -98,14 +98,14 @@ Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果
@@ -316,7 +318,7 @@ index a81a8469e54aba464c1daa01638ac651f31c7e73..c88a1a17f029a902bd4da7f7346f4033
  默认情况下,如果需要替换或重启运行中的远程服务器,远程连接使用常规的重启/停止流程。要对受支持的运行中远程服务器启用实验性实时交接,加上 `--handoff`:
  
 diff --git a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
-index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc6278241d 100644
+index 781a6f969416873de8ca131f6fdb35600fe7615a..a9e09a1a6b5d4beb2b78f306b1725e8fad9162b7 100644
 --- a/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
 +++ b/docs/next/website/src/content/docs/zh-cn/windows-beta.mdx
 @@ -36,6 +36,7 @@ Windows 测试版构建只通过预览通道发布。在 Windows 上,Herdr 默
@@ -344,7 +346,7 @@ index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc
  
  Kitty graphics 仍是实验性功能,尚未宣称支持 Windows。除非你专门在 Windows Terminal 中测试图像渲染,否则保持 `experimental.kitty_graphics = false`。
  
-@@ -90,22 +91,19 @@ Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选
+@@ -92,22 +93,19 @@ Herdr 的窗格文本复制在 Windows 测试版上可用。在窗格内拖选
  | 能力 | 状态 |
  | --- | --- |
  | 直接终端附加 | 不支持 |
@@ -371,7 +373,7 @@ index 5e922c3a56ca289d6833d5fda0d6a26259bd652e..1f05c3aa1afcdfdac2bd53291ad787fc
  Windows 更新通过 Windows 安装器进行,并更新带版本号的安装联接点。更新后请重启运行中的 Herdr 会话。实时交接仅限 Unix。
  
 diff --git a/src/app/agent_resume.rs b/src/app/agent_resume.rs
-index 408f5983c7bb15bef43be9138cbe8e38b4ed35ed..e70abbcc85ad7a7f67dc5c2d04c55f33bfc88854 100644
+index 1b4596287b324f0e126d38cd134cd3b878cfc4b0..3bf211682d5e721b260c7e7cc02a3ef0820556df 100644
 --- a/src/app/agent_resume.rs
 +++ b/src/app/agent_resume.rs
 @@ -225,12 +225,13 @@ impl App {
@@ -392,20 +394,20 @@ index 408f5983c7bb15bef43be9138cbe8e38b4ed35ed..e70abbcc85ad7a7f67dc5c2d04c55f33
  
          let runtime = match crate::terminal::TerminalRuntime::spawn(
              pane_id,
-@@ -239,7 +240,7 @@ impl App {
-             cwd,
+@@ -240,7 +241,7 @@ impl App {
              self.state.pane_scrollback_limit_bytes,
              host_terminal_theme,
+             self.state.host_terminal_appearance,
 -            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
 +            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
              &launch_env,
              self.event_tx.clone(),
              self.render_notify.clone(),
 diff --git a/src/app/api.rs b/src/app/api.rs
-index 0cf55fd5cf4558f6d93cb859f57052ceee39e71e..c0bff5f87017af5a38c63da56184c648c3423fc4 100644
+index 5f81a5cb22c4f6ca8c15d88fcff53750d7cd08fb..efc9fbb697db39fbe87286aa545d36aab2fc1b71 100644
 --- a/src/app/api.rs
 +++ b/src/app/api.rs
-@@ -517,6 +517,7 @@ impl App {
+@@ -538,6 +538,7 @@ impl App {
          let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
              return false;
          };
@@ -413,17 +415,17 @@ index 0cf55fd5cf4558f6d93cb859f57052ceee39e71e..c0bff5f87017af5a38c63da56184c648
          let runtime = match crate::terminal::TerminalRuntime::spawn(
              pane_id,
              rows,
-@@ -524,7 +525,7 @@ impl App {
-             cwd,
+@@ -546,7 +547,7 @@ impl App {
              self.state.pane_scrollback_limit_bytes,
              self.state.host_terminal_theme,
+             self.state.host_terminal_appearance,
 -            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
 +            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
              &launch_env,
              self.event_tx.clone(),
              self.render_notify.clone(),
 diff --git a/src/app/api/layouts.rs b/src/app/api/layouts.rs
-index 0fdbaba094026270163555c0be073b6fe7991b16..135bc4570f36dcb5dae49a2626860d9a79cce3d2 100644
+index 9d2756b887aa7bb57a0ee28e0d260d58b91daa30..d60e8cc915976a56b4ec7da38b624a275a7d9969 100644
 --- a/src/app/api/layouts.rs
 +++ b/src/app/api/layouts.rs
 @@ -90,7 +90,7 @@ impl App {
@@ -434,8 +436,8 @@ index 0fdbaba094026270163555c0be073b6fe7991b16..135bc4570f36dcb5dae49a2626860d9a
 +        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
          let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
          let host_terminal_theme = self.state.host_terminal_theme;
-         let extra_env = match super::env::normalize_launch_env(root_leaf.env.clone()) {
-@@ -389,7 +389,7 @@ impl App {
+         let host_terminal_appearance = self.state.host_terminal_appearance;
+@@ -397,7 +397,7 @@ impl App {
          pane: &LayoutPane,
      ) -> Result<PaneId, String> {
          let (rows, cols) = self.state.estimate_pane_size();
@@ -443,22 +445,22 @@ index 0fdbaba094026270163555c0be073b6fe7991b16..135bc4570f36dcb5dae49a2626860d9a
 +        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
          let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
          let host_terminal_theme = self.state.host_terminal_theme;
-         let cwd = pane
+         let host_terminal_appearance = self.state.host_terminal_appearance;
 diff --git a/src/app/api/panes.rs b/src/app/api/panes.rs
-index 483d73a5e532632ca166c0a965a49703f65b4bc5..542b0b71dfc0112231d481f9c471a5c3ad3eca87 100644
+index 72798a1b7e9ad9191511e218e66d306926bc6994..a3f48e56c6947790bca2366a8a00d1f15c615b18 100644
 --- a/src/app/api/panes.rs
 +++ b/src/app/api/panes.rs
 @@ -54,7 +54,7 @@ impl App {
-             let follow_cwd = self.follow_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
+             let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
              Some(self.resolve_new_terminal_cwd(follow_cwd))
          });
 -        let default_shell = self.state.default_shell.clone();
 +        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
          let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
          let host_terminal_theme = self.state.host_terminal_theme;
-         let previous_focus = self.state.current_pane_focus_target();
+         let host_terminal_appearance = self.state.host_terminal_appearance;
 diff --git a/src/app/api/tabs.rs b/src/app/api/tabs.rs
-index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..dff580d91cd7930c1ace2136689b9f7b5b08c9e1 100644
+index 42d2b029a4261a642bf8ea4f30cfb13b7e2a865d..d3662071ddaa63a1b5a2d1c27b74b93f2b27c924 100644
 --- a/src/app/api/tabs.rs
 +++ b/src/app/api/tabs.rs
 @@ -66,7 +66,7 @@ impl App {
@@ -469,12 +471,12 @@ index 6ae9d26e1d2d9fb7fe13fef374391c589f9d305f..dff580d91cd7930c1ace2136689b9f7b
 +        let default_shell = self.pane_shell_for_workspace(Some(ws_idx));
          let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
          let host_terminal_theme = self.state.host_terminal_theme;
-         let extra_env = match super::env::normalize_launch_env(env) {
+         let host_terminal_appearance = self.state.host_terminal_appearance;
 diff --git a/src/app/creation.rs b/src/app/creation.rs
-index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0c25b5bb3 100644
+index d531e7337084c8fca2235ceb4b37da6990271773..a30f3cfbb24673e73e361eb44afdc967064a76d8 100644
 --- a/src/app/creation.rs
 +++ b/src/app/creation.rs
-@@ -61,6 +61,75 @@ impl App {
+@@ -81,6 +81,75 @@ impl App {
          resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
      }
  
@@ -550,7 +552,7 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
      pub(super) fn workspace_creation_source(&self) -> Option<usize> {
          if self.state.mode == Mode::Navigate
              && self.state.workspaces.get(self.state.selected).is_some()
-@@ -87,7 +156,8 @@ impl App {
+@@ -107,7 +176,8 @@ impl App {
              return;
          }
  
@@ -560,7 +562,7 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
              request_id,
              crate::api::schema::WorkspaceCreateParams {
                  cwd: None,
-@@ -96,6 +166,10 @@ impl App {
+@@ -116,6 +186,10 @@ impl App {
                  env: Default::default(),
              },
          );
@@ -571,7 +573,7 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
          self.state.mode = if self.state.active.is_some() {
              Mode::Terminal
          } else {
-@@ -169,6 +243,7 @@ impl App {
+@@ -189,6 +263,7 @@ impl App {
              return self.create_workspace_with_options(initial_cwd, focus);
          };
          let (rows, cols) = self.state.estimate_pane_size();
@@ -579,16 +581,16 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
          let ws = &mut self.state.workspaces[ws_idx];
          let (idx, terminal, runtime) = ws.create_tab(
              rows,
-@@ -176,7 +251,7 @@ impl App {
-             initial_cwd,
+@@ -197,7 +272,7 @@ impl App {
              self.state.pane_scrollback_limit_bytes,
              self.state.host_terminal_theme,
+             self.state.host_terminal_appearance,
 -            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
 +            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
              Vec::new(),
          )?;
          let root_pane = ws.tabs[idx].root_pane;
-@@ -223,13 +298,14 @@ impl App {
+@@ -244,6 +319,7 @@ impl App {
          extra_env: Vec<(String, String)>,
      ) -> std::io::Result<usize> {
          let (rows, cols) = self.state.estimate_pane_size();
@@ -596,15 +598,16 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
          let (ws, terminal, runtime) = Workspace::new_with_extra_env(
              initial_cwd,
              rows,
-             cols,
+@@ -251,7 +327,7 @@ impl App {
              self.state.pane_scrollback_limit_bytes,
              self.state.host_terminal_theme,
+             self.state.host_terminal_appearance,
 -            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
 +            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
              self.event_tx.clone(),
              self.render_notify.clone(),
              self.render_dirty.clone(),
-@@ -495,6 +571,45 @@ impl App {
+@@ -517,6 +593,45 @@ impl App {
      }
  }
  
@@ -651,10 +654,10 @@ index 2e978ee93811976fb4ccf892c946ff08a3a6c5a5..a06d203b22b411681e45b75d0bc0a6f0
      terminal: &crate::terminal::TerminalState,
  ) -> Option<crate::api::schema::AgentSessionInfo> {
 diff --git a/src/app/input/modal.rs b/src/app/input/modal.rs
-index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a1859bf952f3 100644
+index 0a5c13e56979ec2d61218be338d7d54e4f7985c6..4c859e6ba05bdddfcc498a44b1cba3975b1b6d05 100644
 --- a/src/app/input/modal.rs
 +++ b/src/app/input/modal.rs
-@@ -943,10 +943,11 @@ impl App {
+@@ -1013,10 +1013,11 @@ impl App {
  
          match self.state.mode {
              Mode::RenameWorkspace => {
@@ -668,7 +671,7 @@ index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a185
                          "tui.workspace.create_named",
                          crate::api::schema::WorkspaceCreateParams {
                              cwd: Some(cwd.display().to_string()),
-@@ -955,6 +956,13 @@ impl App {
+@@ -1025,6 +1026,13 @@ impl App {
                              env: Default::default(),
                          },
                      );
@@ -682,7 +685,7 @@ index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a185
                  } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
                      let workspace_id = self.public_workspace_id(self.state.selected);
                      self.runtime_workspace_rename(
-@@ -973,7 +981,8 @@ impl App {
+@@ -1043,7 +1051,8 @@ impl App {
                  } else {
                      Some(new_name)
                  };
@@ -692,7 +695,7 @@ index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a185
                      "tui.tab.create_named",
                      crate::api::schema::TabCreateParams {
                          workspace_id: None,
-@@ -983,6 +992,13 @@ impl App {
+@@ -1053,6 +1062,13 @@ impl App {
                          env: Default::default(),
                      },
                  );
@@ -707,10 +710,10 @@ index dc126b40e5cfde1c22a93e988abd4fe92a2d8457..85b0d039b428a48ac4fc4cec69a8a185
              Mode::RenameTab if !new_name.is_empty() => {
                  let Some(ws_idx) = self.state.active else {
 diff --git a/src/app/state.rs b/src/app/state.rs
-index f8395cbdc69def7ba6e7578db83dec08aa97f09f..42c363a42b468721c2a5bce2104a65d553b8973d 100644
+index e6c23c4c09becdd279d4e970e73ddf16daf00b9d..dd7e1140a4e697d4b59bc94337457172bbaf4208 100644
 --- a/src/app/state.rs
 +++ b/src/app/state.rs
-@@ -1675,7 +1675,16 @@ impl AppState {
+@@ -1652,7 +1652,16 @@ impl AppState {
  
      pub fn estimate_pane_size(&self) -> (u16, u16) {
          if let Some(info) = self.view.pane_infos.first() {
@@ -729,10 +732,10 @@ index f8395cbdc69def7ba6e7578db83dec08aa97f09f..42c363a42b468721c2a5bce2104a65d5
              (24, 80)
          }
 diff --git a/src/cli/status.rs b/src/cli/status.rs
-index 49b3c129f5ed807ccca6bf4989a44407ef400431..63b8da7e7e86855fe2281c013c327a31884a5cef 100644
+index 74bb3e2a15f5f62264c26de70707179affc6fb43..8594fd1b7117d0d1952f74f8e092f20741a9e77c 100644
 --- a/src/cli/status.rs
 +++ b/src/cli/status.rs
-@@ -329,3 +329,15 @@ fn print_status_help() {
+@@ -322,3 +322,15 @@ fn print_status_help() {
      eprintln!("  herdr status server [--json]  show running server status");
      eprintln!("  herdr status client [--json]  show local client binary status");
  }
@@ -749,7 +752,7 @@ index 49b3c129f5ed807ccca6bf4989a44407ef400431..63b8da7e7e86855fe2281c013c327a31
 +    }
 +}
 diff --git a/src/client/mod.rs b/src/client/mod.rs
-index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a2307f732 100644
+index 4469e8ad73f6eba879df7da8b53e42dcacfe9a7d..a324b243b47167cd39405908fe222c8cf96fe865 100644
 --- a/src/client/mod.rs
 +++ b/src/client/mod.rs
 @@ -37,7 +37,6 @@ use tracing::{debug, info, warn};
@@ -768,7 +771,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
  }
  
-@@ -82,7 +80,6 @@ struct ClientState {
+@@ -84,7 +82,6 @@ struct ClientState {
      #[cfg(unix)]
      mouse_scroll_lines: usize,
      /// Local-client shortcut that sends a clipboard image to a remote Herdr session.
@@ -776,7 +779,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
      /// Whether outer focus gain should force a full host-terminal redraw.
      redraw_on_focus_gained: bool,
-@@ -740,7 +737,6 @@ fn requested_render_encoding() -> RenderEncoding {
+@@ -747,7 +744,6 @@ fn requested_render_encoding() -> RenderEncoding {
      }
  }
  
@@ -784,7 +787,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  fn is_remote_client_process() -> bool {
      std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
  }
-@@ -753,11 +749,9 @@ fn is_remote_client_process() -> bool {
+@@ -760,11 +756,9 @@ fn is_remote_client_process() -> bool {
  /// window; on a high-latency link that easily exceeds 5s, so it gets a far
  /// larger budget. See issue #753.
  const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -796,7 +799,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      if is_remote_client_process() {
          return REMOTE_HANDSHAKE_READ_TIMEOUT;
      }
-@@ -778,22 +772,6 @@ fn requested_keybindings() -> ClientKeybindings {
+@@ -785,22 +779,6 @@ fn requested_keybindings() -> ClientKeybindings {
      }
  }
  
@@ -819,7 +822,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  #[cfg(not(windows))]
  fn set_handshake_recv_timeout(
      stream: &LocalStream,
-@@ -805,6 +783,31 @@ fn set_handshake_recv_timeout(
+@@ -812,6 +790,31 @@ fn set_handshake_recv_timeout(
          .map_err(ClientError::ConnectionFailed)
  }
  
@@ -851,7 +854,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  /// Performs the client→server handshake.
  ///
  /// Sends Hello with the terminal size and protocol version, reads the Welcome
-@@ -841,17 +844,7 @@ fn do_handshake(
+@@ -848,17 +851,7 @@ fn do_handshake(
          .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
  
      // Read Welcome.
@@ -870,7 +873,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  
      match welcome {
          ServerMessage::Welcome {
-@@ -1199,7 +1192,6 @@ fn run_client_with_mode(
+@@ -1206,7 +1199,6 @@ fn run_client_with_mode(
      let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
      let host_cursor = loaded_config.config.ui.host_cursor;
      let direct_attach_requested = attach_request.is_some();
@@ -878,7 +881,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
      let kitty_graphics_enabled =
          loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
-@@ -1210,7 +1202,6 @@ fn run_client_with_mode(
+@@ -1217,7 +1209,6 @@ fn run_client_with_mode(
          host_cursor,
          kitty_graphics_enabled,
          mouse_capture_active: mouse_capture,
@@ -886,7 +889,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
          remote_image_paste_key,
      };
  
-@@ -1366,7 +1357,6 @@ async fn run_client_loop(
+@@ -1380,7 +1371,6 @@ async fn run_client_loop(
      #[cfg(windows)]
      let _ = config.mouse_scroll_lines;
      let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
@@ -894,15 +897,15 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      let is_remote_client = is_remote_client_process();
  
      let mut state = ClientState {
-@@ -1378,7 +1368,6 @@ async fn run_client_loop(
+@@ -1393,7 +1383,6 @@ async fn run_client_loop(
          attach_escape,
          #[cfg(unix)]
          mouse_scroll_lines: config.mouse_scroll_lines,
 -        #[cfg(unix)]
          remote_image_paste_key: config.remote_image_paste_key,
          redraw_on_focus_gained: config.redraw_on_focus_gained,
-         draw_host_cursor,
-@@ -1518,26 +1507,7 @@ async fn run_client_loop(
+         repaint_pending: false,
+@@ -1560,26 +1549,7 @@ async fn run_client_loop(
                      state.remote_image_paste_key,
                  ) {
                      if let Some(image) = crate::platform::read_clipboard_image() {
@@ -930,7 +933,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
                          continue;
                      }
                      info!(
-@@ -1545,18 +1515,7 @@ async fn run_client_loop(
+@@ -1587,18 +1557,7 @@ async fn run_client_loop(
                      );
                  }
                  if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
@@ -950,7 +953,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
                      continue;
                  }
                  let msg = ClientMessage::Input { data };
-@@ -1590,6 +1549,23 @@ async fn run_client_loop(
+@@ -1632,6 +1591,23 @@ async fn run_client_loop(
                  if events.is_empty() {
                      continue;
                  }
@@ -974,7 +977,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
                  let raw_events = events
                      .iter()
                      .map(crate::protocol::ClientInputEvent::to_raw_input_event)
-@@ -1663,7 +1639,6 @@ async fn run_client_loop(
+@@ -1707,7 +1683,6 @@ async fn run_client_loop(
                          &mut state.sound_config,
                          &mut state.redraw_on_focus_gained,
                          &mut state.draw_host_cursor,
@@ -982,7 +985,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
                          &mut state.remote_image_paste_key,
                      );
                  }
-@@ -1772,11 +1747,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
+@@ -1826,11 +1801,38 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
      protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
  }
  
@@ -1022,7 +1025,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  fn client_remote_image_paste_key(
      config: &crate::config::Config,
  ) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-@@ -1797,7 +1799,7 @@ fn reload_local_client_config(
+@@ -1851,7 +1853,7 @@ fn reload_local_client_config(
      sound_config: &mut crate::config::SoundConfig,
      redraw_on_focus_gained: &mut bool,
      draw_host_cursor: &mut bool,
@@ -1031,7 +1034,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
          crossterm::event::KeyCode,
          crossterm::event::KeyModifiers,
      )>,
-@@ -1807,15 +1809,11 @@ fn reload_local_client_config(
+@@ -1861,15 +1863,11 @@ fn reload_local_client_config(
              for diagnostic in loaded.config.ui.sound.diagnostics() {
                  warn!(diagnostic = %diagnostic, "local sound config diagnostic");
              }
@@ -1048,7 +1051,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
              debug!("reloaded local client config");
          }
          Err(diagnostics) => {
-@@ -1913,12 +1911,67 @@ fn should_bridge_clipboard_image_paste(
+@@ -1967,12 +1965,67 @@ fn should_bridge_clipboard_image_paste(
      )
  }
  
@@ -1079,7 +1082,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
 +                crate::raw_input::RawInputEvent::Key(key)
 +                    if key.kind == crossterm::event::KeyEventKind::Press
 +                        && crate::config::terminal_key_matches_combo(
-+                            key,
++                            &key,
 +                            remote_image_paste_key,
 +                        )
 +            )
@@ -1116,7 +1119,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      let metadata = std::fs::metadata(&path).ok()?;
      if !metadata.is_file() {
          return None;
-@@ -1946,18 +1999,26 @@ fn image_path_from_terminal_drop(
+@@ -2000,18 +2053,26 @@ fn image_path_from_terminal_drop(
      data: &[u8],
      is_remote_client: bool,
  ) -> Option<(std::path::PathBuf, &'static str)> {
@@ -1149,7 +1152,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      let path = std::path::PathBuf::from(text);
      if !path.is_absolute() {
          return None;
-@@ -1974,7 +2035,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
+@@ -2028,7 +2089,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
      data.strip_prefix(START)?.strip_suffix(END)
  }
  
@@ -1157,7 +1160,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  fn strip_matching_path_quotes(text: &str) -> &str {
      if text.len() < 2 {
          return text;
-@@ -2005,7 +2065,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
+@@ -2059,7 +2119,6 @@ fn unescape_terminal_drop_path(text: &str) -> String {
      unescaped
  }
  
@@ -1165,7 +1168,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
  fn recognized_image_extension(extension: &str) -> Option<&'static str> {
      if extension.eq_ignore_ascii_case("png") {
          Some("png")
-@@ -2266,6 +2325,14 @@ mod tests {
+@@ -2425,6 +2484,14 @@ mod tests {
          }
      }
  
@@ -1180,7 +1183,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      #[test]
      fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
          assert_eq!(windows_virtual_terminal_input_mode(0x01f0), 0x03f0);
-@@ -2355,12 +2422,46 @@ mod tests {
+@@ -2514,12 +2581,49 @@ mod tests {
          ));
      }
  
@@ -1192,6 +1195,9 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
 +            code: crate::protocol::ClientKeyCode::Char('v'),
 +            modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
 +            kind: crate::protocol::ClientKeyKind::Press,
++            repeat_count: 1,
++            generated_text: None,
++            source: crate::protocol::ClientKeySource::Synthesized,
 +        };
 +        let empty_paste = crate::protocol::ClientInputEvent::Paste {
 +            text: String::new(),
@@ -1229,7 +1235,7 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      impl TempImageFile {
          fn new(extension: &str, bytes: &[u8]) -> Self {
              Self::with_name_fragment("test", extension, bytes)
-@@ -2380,7 +2481,6 @@ mod tests {
+@@ -2539,7 +2643,6 @@ mod tests {
          }
      }
  
@@ -1237,11 +1243,11 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
      impl Drop for TempImageFile {
          fn drop(&mut self) {
              let _ = std::fs::remove_file(&self.path);
-@@ -2440,7 +2540,20 @@ mod tests {
+@@ -2598,6 +2701,19 @@ mod tests {
+         .is_none());
      }
  
-     #[test]
--    fn graphics_bytes_are_written_after_blit_with_saved_cursor() {
++    #[test]
 +    fn remote_image_file_drop_bridge_reads_semantic_paste_path() {
 +        let file = TempImageFile::new("png", b"image-bytes");
 +        let events = [crate::protocol::ClientInputEvent::Paste {
@@ -1254,12 +1260,10 @@ index c09b01ba0bf266b1281533121c2c9b260d6eb5ae..3265c60b64a39d198bc896600e0b0a4a
 +        assert_eq!(image.bytes, b"image-bytes");
 +    }
 +
-+    #[test]
-+    fn graphics_bytes_are_written_inside_synchronized_blit_with_saved_cursor() {
+     #[test]
+     fn graphics_bytes_are_written_inside_synchronized_blit_with_saved_cursor() {
          let mut output = Vec::new();
-         write_encoded_frame_with_graphics(
-             &mut output,
-@@ -2883,14 +2996,12 @@ mod tests {
+@@ -3072,14 +3188,12 @@ mod tests {
          let mut sound_config = crate::config::SoundConfig::default();
          let mut redraw_on_focus_gained = true;
          let mut draw_host_cursor = false;
@@ -1527,7 +1531,7 @@ index c293a2785130207740ab610c60998c607eb994bc..fc2f93b0c2bb8e369aac9ea7cdd0a5cc
      fn temp_socket_marker_path(name: &str) -> PathBuf {
          std::env::temp_dir().join(format!("herdr-{name}-{}.sock", std::process::id()))
 diff --git a/src/main.rs b/src/main.rs
-index f555a13913264ef1903e83629a187aea57522fb8..0857225f3596f9fd135ca3c87f1676b40a084487 100644
+index 14aa78a52ad66fcf353c534e40e433d80c1e9a90..dcb647cbdfb69a4babef6a2c0dd764b424c55f6f 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -58,7 +58,6 @@ mod agent_resume;
@@ -1604,10 +1608,10 @@ index 30bea5ebc94bb83213ebbc0f6530903c5a19574a..abb5417dff289e371dbf127adbf38622
  pub fn raise_server_nofile_limit() {}
  
 diff --git a/src/platform/linux.rs b/src/platform/linux.rs
-index 6557b41bf4f796069b488ac556ff2527373c2fa3..69001bea8ac48b34eacb1485274bf1bdd4d356f4 100644
+index 76568ad0b5ef8271b7b92bf4cce66e420a4ffa39..f436afccc62881279e24b1391305aed542738b5e 100644
 --- a/src/platform/linux.rs
 +++ b/src/platform/linux.rs
-@@ -11,6 +11,12 @@ use super::{
+@@ -12,6 +12,12 @@ use super::{
      LimitedRead, Signal,
  };
  
@@ -1618,10 +1622,10 @@ index 6557b41bf4f796069b488ac556ff2527373c2fa3..69001bea8ac48b34eacb1485274bf1bd
 +};
 +
  const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
- 
- #[derive(Debug, Clone, PartialEq, Eq)]
+ const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
+ const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
 diff --git a/src/platform/macos.rs b/src/platform/macos.rs
-index 161354d70670c94d7fa5b2e95cd75cebfbf7a0d9..bae0a2b846e328ed5bd437253d08c1feab2e3279 100644
+index e9c89ede2b9c040eba570573ea77b25d8689e0c0..ba5b45b378ed45dcf22256ea7e49787f6e37e758 100644
 --- a/src/platform/macos.rs
 +++ b/src/platform/macos.rs
 @@ -12,6 +12,12 @@ use super::{
@@ -1636,12 +1640,12 @@ index 161354d70670c94d7fa5b2e95cd75cebfbf7a0d9..bae0a2b846e328ed5bd437253d08c1fe
 +
  const PROC_PGRP_ONLY: u32 = 2;
  const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
- const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+ 
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
-index fbde21b74786c14f2cfa82fcf1c008f6714e155d..0a4fd1b179ab8e541108f8e34930724eb3bc8201 100644
+index 38d797d137499f7b90f7ad96bc2149bbfbafdb33..23520e3a55dd6f33acfa342dcfdafe0db57e7c1c 100644
 --- a/src/platform/mod.rs
 +++ b/src/platform/mod.rs
-@@ -53,12 +53,19 @@ pub(crate) struct PlatformCapabilities {
+@@ -60,7 +60,7 @@ pub(crate) struct PlatformCapabilities {
  pub(crate) const fn capabilities() -> PlatformCapabilities {
      PlatformCapabilities {
          live_handoff: cfg!(unix),
@@ -1650,6 +1654,8 @@ index fbde21b74786c14f2cfa82fcf1c008f6714e155d..0a4fd1b179ab8e541108f8e34930724e
          direct_terminal_attach: cfg!(unix),
          preserve_legacy_doubled_escape_input: cfg!(target_os = "macos"),
      }
+@@ -71,6 +71,13 @@ pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std:
+     command.spawn().map(|child| child.id())
  }
  
 +#[derive(Debug, Clone)]
@@ -1662,7 +1668,7 @@ index fbde21b74786c14f2cfa82fcf1c008f6714e155d..0a4fd1b179ab8e541108f8e34930724e
  #[cfg(any(target_os = "linux", target_os = "macos"))]
  pub fn detach_server_daemon_command(command: &mut std::process::Command) {
      use std::os::unix::process::CommandExt;
-@@ -86,14 +93,11 @@ pub struct ClipboardCommand {
+@@ -137,14 +144,11 @@ pub struct ClipboardCommand {
  }
  
  #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1677,7 +1683,7 @@ index fbde21b74786c14f2cfa82fcf1c008f6714e155d..0a4fd1b179ab8e541108f8e34930724e
  #[derive(Debug, PartialEq, Eq)]
  pub(crate) enum LimitedRead {
      Empty,
-@@ -101,7 +105,6 @@ pub(crate) enum LimitedRead {
+@@ -152,7 +156,6 @@ pub(crate) enum LimitedRead {
      Oversized,
  }
  
@@ -1685,7 +1691,7 @@ index fbde21b74786c14f2cfa82fcf1c008f6714e155d..0a4fd1b179ab8e541108f8e34930724e
  pub(crate) fn read_limited_reader(
      mut reader: impl std::io::Read,
      max_bytes: usize,
-@@ -144,6 +147,9 @@ mod linux;
+@@ -195,6 +198,9 @@ mod linux;
  #[cfg(target_os = "linux")]
  pub use linux::*;
  
@@ -1825,20 +1831,20 @@ index 0000000000000000000000000000000000000000..1944e3595feb737a38055bad0b0f6256
 +    }
 +}
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
-index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e3af126f4 100644
+index 55e0fd0b521eb283cbe361178730078db6d7e1fa..e3d9761014b79e10ae5a0c8e91a9fded952a2480 100644
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -4,7 +4,7 @@ use std::{
-     mem::{size_of, MaybeUninit},
-     path::PathBuf,
+@@ -7,7 +7,7 @@ use std::{
      ptr::{copy_nonoverlapping, null_mut},
--    sync::{Arc, Mutex},
-+    sync::{Arc, Mutex, OnceLock},
-     time::{Duration, Instant},
+     sync::{
+         atomic::{AtomicU64, Ordering as AtomicOrdering},
+-        Arc, LazyLock, Mutex,
++        Arc, LazyLock, Mutex, OnceLock,
+     },
+     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
  };
- 
-@@ -17,7 +17,10 @@ use windows_sys::{
-         },
+@@ -22,7 +22,10 @@ use windows_sys::{
+         Globalization::{CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN},
          System::{
              Console::GetConsoleWindow,
 -            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
@@ -1849,18 +1855,20 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
              Diagnostics::{
                  Debug::ReadProcessMemory,
                  ToolHelp::{
-@@ -26,8 +29,8 @@ use windows_sys::{
-                 },
+@@ -35,10 +38,10 @@ use windows_sys::{
+                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
              },
-             JobObjects::IsProcessInJob,
--            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+             Memory::{
+-                GlobalAlloc, GlobalLock, GlobalUnlock, VirtualQueryEx, GMEM_MOVEABLE,
++                GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, VirtualQueryEx, GMEM_MOVEABLE,
+                 MEMORY_BASIC_INFORMATION,
+             },
 -            Ole::CF_UNICODETEXT,
-+            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
 +            Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
              Threading::{
-                 GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
-                 CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-@@ -40,6 +43,8 @@ use windows_sys::{
+                 GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+                 QueryFullProcessImageNameW, TerminateProcess, CREATE_NO_WINDOW, DETACHED_PROCESS,
+@@ -68,6 +71,8 @@ use windows_sys::{
  
  use super::{ClipboardImage, ForegroundJob, Signal};
  
@@ -1868,8 +1876,8 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
 +
  const STILL_ACTIVE: u32 = 259;
  const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(250);
- 
-@@ -56,6 +61,92 @@ struct ProcessSnapshotCache {
+ const PANE_RUNTIME_MARKER_ENV_VAR: &str = "HERDR_PANE_RUNTIME_ID";
+@@ -146,6 +151,92 @@ struct CachedGitBashProcess {
  
  static FOREGROUND_PROCESS_SNAPSHOT_CACHE: Mutex<ProcessSnapshotCache> =
      Mutex::new(ProcessSnapshotCache { cached: None });
@@ -1962,7 +1970,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
  
  pub(crate) fn should_draw_host_cursor_by_default() -> bool {
      true
-@@ -276,6 +367,14 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+@@ -556,6 +647,14 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
          .filter(|path| path.is_absolute())
  }
  
@@ -1977,7 +1985,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
  fn select_pane_foreground_job(
      shell_pid: u32,
      entries: &[WindowsProcessEntry],
-@@ -660,9 +759,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
+@@ -1242,9 +1341,68 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
      }
  }
  
@@ -2048,7 +2056,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
      None
  }
  
-@@ -678,6 +836,8 @@ struct ProcessHandle(HANDLE);
+@@ -1362,6 +1520,8 @@ struct ProcessHandle(HANDLE);
  
  struct ClipboardGuard;
  
@@ -2057,7 +2065,7 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
  impl Drop for ClipboardGuard {
      fn drop(&mut self) {
          unsafe {
-@@ -686,6 +846,14 @@ impl Drop for ClipboardGuard {
+@@ -1370,6 +1530,14 @@ impl Drop for ClipboardGuard {
      }
  }
  
@@ -2072,9 +2080,9 @@ index 317ac495126cc7ea8472c5db442ba637db628dc8..b202d3efde61c69b033c952fb9260c9e
  impl ProcessHandle {
      fn open(pid: u32, access: u32) -> Option<Self> {
          if pid == 0 {
-@@ -799,6 +967,18 @@ mod tests {
-         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
-     };
+@@ -1893,6 +2061,18 @@ mod tests {
+         );
+     }
  
 +    #[test]
 +    fn current_process_executable_is_read_from_process_parameters() {
@@ -2633,15 +2641,16 @@ index 0000000000000000000000000000000000000000..cfe69a632134d6961c941d67d15c7673
 +    }
 +}
 diff --git a/src/plugin_command.rs b/src/plugin_command.rs
-index a0f7189413c60fc3b93efff7e6ecba3df2a7e1cc..9ae5d719fa1d15ea90e491affa999780b1b34c67 100644
+index 6b639f0de9bbce17beeefd4c5e8daf90aa49c278..b42da399dcf96093a61be2bd08a1843fbe33cb8e 100644
 --- a/src/plugin_command.rs
 +++ b/src/plugin_command.rs
-@@ -38,7 +38,7 @@ fn command_for_program(program: &str) -> Command {
+@@ -50,7 +50,8 @@ fn command_for_program(program: &OsStr) -> Command {
  }
  
  #[cfg(windows)]
--fn resolve_windows_program(program: &str) -> Option<PathBuf> {
-+pub(crate) fn resolve_windows_program(program: &str) -> Option<PathBuf> {
+-fn resolve_windows_program(program: &OsStr) -> Option<PathBuf> {
++pub(crate) fn resolve_windows_program(program: impl AsRef<OsStr>) -> Option<PathBuf> {
++    let program = program.as_ref();
      if has_path_separator(program) {
          return None;
      }
@@ -6436,7 +6445,7 @@ index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d
 +    }
 +}
 diff --git a/src/remote/unix.rs b/src/remote/unix.rs
-index 813091ba45e7c798dfbb6ab87fe455cab9317376..b776871efa79e4e73c2ab385c3372bfe8aa6c7f3 100644
+index 6fe927c1cc0f99c4f2fbfd99bf9b758f4acfd15e..b776871efa79e4e73c2ab385c3372bfe8aa6c7f3 100644
 --- a/src/remote/unix.rs
 +++ b/src/remote/unix.rs
 @@ -1,195 +1,12 @@
@@ -6677,7 +6686,7 @@ index 813091ba45e7c798dfbb6ab87fe455cab9317376..b776871efa79e4e73c2ab385c3372bfe
              return Ok(());
          }
          return Err(io::Error::other(
-@@ -237,2865 +72,3 @@ fn ensure_remote_server_running() -> io::Result<()> {
+@@ -237,2875 +72,3 @@ fn ensure_remote_server_running() -> io::Result<()> {
      crate::server::autodetect::spawn_server_daemon()?;
      crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
  }
@@ -7286,6 +7295,16 @@ index 813091ba45e7c798dfbb6ab87fe455cab9317376..b776871efa79e4e73c2ab385c3372bfe
 -    remote_herdr: &RemoteHerdr,
 -) -> io::Result<Option<RemoteHerdr>> {
 -    let output = ssh.user_shell_output("command -v herdr")?;
+-    if output.status.success() {
+-        let stdout = String::from_utf8_lossy(&output.stdout);
+-        if let Some(candidate) = remote_herdr_from_path_discovery(remote_herdr, &stdout) {
+-            return Ok(Some(candidate));
+-        }
+-    }
+-
+-    // Non-POSIX login shells such as xonsh reject `command -v`; retry through
+-    // /bin/sh while retaining the login-shell probe for shell-initialized PATHs.
+-    let output = ssh.sh_output("command -v herdr\n")?;
 -    if !output.status.success() {
 -        return Ok(None);
 -    }
@@ -9679,7 +9698,7 @@ index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346
 +    }
 +}
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..46024ddfd3f16a7839c7c86e55c3d2a6e535f47f 100644
+index 337c388f9a2bedd4e72159317e160e8bab6d92d0..b6898af4409078b4bea8e7b96670f996e5c06175 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
 @@ -31,7 +31,6 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -9750,10 +9769,10 @@ index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..46024ddfd3f16a7839c7c86e55c3d2a6
      let Some(status) = read_server_status()? else {
          return Err(io::Error::other(format!(
 diff --git a/src/server/client_transport.rs b/src/server/client_transport.rs
-index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe54f889ce9 100644
+index ec41ec13afba50ef17509527249d39a0b5810e72..198b91c7a5f9869d489f5a3f0200e3f7aa2274ed 100644
 --- a/src/server/client_transport.rs
 +++ b/src/server/client_transport.rs
-@@ -404,23 +404,6 @@ fn input_event_limit(events: &[ClientInputEvent]) -> InputEventLimit {
+@@ -444,23 +444,6 @@ fn input_event_limit(events: &[ClientInputEvent]) -> InputEventLimit {
      }
  }
  
@@ -9777,7 +9796,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
  #[cfg(not(windows))]
  fn set_client_recv_timeout(
      stream: &LocalStream,
-@@ -431,6 +414,23 @@ fn set_client_recv_timeout(
+@@ -471,6 +454,23 @@ fn set_client_recv_timeout(
      stream.set_recv_timeout(timeout)
  }
  
@@ -9801,7 +9820,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
  /// Handles the client handshake on a blocking thread.
  ///
  /// Reads the `Hello` message, validates the version, sends `Welcome`,
-@@ -445,6 +445,7 @@ pub(crate) fn handle_client_handshake(
+@@ -485,6 +485,7 @@ pub(crate) fn handle_client_handshake(
      // the handshake thread needs blocking I/O for read_message/write_message.
      stream.set_nonblocking(false)?;
  
@@ -9809,7 +9828,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
      set_client_recv_timeout(
          &stream,
          Some(HANDSHAKE_TIMEOUT),
-@@ -453,7 +454,7 @@ pub(crate) fn handle_client_handshake(
+@@ -493,7 +494,7 @@ pub(crate) fn handle_client_handshake(
      )?;
  
      // Read the Hello message.
@@ -9818,7 +9837,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
          Ok(msg) => msg,
          Err(protocol::FramingError::UnexpectedEof) => {
              debug!(client_id, "client disconnected before handshake");
-@@ -549,6 +550,7 @@ pub(crate) fn handle_client_handshake(
+@@ -589,6 +590,7 @@ pub(crate) fn handle_client_handshake(
      };
      protocol::write_message(&mut stream, &welcome).map_err(|e| io::Error::other(e.to_string()))?;
  
@@ -9826,7 +9845,7 @@ index 743a108f894aa1b9ebdfda16b1d9507047cb5b4b..9a400e9c174d1703f9f747b1f1df1fe5
      set_client_recv_timeout(
          &stream,
          None,
-@@ -841,6 +843,19 @@ mod tests {
+@@ -892,6 +894,19 @@ mod tests {
          (client, server, TestSocketPath(path))
      }
  
@@ -9884,10 +9903,10 @@ index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df72
  }
  
 diff --git a/src/server/headless.rs b/src/server/headless.rs
-index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799048b60bb 100644
+index 30d1e3a5e7a392f8a9b6515654c03413539fb56b..e7250a70b84a4c5aed35386aac7819876666170c 100644
 --- a/src/server/headless.rs
 +++ b/src/server/headless.rs
-@@ -269,6 +269,8 @@ pub struct HeadlessServer {
+@@ -322,6 +322,8 @@ pub struct HeadlessServer {
      /// Shared pane runtime size derived from the foreground client,
      /// or MIN_COLS × MIN_ROWS when no clients are connected.
      effective_size: (u16, u16),
@@ -9896,15 +9915,15 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
      /// Flag set when shutdown is initiated.
      shutting_down: bool,
      /// Flag set while exporting live PTYs to a replacement server.
-@@ -458,6 +460,7 @@ impl HeadlessServer {
-             terminal_attach_owners: HashMap::new(),
+@@ -513,6 +515,7 @@ impl HeadlessServer {
+             deferred_alt_screen_reads: Vec::new(),
              next_activity_stamp: 1,
              effective_size: (MIN_COLS, MIN_ROWS),
 +            startup_cwd: None,
              shutting_down: false,
              handoff_in_progress: false,
              #[cfg(unix)]
-@@ -766,8 +769,11 @@ impl HeadlessServer {
+@@ -860,8 +863,11 @@ impl HeadlessServer {
  
          if self.app.state.request_new_workspace {
              self.app.state.request_new_workspace = false;
@@ -9916,7 +9935,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -781,8 +787,11 @@ impl HeadlessServer {
+@@ -875,8 +881,11 @@ impl HeadlessServer {
          if self.app.state.request_new_tab {
              self.app.state.request_new_tab = false;
              let label = self.app.state.requested_new_tab_name.take();
@@ -9928,7 +9947,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -806,12 +815,15 @@ impl HeadlessServer {
+@@ -900,12 +909,15 @@ impl HeadlessServer {
          }
  
          if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
@@ -9944,7 +9963,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -2702,8 +2714,17 @@ impl HeadlessServer {
+@@ -2820,8 +2832,17 @@ impl HeadlessServer {
                  if first_app_client {
                      self.app.mark_git_status_refresh_due(Instant::now());
                  }
@@ -9964,7 +9983,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
                  self.nudge_handoff_panes_on_first_client_attach();
                  true
              }
-@@ -4200,6 +4221,7 @@ pub fn run_server() -> io::Result<()> {
+@@ -4670,6 +4691,7 @@ pub fn run_server() -> io::Result<()> {
      }
  
      let loaded_config = config::Config::load();
@@ -9972,7 +9991,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
      let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
      let event_hub = api::EventHub::default();
  
-@@ -4230,8 +4252,6 @@ pub fn run_server() -> io::Result<()> {
+@@ -4700,8 +4722,6 @@ pub fn run_server() -> io::Result<()> {
              api_rx,
              event_hub,
          );
@@ -9981,7 +10000,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
          // The server runs headless — disable local notification side effects.
          // Sound and terminal notifications are forwarded to connected clients
          // as ServerMessage::Notify instead of emitted by the server process.
-@@ -4256,6 +4276,7 @@ pub fn run_server() -> io::Result<()> {
+@@ -4726,6 +4746,7 @@ pub fn run_server() -> io::Result<()> {
              }
              Err(err) => return Err(err),
          };
@@ -9989,7 +10008,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
  
          info!(
              api_socket = %api::socket_path().display(),
-@@ -4273,8 +4294,12 @@ pub fn run_server() -> io::Result<()> {
+@@ -4743,8 +4764,12 @@ pub fn run_server() -> io::Result<()> {
      result
  }
  
@@ -10004,7 +10023,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
          return;
      };
  
-@@ -4286,6 +4311,9 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
+@@ -4756,6 +4781,9 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
          return;
      }
  
@@ -10014,15 +10033,15 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
      match app.create_workspace_with_options(cwd.clone(), true) {
          Ok(_) => {
              info!(cwd = %cwd.display(), "created startup workspace");
-@@ -4488,6 +4516,7 @@ mod tests {
-             terminal_attach_owners: HashMap::new(),
+@@ -4996,6 +5024,7 @@ mod tests {
+             deferred_alt_screen_reads: Vec::new(),
              next_activity_stamp: 1,
              effective_size: (MIN_COLS, MIN_ROWS),
 +            startup_cwd: None,
              shutting_down: false,
              handoff_in_progress: false,
              #[cfg(unix)]
-@@ -4728,6 +4757,158 @@ mod tests {
+@@ -5236,6 +5265,158 @@ mod tests {
          shutdown_test_runtimes(&mut server);
      }
  
@@ -10181,7 +10200,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
      fn test_client_writer() -> (
          ClientWriter,
          std::sync::mpsc::Receiver<Vec<u8>>,
-@@ -4871,6 +5052,60 @@ new_tab = "prefix+t"
+@@ -5411,6 +5592,60 @@ new_tab = "prefix+t"
              .any(|binding| binding.label == "prefix+c"));
      }
  
@@ -10242,7 +10261,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
      #[test]
      fn local_keybinding_client_hides_server_keybinding_warnings() {
          let mut server = test_headless_server();
-@@ -7323,6 +7558,7 @@ next_tab = ""
+@@ -8194,6 +8429,7 @@ next_tab = ""
                  .current_size(),
              expected
          );
@@ -10251,10 +10270,10 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799
  
      #[test]
 diff --git a/src/ui.rs b/src/ui.rs
-index 6d5c02f1714745cf6817481d0d68bd1738e3e83b..1f5c9774ce1a34f294fd3703077105a250808c70 100644
+index 60143fe448a9db1ab64bf8bcb3fc121f718d3574..c9de720840c9b3c5dd6a86a0e49ffc065128d9b9 100644
 --- a/src/ui.rs
 +++ b/src/ui.rs
-@@ -198,7 +198,15 @@ fn desktop_tab_bar_and_terminal_area(
+@@ -193,7 +193,15 @@ fn desktop_tab_bar_and_terminal_area(
      ws: &crate::workspace::Workspace,
      main_area: Rect,
  ) -> (Rect, Rect) {
@@ -10269,9 +10288,9 @@ index 6d5c02f1714745cf6817481d0d68bd1738e3e83b..1f5c9774ce1a34f294fd3703077105a2
 +) -> (Rect, Rect) {
 +    let hide_single_tab_bar = app.hide_tab_bar_when_single_tab && tab_count == 1;
      if !hide_single_tab_bar && main_area.height > 1 {
-         let [tab_bar_rect, terminal_area] =
-             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main_area);
-@@ -208,18 +216,7 @@ fn desktop_tab_bar_and_terminal_area(
+         match app.tab_bar_position {
+             crate::config::TabBarPositionConfig::Top => {
+@@ -212,18 +220,7 @@ fn desktop_tab_bar_and_terminal_area(
      }
  }
  
@@ -10291,7 +10310,7 @@ index 6d5c02f1714745cf6817481d0d68bd1738e3e83b..1f5c9774ce1a34f294fd3703077105a2
      let sidebar_w = if app.sidebar_collapsed {
          match app.sidebar_collapsed_mode {
              crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
-@@ -232,6 +229,42 @@ fn compute_view_internal(
+@@ -236,6 +233,42 @@ fn compute_view_internal(
  
      let [sidebar_area, main_area] =
          Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
@@ -10334,7 +10353,7 @@ index 6d5c02f1714745cf6817481d0d68bd1738e3e83b..1f5c9774ce1a34f294fd3703077105a2
  
      let (tab_bar_rect, terminal_area) = app
          .active
-@@ -326,14 +359,8 @@ fn compute_mobile_view(
+@@ -330,14 +363,8 @@ fn compute_mobile_view(
      resize_panes: bool,
      cell_size: crate::kitty_graphics::HostCellSize,
  ) {
@@ -10352,10 +10371,10 @@ index 6d5c02f1714745cf6817481d0d68bd1738e3e83b..1f5c9774ce1a34f294fd3703077105a2
      if app.mode == Mode::Navigate {
          let switcher_viewport_h = area.height.saturating_sub(header_h + 1);
 diff --git a/src/update.rs b/src/update.rs
-index eac917bf6bc2e27f116dd7e674765c4f48b311d3..b874c117d472ba82f23dcee5bba652f9ce752efc 100644
+index 3455841d2a90da519499f0c41daf5557c899cb95..2120fb3c9cad9fd20cfae7dee307298120d7fca6 100644
 --- a/src/update.rs
 +++ b/src/update.rs
-@@ -1822,6 +1822,11 @@ pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
+@@ -1830,6 +1830,11 @@ pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
          || is_nix_store_exe_path_following_links(path)
  }
  
@@ -10369,4 +10388,3 @@ index eac917bf6bc2e27f116dd7e674765c4f48b311d3..b874c117d472ba82f23dcee5bba652f9
          return true;
 -- 
 2.55.0.windows.3
-
