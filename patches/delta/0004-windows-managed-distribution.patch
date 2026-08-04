@@ -1,4 +1,4 @@
-From 23212042d245d6bae03736a8d3a8305b9e9a1ae5 Mon Sep 17 00:00:00 2001
+From 39650ca534f7686520836287979dc62c10e2cbe0 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -17,15 +17,15 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
  packaging/windows/installer/project.nsi       |  447 +++
- packaging/windows/managed-skill-hashes.txt    |    2 +
+ packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
- scripts/package_windows_installer.ps1         |  486 +++
+ scripts/package_windows_installer.ps1         |  492 +++
  scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  764 ++++
+ scripts/test_windows_installer.py             |  768 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  432 +++
  scripts/windows_installer_test.ps1            |  956 +++++
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  526 ++-
- 44 files changed, 9280 insertions(+), 371 deletions(-)
+ 44 files changed, 9291 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -55170,12 +55170,13 @@ index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe79
 +SectionEnd
 diff --git a/packaging/windows/managed-skill-hashes.txt b/packaging/windows/managed-skill-hashes.txt
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ab18a9ffff00212c29ed096c503e2842afc45fe
+index 0000000000000000000000000000000000000000..2ab1a2278d6b249d176a75308ffa8c01081726d7
 --- /dev/null
 +++ b/packaging/windows/managed-skill-hashes.txt
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,3 @@
 +herdr-managed-skill-hashes-v1
 +0786182f02ebf92708e09d82d79e4614d1a9c30bfc337643cc2af1d0fb9db29f
++2752439d23fcc16235e1292599e7f7b31635166d6b01221d7bf759da5d571072
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
 index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c9933aeb6ec1 100644
 --- a/scripts/package_windows_conpty.py
@@ -55286,10 +55287,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0ec66bf4a
+index 0000000000000000000000000000000000000000..e241579f088c41bb6bb37458d9c5fa4b7b91b012
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,492 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -55668,6 +55669,10 @@ index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0
 +    $skillValidationText -cnotmatch '(?m)^name: herdr$') {
 +    throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
 +}
++$canonicalSkillBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillValidationText)
++$canonicalSkillHash = ([BitConverter]::ToString(
++    [Security.Cryptography.SHA256]::HashData($canonicalSkillBytes)
++)).Replace("-", "").ToLowerInvariant()
 +$skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
 +if ($skillHashManifestText.Contains("`r") -or
 +    -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
@@ -55686,8 +55691,8 @@ index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0
 +    }
 +    $previousManagedSkillHash = $managedSkillHash
 +}
-+if ($managedSkillHashes -cnotcontains (Get-Sha256 -Path $skillSource)) {
-+    throw "Current skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
++if ($managedSkillHashes -cnotcontains $canonicalSkillHash) {
++    throw "Canonical skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
 +}
 +Assert-X64Pe -Path $LauncherExe
 +$payloadExe = Join-Path $StageDir "herdr.exe"
@@ -55723,6 +55728,8 @@ index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0
 +$workingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-nsis-" + [Guid]::NewGuid().ToString("N"))
 +New-Item -ItemType Directory -Path $workingRoot | Out-Null
 +try {
++    $canonicalSkillSource = Join-Path $workingRoot "SKILL.md"
++    [IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)
 +    $toolRoot = Join-Path $workingRoot "tool"
 +    Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
 +    $makensis = Join-Path $toolRoot "nsis-$NsisVersion\makensis.exe"
@@ -55743,7 +55750,7 @@ index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0
 +        "/DARG_STAGE_DIR=$StageDir",
 +        "/DARG_LAUNCHER_EXE=$LauncherExe",
 +        "/DARG_HELPER_PS1=$helperScript",
-+        "/DARG_SKILL_MD=$skillSource",
++        "/DARG_SKILL_MD=$canonicalSkillSource",
 +        "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
 +        "/DARG_ARTWORK_DIR=$artworkDir",
 +        "/DINFO_PRODUCTNAME=$ProductName",
@@ -56303,10 +56310,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..17d1b4e48983ac6979bf5366fa8a1bd6c563256b
+index 0000000000000000000000000000000000000000..9ef9ee637a3730e4c60b6d427dbd057d80b60745
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,764 @@
+@@ -0,0 +1,768 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56384,7 +56391,9 @@ index 0000000000000000000000000000000000000000..17d1b4e48983ac6979bf5366fa8a1bd6
 +        hashes = lines[1:]
 +        self.assertEqual(hashes, sorted(set(hashes)))
 +        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes))
-+        self.assertIn(hashlib.sha256(SKILL.read_bytes()).hexdigest(), hashes)
++        canonical_skill = SKILL.read_bytes().replace(b"\r\n", b"\n")
++        self.assertNotIn(b"\r", canonical_skill)
++        self.assertIn(hashlib.sha256(canonical_skill).hexdigest(), hashes)
 +
 +    def test_helper_owns_exact_markers_and_managed_layout(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
@@ -56483,7 +56492,9 @@ index 0000000000000000000000000000000000000000..17d1b4e48983ac6979bf5366fa8a1bd6
 +            '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
 +            packager,
 +        )
-+        self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
++        self.assertIn('$canonicalSkillSource = Join-Path $workingRoot "SKILL.md"', packager)
++        self.assertIn("[IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)", packager)
++        self.assertIn('"/DARG_SKILL_MD=$canonicalSkillSource"', packager)
 +        self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
 +        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
 +        self.assertIn("Unknown universal SKILL.md was overwritten", lifecycle)

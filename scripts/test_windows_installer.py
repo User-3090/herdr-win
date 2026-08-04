@@ -75,7 +75,9 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         hashes = lines[1:]
         self.assertEqual(hashes, sorted(set(hashes)))
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes))
-        self.assertIn(hashlib.sha256(SKILL.read_bytes()).hexdigest(), hashes)
+        canonical_skill = SKILL.read_bytes().replace(b"\r\n", b"\n")
+        self.assertNotIn(b"\r", canonical_skill)
+        self.assertIn(hashlib.sha256(canonical_skill).hexdigest(), hashes)
 
     def test_helper_owns_exact_markers_and_managed_layout(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -172,7 +174,9 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
             packager,
         )
-        self.assertIn('"/DARG_SKILL_MD=$skillSource"', packager)
+        self.assertIn('$canonicalSkillSource = Join-Path $workingRoot "SKILL.md"', packager)
+        self.assertIn("[IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)", packager)
+        self.assertIn('"/DARG_SKILL_MD=$canonicalSkillSource"', packager)
         self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
         self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
         self.assertIn("Unknown universal SKILL.md was overwritten", lifecycle)

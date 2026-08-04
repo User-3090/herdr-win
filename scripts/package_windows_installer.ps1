@@ -376,6 +376,10 @@ if ($skillValidationText.Contains("`r") -or
     $skillValidationText -cnotmatch '(?m)^name: herdr$') {
     throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
 }
+$canonicalSkillBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillValidationText)
+$canonicalSkillHash = ([BitConverter]::ToString(
+    [Security.Cryptography.SHA256]::HashData($canonicalSkillBytes)
+)).Replace("-", "").ToLowerInvariant()
 $skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
 if ($skillHashManifestText.Contains("`r") -or
     -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
@@ -394,8 +398,8 @@ foreach ($managedSkillHash in $managedSkillHashes) {
     }
     $previousManagedSkillHash = $managedSkillHash
 }
-if ($managedSkillHashes -cnotcontains (Get-Sha256 -Path $skillSource)) {
-    throw "Current skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
+if ($managedSkillHashes -cnotcontains $canonicalSkillHash) {
+    throw "Canonical skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
 }
 Assert-X64Pe -Path $LauncherExe
 $payloadExe = Join-Path $StageDir "herdr.exe"
@@ -431,6 +435,8 @@ if (-not (Test-Path -LiteralPath $outputParent)) {
 $workingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-nsis-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $workingRoot | Out-Null
 try {
+    $canonicalSkillSource = Join-Path $workingRoot "SKILL.md"
+    [IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)
     $toolRoot = Join-Path $workingRoot "tool"
     Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
     $makensis = Join-Path $toolRoot "nsis-$NsisVersion\makensis.exe"
@@ -451,7 +457,7 @@ try {
         "/DARG_STAGE_DIR=$StageDir",
         "/DARG_LAUNCHER_EXE=$LauncherExe",
         "/DARG_HELPER_PS1=$helperScript",
-        "/DARG_SKILL_MD=$skillSource",
+        "/DARG_SKILL_MD=$canonicalSkillSource",
         "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
         "/DARG_ARTWORK_DIR=$artworkDir",
         "/DINFO_PRODUCTNAME=$ProductName",
