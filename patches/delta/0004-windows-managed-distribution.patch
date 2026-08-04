@@ -1,4 +1,4 @@
-From dd5f1882cca3af465c5710c11f32514a20f6fe58 Mon Sep 17 00:00:00 2001
+From e25e4fe3c3736708d7db49497f881746e17599e5 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3094 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 3105 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -25,7 +25,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  748 ++++
+ scripts/test_windows_installer.py             |  764 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  432 +++
  scripts/windows_installer_test.ps1            |  956 +++++
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  526 ++-
- 44 files changed, 9224 insertions(+), 371 deletions(-)
+ 44 files changed, 9251 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -151,10 +151,10 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..df3f90a3db46404519b908daa7de42ed6019fc1e
+index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857fc3b8e761
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3094 @@
+@@ -0,0 +1,3105 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
@@ -168,6 +168,7 @@ index 0000000000000000000000000000000000000000..df3f90a3db46404519b908daa7de42ed
 +    [string]$SkillSourcePath,
 +    [string]$SkillHashManifestPath,
 +    [string]$ProductName = "Herdr",
++    [string]$PackageRoot,
 +    [string]$BuildId,
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
@@ -3194,6 +3195,16 @@ index 0000000000000000000000000000000000000000..df3f90a3db46404519b908daa7de42ed
 +    try {
 +        switch ($Action) {
 +            "Install" {
++                if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
++                    throw "PackageRoot is required for Install."
++                }
++                $PackageRoot = Get-HerdrFullPath -Path $PackageRoot
++                $StageDir = Join-Path $PackageRoot "payload"
++                $LauncherPath = Join-Path $PackageRoot "app-launcher.exe"
++                $UninstallerPath = Join-Path $PackageRoot "uninstall.exe"
++                $HelperSourcePath = Join-Path $PackageRoot "installer-helper.ps1"
++                $SkillSourcePath = Join-Path $PackageRoot "skill\SKILL.md"
++                $SkillHashManifestPath = Join-Path $PackageRoot "skill\managed-skill-hashes.txt"
 +                $result = Invoke-HerdrInstall `
 +                    -InstallRoot $InstallRoot `
 +                    -StageDir $StageDir `
@@ -54706,7 +54717,7 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..68a5fb51e1eae1b6e9f8bcf504e7475ea5004d5d
+index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe797c8adfef
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
 @@ -0,0 +1,447 @@
@@ -55118,7 +55129,7 @@ index 0000000000000000000000000000000000000000..68a5fb51e1eae1b6e9f8bcf504e7475e
 +
 +installer_inputs_ready:
 +  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -SkillHashManifestPath "$PLUGINSDIR\skill\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -56242,10 +56253,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..f1e8e536c8a06461a497afb309e9c0ad9888d8ca
+index 0000000000000000000000000000000000000000..f2930e1572fa570639fe19a9ae0845af2ee9686e
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,764 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56411,10 +56422,12 @@ index 0000000000000000000000000000000000000000..f1e8e536c8a06461a497afb309e9c0ad
 +        self.assertIn(
 +            '/oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"', nsi
 +        )
-+        self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
 +        self.assertIn(
-+            '-SkillHashManifestPath "$PLUGINSDIR\\skill\\managed-skill-hashes.txt"',
-+            nsi,
++            '$SkillSourcePath = Join-Path $PackageRoot "skill\\SKILL.md"', helper
++        )
++        self.assertIn(
++            '$SkillHashManifestPath = Join-Path $PackageRoot "skill\\managed-skill-hashes.txt"',
++            helper,
 +        )
 +        self.assertIn(
 +            '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
@@ -56590,6 +56603,20 @@ index 0000000000000000000000000000000000000000..f1e8e536c8a06461a497afb309e9c0ad
 +        )
 +        self.assertNotIn("SendNotifyMessage", nsi)
 +        self.assertIn('-ProductName "${INFO_DISTRIBUTIONNAME}"', nsi)
++        install_command = next(
++            line for line in nsi.splitlines() if " -Action Install " in line
++        )
++        self.assertIn('-PackageRoot "$PLUGINSDIR"', install_command)
++        self.assertEqual(install_command.count("$PLUGINSDIR"), 2)
++        for redundant_path_argument in (
++            "-StageDir",
++            "-LauncherPath",
++            "-UninstallerPath",
++            "-HelperSourcePath",
++            "-SkillSourcePath",
++            "-SkillHashManifestPath",
++        ):
++            self.assertNotIn(redundant_path_argument, install_command)
 +        self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
 +        self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
 +        self.assertNotIn("LANG_GERMAN", nsi)
