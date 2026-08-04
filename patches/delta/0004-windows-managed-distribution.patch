@@ -1,4 +1,4 @@
-From 39650ca534f7686520836287979dc62c10e2cbe0 Mon Sep 17 00:00:00 2001
+From cdee0dff03e0a5fb0be7578ec20ee870714bc244 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -48,8 +48,8 @@ Refs ogulcancelik/herdr#1947
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  526 ++-
- 44 files changed, 9291 insertions(+), 371 deletions(-)
+ src/update.rs                                 |  531 ++-
+ 44 files changed, 9296 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -61382,7 +61382,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994da7d68b8 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061f6e83286 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -61752,7 +61752,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 +    root: PathBuf,
 +    path: PathBuf,
 +}
-+
+ 
 +#[cfg(windows)]
 +impl Drop for DownloadedWindowsInstaller {
 +    fn drop(&mut self) {
@@ -61803,7 +61803,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 +        .ok_or("selected Windows update asset has an invalid setup filename")?;
 +    let path = root.join(asset_name);
 +    let download = DownloadedWindowsInstaller { root, path };
- 
++
 +    let status = crate::noninteractive_process::curl_command()
 +        .args(["-sfL", "--max-time", "120", "-o"])
 +        .arg(&download.path)
@@ -61948,7 +61948,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2488,148 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2246,6 +2488,153 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -62039,7 +62039,12 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 +    #[cfg(windows)]
 +    #[test]
 +    fn windows_preview_selects_installer_without_removing_legacy_zip() {
-+        let build_id = "bbbbbbbbbbbb.222222222222";
++        let current_build_id = crate::build_info::build_id().unwrap_or("111111111111.aaaaaaaaaaaa");
++        let build_id = if current_build_id == "bbbbbbbbbbbb.222222222222" {
++            "cccccccccccc.333333333333"
++        } else {
++            "bbbbbbbbbbbb.222222222222"
++        };
 +        let installer = AssetRef {
 +            url: format!(
 +                "{}v2026.07.31.1/herdr-win_v2026.07.31.1_windows_amd64_setup.exe",
@@ -62069,7 +62074,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
 +                ("windows-x86_64-installer".to_string(), installer),
 +            ]),
 +            builds: BTreeMap::from([(
-+                "111111111111.aaaaaaaaaaaa".to_string(),
++                current_build_id.to_string(),
 +                PreviewBuildMetadata {
 +                    base_version: "9.9.8".to_string(),
 +                    commit: "a".repeat(40),
@@ -62097,7 +62102,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2709,7 @@ mod tests {
+@@ -2325,6 +2714,7 @@ mod tests {
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62105,7 +62110,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2702,6 +3087,7 @@ mod tests {
+@@ -2702,6 +3092,7 @@ mod tests {
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62113,7 +62118,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3330,7 @@ mod tests {
+@@ -2944,6 +3335,7 @@ mod tests {
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62121,7 +62126,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3466,7 @@ mod tests {
+@@ -3079,6 +3471,7 @@ mod tests {
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62129,7 +62134,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3775,7 @@ mod tests {
+@@ -3387,7 +3780,7 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
@@ -62138,7 +62143,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3787,7 @@ mod tests {
+@@ -3399,7 +3792,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -62147,7 +62152,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..9ec77c4332bbd1fde893a26dca783994
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3809,7 @@ mod tests {
+@@ -3421,7 +3814,7 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);

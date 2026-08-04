@@ -2575,7 +2575,12 @@ mod cross_platform_tests {
     #[cfg(windows)]
     #[test]
     fn windows_preview_selects_installer_without_removing_legacy_zip() {
-        let build_id = "bbbbbbbbbbbb.222222222222";
+        let current_build_id = crate::build_info::build_id().unwrap_or("111111111111.aaaaaaaaaaaa");
+        let build_id = if current_build_id == "bbbbbbbbbbbb.222222222222" {
+            "cccccccccccc.333333333333"
+        } else {
+            "bbbbbbbbbbbb.222222222222"
+        };
         let installer = AssetRef {
             url: format!(
                 "{}v2026.07.31.1/herdr-win_v2026.07.31.1_windows_amd64_setup.exe",
@@ -2605,7 +2610,7 @@ mod cross_platform_tests {
                 ("windows-x86_64-installer".to_string(), installer),
             ]),
             builds: BTreeMap::from([(
-                "111111111111.aaaaaaaaaaaa".to_string(),
+                current_build_id.to_string(),
                 PreviewBuildMetadata {
                     base_version: "9.9.8".to_string(),
                     commit: "a".repeat(40),
