@@ -269,6 +269,8 @@ pub struct HeadlessServer {
     /// Shared pane runtime size derived from the foreground client,
     /// or MIN_COLS × MIN_ROWS when no clients are connected.
     effective_size: (u16, u16),
+    /// Startup cwd consumed when the first real app client supplies its geometry.
+    startup_cwd: Option<PathBuf>,
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
     /// Flag set while exporting live PTYs to a replacement server.
@@ -458,6 +460,7 @@ impl HeadlessServer {
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
+            startup_cwd: None,
             shutting_down: false,
             handoff_in_progress: false,
             #[cfg(unix)]
@@ -2724,6 +2727,13 @@ impl HeadlessServer {
                 }
                 if !direct_attach_requested {
                     self.sync_foreground_client_state();
+                    if first_app_client {
+                        seed_startup_workspace_if_empty(
+                            &mut self.app,
+                            self.startup_cwd.take(),
+                            self.effective_size,
+                        );
+                    }
                     self.resize_shared_runtime_to_effective_size();
                 }
                 self.nudge_handoff_panes_on_first_client_attach();
@@ -4260,7 +4270,7 @@ pub fn run_server() -> io::Result<()> {
     }
 
     let loaded_config = config::Config::load();
-    let startup_terminal_size = take_startup_terminal_size();
+    let startup_cwd = take_startup_cwd();
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
 
@@ -4291,10 +4301,6 @@ pub fn run_server() -> io::Result<()> {
             api_rx,
             event_hub,
         );
-        prime_startup_terminal_geometry(&mut app, startup_terminal_size);
-        seed_startup_workspace_if_empty(&mut app);
-        prime_startup_terminal_geometry(&mut app, startup_terminal_size);
-
         // The server runs headless — disable local notification side effects.
         // Sound and terminal notifications are forwarded to connected clients
         // as ServerMessage::Notify instead of emitted by the server process.
@@ -4319,9 +4325,7 @@ pub fn run_server() -> io::Result<()> {
             }
             Err(err) => return Err(err),
         };
-        if let Some((cols, rows)) = startup_terminal_size {
-            server.effective_size = (cols, rows);
-        }
+        server.startup_cwd = startup_cwd;
 
         info!(
             api_socket = %api::socket_path().display(),
@@ -4339,8 +4343,12 @@ pub fn run_server() -> io::Result<()> {
     result
 }
 
-fn seed_startup_workspace_if_empty(app: &mut app::App) {
-    let Some(cwd) = take_startup_cwd() else {
+fn seed_startup_workspace_if_empty(
+    app: &mut app::App,
+    startup_cwd: Option<PathBuf>,
+    (cols, rows): (u16, u16),
+) {
+    let Some(cwd) = startup_cwd else {
         return;
     };
 
@@ -4351,6 +4359,9 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
         );
         return;
     }
+
+    app.state.view.terminal_area =
+        crate::ui::initial_workspace_terminal_area(&app.state, Rect::new(0, 0, cols, rows));
 
     match app.create_workspace_with_options(cwd.clone(), true) {
         Ok(_) => {
@@ -4367,31 +4378,6 @@ fn take_startup_cwd() -> Option<PathBuf> {
     let cwd = std::env::var_os(crate::server::autodetect::STARTUP_CWD_ENV_VAR)?;
     std::env::remove_var(crate::server::autodetect::STARTUP_CWD_ENV_VAR);
     (!cwd.is_empty()).then(|| PathBuf::from(cwd))
-}
-
-fn take_startup_terminal_size() -> Option<(u16, u16)> {
-    let value = std::env::var_os(crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR)?;
-    std::env::remove_var(crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR);
-    parse_startup_terminal_size(value.to_str()?)
-}
-
-fn parse_startup_terminal_size(value: &str) -> Option<(u16, u16)> {
-    let (cols, rows) = value.split_once('x')?;
-    let cols = cols.parse::<u16>().ok()?;
-    let rows = rows.parse::<u16>().ok()?;
-    (cols > 0 && rows > 0).then_some((cols, rows))
-}
-
-fn prime_startup_terminal_geometry(app: &mut app::App, size: Option<(u16, u16)>) {
-    let Some((cols, rows)) = size else {
-        return;
-    };
-    let area = Rect::new(0, 0, cols, rows);
-    if app.state.workspaces.is_empty() {
-        app.state.view.terminal_area = crate::ui::initial_workspace_terminal_area(&app.state, area);
-        return;
-    }
-    crate::ui::compute_view_with_runtime_registry(&mut app.state, &app.terminal_runtimes, area);
 }
 
 #[cfg(unix)]
@@ -4579,6 +4565,7 @@ mod tests {
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
+            startup_cwd: None,
             shutting_down: false,
             handoff_in_progress: false,
             #[cfg(unix)]
@@ -5115,37 +5102,14 @@ new_tab = "prefix+t"
     }
 
     #[tokio::test]
-    async fn startup_geometry_sizes_first_pty_before_readiness_probe() {
+    async fn startup_workspace_waits_for_real_client_geometry() {
         let mut server = test_headless_server();
         let startup_size = (120, 40);
         let expected_terminal_area = Rect::new(26, 1, 94, 39);
         let expected_pane_size = (39, 93);
+        server.startup_cwd = Some(std::env::temp_dir());
 
-        prime_startup_terminal_geometry(&mut server.app, Some(startup_size));
-        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
-        assert_eq!(server.app.state.estimate_pane_size(), expected_pane_size);
-
-        server
-            .app
-            .create_workspace_with_options(std::env::temp_dir(), true)
-            .expect("create startup workspace");
-        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
-        assert_eq!(
-            server
-                .app
-                .state
-                .runtime_for_pane(&server.app.terminal_runtimes, pane_id)
-                .expect("startup runtime")
-                .current_size(),
-            expected_pane_size
-        );
-
-        prime_startup_terminal_geometry(&mut server.app, Some(startup_size));
-        server.effective_size = startup_size;
-        server.render_and_stream();
-        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
-
-        let (writer, _control, _render) = test_client_writer();
+        let (readiness_writer, _readiness_control, _readiness_render) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 1,
             cols: 80,
@@ -5155,29 +5119,40 @@ new_tab = "prefix+t"
             render_encoding: RenderEncoding::SemanticFrame,
             keybindings: None,
             direct_attach_requested: true,
-            writer,
+            writer: readiness_writer,
         }));
+        assert!(server.app.state.workspaces.is_empty());
+        assert!(server.startup_cwd.is_some());
         assert_eq!(server.foreground_client_id, None);
+
+        let (app_writer, _app_control, _app_render) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: startup_size.0,
+            rows: startup_size.1,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer: app_writer,
+        }));
+
+        assert!(server.startup_cwd.is_none());
         assert_eq!(server.effective_size, startup_size);
-        server.render_and_stream();
+        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
+        assert_eq!(server.app.state.estimate_pane_size(), expected_pane_size);
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
         assert_eq!(
             server
                 .app
                 .state
                 .runtime_for_pane(&server.app.terminal_runtimes, pane_id)
-                .expect("startup runtime after readiness probe")
+                .expect("startup runtime after real client attach")
                 .current_size(),
             expected_pane_size
         );
         shutdown_test_runtimes(&mut server);
-    }
-
-    #[test]
-    fn startup_terminal_size_parser_rejects_ambiguous_or_empty_geometry() {
-        assert_eq!(parse_startup_terminal_size("120x40"), Some((120, 40)));
-        for invalid in ["", "120", "120x", "x40", "0x40", "120x0", "120x40x1"] {
-            assert_eq!(parse_startup_terminal_size(invalid), None, "{invalid}");
-        }
     }
 
     #[test]

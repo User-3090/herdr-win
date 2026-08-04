@@ -1,4 +1,4 @@
-From e83ea983324bdecfa892f672c9d9d2b6b5e8bc85 Mon Sep 17 00:00:00 2001
+From 81f5d93a7816d4f961e2468da6448466349e36dd Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -62273,7 +62273,7 @@ index 0000000000000000000000000000000000000000..569b245b5b144658ae4f23d5aa798a44
 +    io::Error::new(io::ErrorKind::InvalidData, message)
 +}
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
-index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f7d049a11 100644
+index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9ab8b39e1 100644
 --- a/src/remote/attach.rs
 +++ b/src/remote/attach.rs
 @@ -23,14 +23,16 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -62295,7 +62295,7 @@ index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub(crate) enum RemoteKeybindings {
      Local,
-@@ -1516,6 +1518,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
+@@ -1508,6 +1510,8 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -62304,7 +62304,7 @@ index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f
              "--retry",
              "3",
              "--connect-timeout",
-@@ -1559,7 +1563,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1551,7 +1555,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
          let build_id = crate::build_info::build_id().ok_or_else(|| {
              io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
          })?;
@@ -62313,7 +62313,7 @@ index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f
          let manifest: RemotePreviewManifest =
              serde_json::from_slice(&manifest_bytes).map_err(|err| {
                  io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-@@ -1578,7 +1582,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
+@@ -1570,7 +1574,7 @@ fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
      }
  
      let current_version = current_version();
@@ -62322,7 +62322,7 @@ index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f
      let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
          .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
      let release = manifest.release_for_version(&current_version).ok_or_else(|| {
-@@ -2119,7 +2123,7 @@ fn run_client_process(
+@@ -2103,7 +2107,7 @@ fn run_client_process(
      reattach_command: &str,
      keybindings: RemoteKeybindings,
  ) -> io::Result<()> {
@@ -62332,10 +62332,10 @@ index 0b4d26e461b5d8cffd029904e85fdf2bb2666c90..606d4c33bb95b26e2e5105616f199c1f
          .arg("client")
          .env(
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index e59014fb8be095b01d49cac06592ca799686341a..4742710eacdb6b55c6e42a5d485e06441808cb7b 100644
+index 46024ddfd3f16a7839c7c86e55c3d2a6e535f47f..3d8f7c7011bc8c6d78a33046bf5e4c5f54966e67 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
-@@ -213,9 +213,11 @@ fn validate_running_server_compatibility() -> io::Result<()> {
+@@ -209,9 +209,11 @@ fn validate_running_server_compatibility() -> io::Result<()> {
  ///   socket overrides, etc.), except inherited socket overrides are cleared when
  ///   this CLI invocation explicitly selected a session.
  ///
@@ -62349,7 +62349,7 @@ index e59014fb8be095b01d49cac06592ca799686341a..4742710eacdb6b55c6e42a5d485e0644
          io::Error::new(
              err.kind(),
              format!("failed to determine herdr executable path: {err}"),
-@@ -231,7 +233,7 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
+@@ -227,7 +229,7 @@ pub fn spawn_server_daemon() -> io::Result<u32> {
      })?;
  
      let pid = child.id();

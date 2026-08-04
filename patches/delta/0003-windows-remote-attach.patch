@@ -1,4 +1,4 @@
-From dbebd1df8576647f65273faa7a5e2aa974b5f85e Mon Sep 17 00:00:00 2001
+From 21bfdec0bb3246404ed562e996aea7e249b48e35 Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -37,16 +37,16 @@ Share remote attach orchestration across platforms, enable the Windows SSH bridg
  src/platform/windows/clipboard_image.rs       |  535 +++
  src/plugin_command.rs                         |    2 +-
  src/remote.rs                                 |  149 +-
- src/remote/attach.rs                          | 3658 +++++++++++++++++
+ src/remote/attach.rs                          | 3622 +++++++++++++++++
  src/remote/unix.rs                            | 3081 +-------------
- src/remote/windows.rs                         |  130 +
- src/server/autodetect.rs                      |   48 +-
+ src/remote/windows.rs                         |  129 +
+ src/server/autodetect.rs                      |   46 +-
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
- src/server/headless.rs                        |  265 +-
+ src/server/headless.rs                        |  248 +-
  src/ui.rs                                     |   69 +-
  src/update.rs                                 |    5 +
- 41 files changed, 5722 insertions(+), 3422 deletions(-)
+ 41 files changed, 5661 insertions(+), 3427 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -2809,10 +2809,10 @@ index ce4ca91bcabb66e3d0ef29e42c499b8a66b57da4..1cea5e60657f2ecb5d0d4cd64ad3f86b
      if is_remote_auth_error(err) {
 diff --git a/src/remote/attach.rs b/src/remote/attach.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2bb2666c90
+index 0000000000000000000000000000000000000000..2f31e76223bbd4125e236810c2c6602d1f2e07a5
 --- /dev/null
 +++ b/src/remote/attach.rs
-@@ -0,0 +1,3658 @@
+@@ -0,0 +1,3622 @@
 +//! Remote thin-client launcher over SSH command stdio.
 +
 +use std::collections::BTreeMap;
@@ -3005,11 +3005,7 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +                prepared_remote.stop_after_install_approved,
 +                remote.live_handoff,
 +            )?;
-+            remote_bridge_command(
-+                &prepared_remote.remote_herdr,
-+                &session_name,
-+                current_remote_terminal_size(),
-+            )
++            remote_bridge_command(&prepared_remote.remote_herdr, &session_name)
 +        }
 +        #[cfg(windows)]
 +        RemoteHostPlatform::Windows => {
@@ -3019,7 +3015,7 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +                    "live handoff is not supported for Windows remote hosts",
 +                ));
 +            }
-+            super::windows::remote_bridge_command(&session_name, current_remote_terminal_size())
++            super::windows::remote_bridge_command(&session_name)
 +        }
 +    };
 +
@@ -3031,10 +3027,6 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +    )?;
 +
 +    run_client_process(&local_socket, &reattach_command, remote.keybindings)
-+}
-+
-+fn current_remote_terminal_size() -> (u16, u16) {
-+    crossterm::terminal::size().unwrap_or((80, 24))
 +}
 +
 +#[derive(Debug, Clone, PartialEq, Eq)]
@@ -4479,16 +4471,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +    Ok(())
 +}
 +
-+fn remote_bridge_command(
-+    remote_herdr: &RemoteHerdr,
-+    session_name: &str,
-+    (cols, rows): (u16, u16),
-+) -> String {
-+    let mut command = format!(
-+        "{}={cols}x{rows} exec {}",
-+        crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR,
-+        remote_herdr.shell_path
-+    );
++fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
++    let mut command = format!("exec {}", remote_herdr.shell_path);
 +    if session_name != crate::session::DEFAULT_SESSION_NAME {
 +        command.push_str(" --session ");
 +        command.push_str(&shell_quote(session_name));
@@ -5767,12 +5751,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +            arch: "x86_64",
 +        });
 +        assert_eq!(
-+            remote_bridge_command(
-+                &remote_herdr,
-+                crate::session::DEFAULT_SESSION_NAME,
-+                (120, 40)
-+            ),
-+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
++            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
++            "exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
 +        );
 +    }
 +
@@ -5786,12 +5766,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +            .expect("path binary");
 +
 +        assert_eq!(
-+            remote_bridge_command(
-+                &remote_herdr,
-+                crate::session::DEFAULT_SESSION_NAME,
-+                (120, 40)
-+            ),
-+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec /usr/bin/herdr remote-client-bridge"
++            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
++            "exec /usr/bin/herdr remote-client-bridge"
 +        );
 +    }
 +
@@ -5806,12 +5782,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +                .expect("path binary");
 +
 +        assert_eq!(
-+            remote_bridge_command(
-+                &remote_herdr,
-+                crate::session::DEFAULT_SESSION_NAME,
-+                (120, 40)
-+            ),
-+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec '/opt/herdr bin/herdr' remote-client-bridge"
++            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
++            "exec '/opt/herdr bin/herdr' remote-client-bridge"
 +        );
 +    }
 +
@@ -5826,12 +5798,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +                .expect("path binary");
 +
 +        assert_eq!(
-+            remote_bridge_command(
-+                &remote_herdr,
-+                crate::session::DEFAULT_SESSION_NAME,
-+                (120, 40)
-+            ),
-+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec /opt/homebrew/bin/herdr remote-client-bridge"
++            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
++            "exec /opt/homebrew/bin/herdr remote-client-bridge"
 +        );
 +        assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
 +    }
@@ -5917,12 +5885,8 @@ index 0000000000000000000000000000000000000000..0b4d26e461b5d8cffd029904e85fdf2b
 +                .expect("path binary");
 +
 +        assert_eq!(
-+            remote_bridge_command(
-+                &remote_herdr,
-+                crate::session::DEFAULT_SESSION_NAME,
-+                (120, 40)
-+            ),
-+            "HERDR_STARTUP_TERMINAL_SIZE=120x40 exec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
++            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
++            "exec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
 +        );
 +    }
 +
@@ -9581,10 +9545,10 @@ index 813091ba45e7c798dfbb6ab87fe455cab9317376..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc92e61d59739888e75b32e6a002b9ca3e13c75f
+index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346fa0cfc00
 --- /dev/null
 +++ b/src/remote/windows.rs
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,129 @@
 +//! Windows remote-host side of the SSH stdio bridge.
 +
 +use std::io;
@@ -9638,10 +9602,9 @@ index 0000000000000000000000000000000000000000..cc92e61d59739888e75b32e6a002b9ca
 +    crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(15))
 +}
 +
-+pub(super) fn remote_bridge_command(session_name: &str, (cols, rows): (u16, u16)) -> String {
-+    let mut script = format!(
-+        "$env:{} = '{cols}x{rows}'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
-+        crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR
++pub(super) fn remote_bridge_command(session_name: &str) -> String {
++    let mut script = String::from(
++        "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr",
 +    );
 +    if session_name != crate::session::DEFAULT_SESSION_NAME {
 +        script.push_str(" --session ");
@@ -9690,7 +9653,7 @@ index 0000000000000000000000000000000000000000..cc92e61d59739888e75b32e6a002b9ca
 +    fn windows_remote_bridge_resolves_path_application_for_default_session() {
 +        assert_eq!(
 +            decoded_remote_bridge_script(crate::session::DEFAULT_SESSION_NAME),
-+            "$env:HERDR_STARTUP_TERMINAL_SIZE = '120x40'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
++            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr remote-client-bridge"
 +        );
 +    }
 +
@@ -9698,12 +9661,12 @@ index 0000000000000000000000000000000000000000..cc92e61d59739888e75b32e6a002b9ca
 +    fn windows_remote_bridge_resolves_path_application_for_named_session() {
 +        assert_eq!(
 +            decoded_remote_bridge_script("agent's work"),
-+            "$env:HERDR_STARTUP_TERMINAL_SIZE = '120x40'; $herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
++            "$herdr = (Get-Command -Name 'herdr.exe' -CommandType Application -ErrorAction Stop).Source; & $herdr --session 'agent''s work' remote-client-bridge"
 +        );
 +    }
 +
 +    fn decoded_remote_bridge_script(session_name: &str) -> String {
-+        let command = remote_bridge_command(session_name, (120, 40));
++        let command = remote_bridge_command(session_name);
 +        let encoded = command.split_whitespace().last().unwrap();
 +        let bytes = base64::engine::general_purpose::STANDARD
 +            .decode(encoded)
@@ -9716,20 +9679,18 @@ index 0000000000000000000000000000000000000000..cc92e61d59739888e75b32e6a002b9ca
 +    }
 +}
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..e59014fb8be095b01d49cac06592ca799686341a 100644
+index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..46024ddfd3f16a7839c7c86e55c3d2a6e535f47f 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
-@@ -31,6 +31,9 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+@@ -31,7 +31,6 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
  /// Private daemon-start hint used to seed a fresh headless server from the
  /// directory where the user ran `herdr`.
  pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
-+/// Private daemon-start hint used to size a fresh first pane before its shell
-+/// renders a width-sensitive prompt.
-+pub(crate) const STARTUP_TERMINAL_SIZE_ENV_VAR: &str = "HERDR_STARTUP_TERMINAL_SIZE";
- 
+-
  // ---------------------------------------------------------------------------
  // Server detection
-@@ -117,16 +120,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
+ // ---------------------------------------------------------------------------
+@@ -117,16 +116,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
          Err(err) => return Err(err),
      };
  
@@ -9747,7 +9708,7 @@ index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..e59014fb8be095b01d49cac06592ca79
  
      match crate::protocol::write_message(&mut stream, &hello) {
          Ok(()) => Ok(true),
-@@ -147,6 +141,40 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
+@@ -147,6 +137,40 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
      }
  }
  
@@ -9762,7 +9723,7 @@ index 4b58196e15191d79797fea58ed4cd2b352b3c4fb..e59014fb8be095b01d49cac06592ca79
 +        requested_encoding: crate::protocol::RenderEncoding::SemanticFrame,
 +        keybindings: crate::protocol::ClientKeybindings::Server,
 +        // Readiness must validate the handshake without becoming the foreground
-+        // app client or resizing a freshly seeded remote shell to this probe size.
++        // app client that starts the pending startup workspace.
 +        launch_mode: crate::protocol::ClientLaunchMode::TerminalAttach,
 +    }
 +}
@@ -9923,10 +9884,27 @@ index 70072f2d69aa06b8e17f7b743e0a2d5a1c2bf87e..5afe7bef934d7f79b51d367f8227df72
  }
  
 diff --git a/src/server/headless.rs b/src/server/headless.rs
-index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818deed97d904a 100644
+index aa9fd0018dc717142e7af8560387c740b1d22b6e..1ea9dc4aab1cc91501c80fb849cf4799048b60bb 100644
 --- a/src/server/headless.rs
 +++ b/src/server/headless.rs
-@@ -766,8 +766,11 @@ impl HeadlessServer {
+@@ -269,6 +269,8 @@ pub struct HeadlessServer {
+     /// Shared pane runtime size derived from the foreground client,
+     /// or MIN_COLS × MIN_ROWS when no clients are connected.
+     effective_size: (u16, u16),
++    /// Startup cwd consumed when the first real app client supplies its geometry.
++    startup_cwd: Option<PathBuf>,
+     /// Flag set when shutdown is initiated.
+     shutting_down: bool,
+     /// Flag set while exporting live PTYs to a replacement server.
+@@ -458,6 +460,7 @@ impl HeadlessServer {
+             terminal_attach_owners: HashMap::new(),
+             next_activity_stamp: 1,
+             effective_size: (MIN_COLS, MIN_ROWS),
++            startup_cwd: None,
+             shutting_down: false,
+             handoff_in_progress: false,
+             #[cfg(unix)]
+@@ -766,8 +769,11 @@ impl HeadlessServer {
  
          if self.app.state.request_new_workspace {
              self.app.state.request_new_workspace = false;
@@ -9938,7 +9916,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -781,8 +784,11 @@ impl HeadlessServer {
+@@ -781,8 +787,11 @@ impl HeadlessServer {
          if self.app.state.request_new_tab {
              self.app.state.request_new_tab = false;
              let label = self.app.state.requested_new_tab_name.take();
@@ -9950,7 +9928,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -806,12 +812,15 @@ impl HeadlessServer {
+@@ -806,12 +815,15 @@ impl HeadlessServer {
          }
  
          if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
@@ -9966,7 +9944,7 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
                  error!(
                      code = %error.code,
                      message = %error.message,
-@@ -2702,8 +2711,10 @@ impl HeadlessServer {
+@@ -2702,8 +2714,17 @@ impl HeadlessServer {
                  if first_app_client {
                      self.app.mark_git_status_refresh_due(Instant::now());
                  }
@@ -9974,72 +9952,77 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
 -                self.resize_shared_runtime_to_effective_size();
 +                if !direct_attach_requested {
 +                    self.sync_foreground_client_state();
++                    if first_app_client {
++                        seed_startup_workspace_if_empty(
++                            &mut self.app,
++                            self.startup_cwd.take(),
++                            self.effective_size,
++                        );
++                    }
 +                    self.resize_shared_runtime_to_effective_size();
 +                }
                  self.nudge_handoff_panes_on_first_client_attach();
                  true
              }
-@@ -4200,6 +4211,7 @@ pub fn run_server() -> io::Result<()> {
+@@ -4200,6 +4221,7 @@ pub fn run_server() -> io::Result<()> {
      }
  
      let loaded_config = config::Config::load();
-+    let startup_terminal_size = take_startup_terminal_size();
++    let startup_cwd = take_startup_cwd();
      let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
      let event_hub = api::EventHub::default();
  
-@@ -4230,7 +4242,9 @@ pub fn run_server() -> io::Result<()> {
+@@ -4230,8 +4252,6 @@ pub fn run_server() -> io::Result<()> {
              api_rx,
              event_hub,
          );
-+        prime_startup_terminal_geometry(&mut app, startup_terminal_size);
-         seed_startup_workspace_if_empty(&mut app);
-+        prime_startup_terminal_geometry(&mut app, startup_terminal_size);
- 
+-        seed_startup_workspace_if_empty(&mut app);
+-
          // The server runs headless — disable local notification side effects.
          // Sound and terminal notifications are forwarded to connected clients
-@@ -4256,6 +4270,9 @@ pub fn run_server() -> io::Result<()> {
+         // as ServerMessage::Notify instead of emitted by the server process.
+@@ -4256,6 +4276,7 @@ pub fn run_server() -> io::Result<()> {
              }
              Err(err) => return Err(err),
          };
-+        if let Some((cols, rows)) = startup_terminal_size {
-+            server.effective_size = (cols, rows);
-+        }
++        server.startup_cwd = startup_cwd;
  
          info!(
              api_socket = %api::socket_path().display(),
-@@ -4303,6 +4320,31 @@ fn take_startup_cwd() -> Option<PathBuf> {
-     (!cwd.is_empty()).then(|| PathBuf::from(cwd))
+@@ -4273,8 +4294,12 @@ pub fn run_server() -> io::Result<()> {
+     result
  }
  
-+fn take_startup_terminal_size() -> Option<(u16, u16)> {
-+    let value = std::env::var_os(crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR)?;
-+    std::env::remove_var(crate::server::autodetect::STARTUP_TERMINAL_SIZE_ENV_VAR);
-+    parse_startup_terminal_size(value.to_str()?)
-+}
+-fn seed_startup_workspace_if_empty(app: &mut app::App) {
+-    let Some(cwd) = take_startup_cwd() else {
++fn seed_startup_workspace_if_empty(
++    app: &mut app::App,
++    startup_cwd: Option<PathBuf>,
++    (cols, rows): (u16, u16),
++) {
++    let Some(cwd) = startup_cwd else {
+         return;
+     };
+ 
+@@ -4286,6 +4311,9 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
+         return;
+     }
+ 
++    app.state.view.terminal_area =
++        crate::ui::initial_workspace_terminal_area(&app.state, Rect::new(0, 0, cols, rows));
 +
-+fn parse_startup_terminal_size(value: &str) -> Option<(u16, u16)> {
-+    let (cols, rows) = value.split_once('x')?;
-+    let cols = cols.parse::<u16>().ok()?;
-+    let rows = rows.parse::<u16>().ok()?;
-+    (cols > 0 && rows > 0).then_some((cols, rows))
-+}
-+
-+fn prime_startup_terminal_geometry(app: &mut app::App, size: Option<(u16, u16)>) {
-+    let Some((cols, rows)) = size else {
-+        return;
-+    };
-+    let area = Rect::new(0, 0, cols, rows);
-+    if app.state.workspaces.is_empty() {
-+        app.state.view.terminal_area = crate::ui::initial_workspace_terminal_area(&app.state, area);
-+        return;
-+    }
-+    crate::ui::compute_view_with_runtime_registry(&mut app.state, &app.terminal_runtimes, area);
-+}
-+
- #[cfg(unix)]
- fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
-     let loaded_config = config::Config::load();
-@@ -4728,6 +4770,158 @@ mod tests {
+     match app.create_workspace_with_options(cwd.clone(), true) {
+         Ok(_) => {
+             info!(cwd = %cwd.display(), "created startup workspace");
+@@ -4488,6 +4516,7 @@ mod tests {
+             terminal_attach_owners: HashMap::new(),
+             next_activity_stamp: 1,
+             effective_size: (MIN_COLS, MIN_ROWS),
++            startup_cwd: None,
+             shutting_down: false,
+             handoff_in_progress: false,
+             #[cfg(unix)]
+@@ -4728,6 +4757,158 @@ mod tests {
          shutdown_test_runtimes(&mut server);
      }
  
@@ -10198,42 +10181,19 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
      fn test_client_writer() -> (
          ClientWriter,
          std::sync::mpsc::Receiver<Vec<u8>>,
-@@ -4871,6 +5065,72 @@ new_tab = "prefix+t"
+@@ -4871,6 +5052,60 @@ new_tab = "prefix+t"
              .any(|binding| binding.label == "prefix+c"));
      }
  
 +    #[tokio::test]
-+    async fn startup_geometry_sizes_first_pty_before_readiness_probe() {
++    async fn startup_workspace_waits_for_real_client_geometry() {
 +        let mut server = test_headless_server();
 +        let startup_size = (120, 40);
 +        let expected_terminal_area = Rect::new(26, 1, 94, 39);
 +        let expected_pane_size = (39, 93);
++        server.startup_cwd = Some(std::env::temp_dir());
 +
-+        prime_startup_terminal_geometry(&mut server.app, Some(startup_size));
-+        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
-+        assert_eq!(server.app.state.estimate_pane_size(), expected_pane_size);
-+
-+        server
-+            .app
-+            .create_workspace_with_options(std::env::temp_dir(), true)
-+            .expect("create startup workspace");
-+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
-+        assert_eq!(
-+            server
-+                .app
-+                .state
-+                .runtime_for_pane(&server.app.terminal_runtimes, pane_id)
-+                .expect("startup runtime")
-+                .current_size(),
-+            expected_pane_size
-+        );
-+
-+        prime_startup_terminal_geometry(&mut server.app, Some(startup_size));
-+        server.effective_size = startup_size;
-+        server.render_and_stream();
-+        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
-+
-+        let (writer, _control, _render) = test_client_writer();
++        let (readiness_writer, _readiness_control, _readiness_render) = test_client_writer();
 +        assert!(server.handle_server_event(ServerEvent::ClientConnected {
 +            client_id: 1,
 +            cols: 80,
@@ -10243,35 +10203,46 @@ index aa9fd0018dc717142e7af8560387c740b1d22b6e..e93ab0f403e859404a8e7f0157818dee
 +            render_encoding: RenderEncoding::SemanticFrame,
 +            keybindings: None,
 +            direct_attach_requested: true,
-+            writer,
++            writer: readiness_writer,
 +        }));
++        assert!(server.app.state.workspaces.is_empty());
++        assert!(server.startup_cwd.is_some());
 +        assert_eq!(server.foreground_client_id, None);
++
++        let (app_writer, _app_control, _app_render) = test_client_writer();
++        assert!(server.handle_server_event(ServerEvent::ClientConnected {
++            client_id: 2,
++            cols: startup_size.0,
++            rows: startup_size.1,
++            cell_width_px: 0,
++            cell_height_px: 0,
++            render_encoding: RenderEncoding::SemanticFrame,
++            keybindings: None,
++            direct_attach_requested: false,
++            writer: app_writer,
++        }));
++
++        assert!(server.startup_cwd.is_none());
 +        assert_eq!(server.effective_size, startup_size);
-+        server.render_and_stream();
++        assert_eq!(server.app.state.view.terminal_area, expected_terminal_area);
++        assert_eq!(server.app.state.estimate_pane_size(), expected_pane_size);
++        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
 +        assert_eq!(
 +            server
 +                .app
 +                .state
 +                .runtime_for_pane(&server.app.terminal_runtimes, pane_id)
-+                .expect("startup runtime after readiness probe")
++                .expect("startup runtime after real client attach")
 +                .current_size(),
 +            expected_pane_size
 +        );
 +        shutdown_test_runtimes(&mut server);
 +    }
 +
-+    #[test]
-+    fn startup_terminal_size_parser_rejects_ambiguous_or_empty_geometry() {
-+        assert_eq!(parse_startup_terminal_size("120x40"), Some((120, 40)));
-+        for invalid in ["", "120", "120x", "x40", "0x40", "120x0", "120x40x1"] {
-+            assert_eq!(parse_startup_terminal_size(invalid), None, "{invalid}");
-+        }
-+    }
-+
      #[test]
      fn local_keybinding_client_hides_server_keybinding_warnings() {
          let mut server = test_headless_server();
-@@ -7323,6 +7583,7 @@ next_tab = ""
+@@ -7323,6 +7558,7 @@ next_tab = ""
                  .current_size(),
              expected
          );
