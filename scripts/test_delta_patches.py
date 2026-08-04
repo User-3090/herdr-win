@@ -340,8 +340,23 @@ class DeltaPatchTests(unittest.TestCase):
             '--title "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})"',
             workflow,
         )
-        self.assertIn('echo "- Upstream release: \\`Herdr v${BASE_VERSION}\\`"', workflow)
+        self.assertIn(
+            "the latest stable upstream release selected during the manual refresh",
+            workflow,
+        )
+        self.assertIn(
+            'echo "- Latest stable upstream release: \\`Herdr v${BASE_VERSION}\\`"',
+            workflow,
+        )
         self.assertIn('echo "- Upstream source: \\`${UPSTREAM_SHA}\\`"', workflow)
+        self.assertIn("sha256sum --check \"$checksum\"", workflow)
+        release_uploads = workflow.split('gh release create "$tag"', 1)[1].split(
+            '--repo "$GITHUB_REPOSITORY"', 1
+        )[0]
+        self.assertNotIn(".zip.sha256", release_uploads)
+        self.assertIn("!= \"6\"", workflow)
+        self.assertNotIn("published_checksum_digest", workflow)
+        self.assertNotIn("api_checksum_digest", workflow)
         self.assertNotIn("SOURCE_MODE", workflow)
         self.assertNotIn("PREVIEW_GENERATOR.py", workflow)
         self.assertIn(

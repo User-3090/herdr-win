@@ -184,6 +184,10 @@ behavior; code and tests remain the detailed implementation truth.
   Windows keeps `herdr-win_v<CalVer>_windows_amd64.zip` and the corresponding
   `_setup.exe`. The manifest's upstream-compatible target keys remain separate from
   these fork-presented filenames.
+- Promotion publishes those six target artifacts without candidate checksum
+  sidecars. Candidate sidecars remain internal verification inputs; GitHub records
+  SHA-256 for every immutable release asset and the update manifest carries the same
+  six verified digests.
 - Publication and the generated manifest proceed only when all six target assets
   have verified SHA-256 digests; retained historical manifest entries may remain
   Windows-only.

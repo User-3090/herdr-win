@@ -1110,7 +1110,6 @@ jobs:
           sha256sum --check "$checksum"
           sha256sum --check "$installer_checksum"
           zip_digest="sha256:$(sha256sum "$zip" | awk '{print $1}')"
-          checksum_digest="sha256:$(sha256sum "$checksum" | awk '{print $1}')"
           installer_digest="sha256:$(sha256sum "$installer" | awk '{print $1}')"
 
           tag="v${RELEASE_VERSION}"
@@ -1180,12 +1179,11 @@ jobs:
                   "$(jq -r .prerelease <<<"$release_json")" != "true" || \
                   "$(jq -r '.immutable // false' <<<"$release_json")" != "true" || \
                   "$(jq -r .name <<<"$release_json")" != "herdr-win v${RELEASE_VERSION} (Herdr v${BASE_VERSION})" || \
-                  "$(jq '.assets | length' <<<"$release_json")" != "7" ]]; then
+                  "$(jq '.assets | length' <<<"$release_json")" != "6" ]]; then
               echo "Release ${tag} is not the expected immutable published prerelease." >&2
               exit 1
             fi
             verify_asset_shape "$release_json" "$zip"
-            verify_asset_shape "$release_json" "$checksum"
             verify_asset_shape "$release_json" "$installer"
             for asset in "${portable_assets[@]}"; do
               verify_asset_shape "$release_json" "$asset"
@@ -1193,11 +1191,11 @@ jobs:
           }
 
           {
-            echo "Unofficial herdr-win snapshot built from upstream Herdr plus the maintained delta."
-            echo "Matching Linux and macOS executables are included for cross-platform remote compatibility."
+            echo "Unofficial herdr-win snapshot built from Herdr v${BASE_VERSION}, the latest stable upstream release selected during the manual refresh, plus the maintained herdr-win delta."
+            echo "Matching Linux and macOS executables are built from that same stable source for cross-platform remote compatibility."
             echo
             echo "- herdr-win release: \`v${RELEASE_VERSION}\`"
-            echo "- Upstream release: \`Herdr v${BASE_VERSION}\`"
+            echo "- Latest stable upstream release: \`Herdr v${BASE_VERSION}\`"
             echo "- Upstream source: \`${UPSTREAM_SHA}\`"
             echo "- herdr-win control revision: \`${CONTROL_SHA}\`"
             echo "- Build identity: \`${BUILD_ID}\`"
@@ -1240,7 +1238,6 @@ jobs:
             ensure_tag_target
             gh release create "$tag" \
               "${ARTIFACT_NAME}.zip" \
-              "${ARTIFACT_NAME}.zip.sha256" \
               "${INSTALLER_ASSET_NAME}" \
               "${portable_assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
@@ -1261,7 +1258,6 @@ jobs:
           fi
 
           verify_asset_matches "$release_json" "$zip" "$zip_digest"
-          verify_asset_matches "$release_json" "$checksum" "$checksum_digest"
           verify_asset_matches "$release_json" "$installer" "$installer_digest"
           for key in "${portable_keys[@]}"; do
             asset="$(jq -er --arg key "$key" '.[$key]' <<<"$ASSET_NAMES_JSON")"
@@ -1280,7 +1276,6 @@ jobs:
             release download "$tag"
             --repo "$GITHUB_REPOSITORY"
             --pattern "$zip"
-            --pattern "$checksum"
             --pattern "$installer"
             --dir "$canonical_dir"
           )
@@ -1288,18 +1283,11 @@ jobs:
             download_args+=(--pattern "$asset")
           done
           gh "${download_args[@]}"
-          (
-            cd "$canonical_dir"
-            sha256sum --check "$checksum"
-          )
           published_zip_digest="sha256:$(sha256sum "$canonical_dir/$zip" | awk '{print $1}')"
-          published_checksum_digest="sha256:$(sha256sum "$canonical_dir/$checksum" | awk '{print $1}')"
           published_installer_digest="sha256:$(sha256sum "$canonical_dir/$installer" | awk '{print $1}')"
           api_zip_digest="$(jq -r --arg name "$zip" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
-          api_checksum_digest="$(jq -r --arg name "$checksum" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
           api_installer_digest="$(jq -r --arg name "$installer" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
           if [[ "$published_zip_digest" != "$api_zip_digest" || \
-                "$published_checksum_digest" != "$api_checksum_digest" || \
                 "$published_installer_digest" != "$api_installer_digest" ]]; then
             echo "Downloaded immutable release assets do not match GitHub's recorded digests." >&2
             exit 1
