@@ -176,6 +176,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn('$canonicalSkillSource = Join-Path $workingRoot "SKILL.md"', packager)
         self.assertIn("[IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)", packager)
+        self.assertIn("$canonicalSkillHasher.ComputeHash($canonicalSkillBytes)", packager)
+        self.assertNotIn("::HashData", packager)
         self.assertIn('"/DARG_SKILL_MD=$canonicalSkillSource"', packager)
         self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
         self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)

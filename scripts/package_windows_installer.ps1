@@ -377,9 +377,14 @@ if ($skillValidationText.Contains("`r") -or
     throw "skills/herdr/SKILL.md is not the canonical Herdr agent skill."
 }
 $canonicalSkillBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillValidationText)
-$canonicalSkillHash = ([BitConverter]::ToString(
-    [Security.Cryptography.SHA256]::HashData($canonicalSkillBytes)
-)).Replace("-", "").ToLowerInvariant()
+$canonicalSkillHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $canonicalSkillHash = ([BitConverter]::ToString(
+        $canonicalSkillHasher.ComputeHash($canonicalSkillBytes)
+    )).Replace("-", "").ToLowerInvariant()
+} finally {
+    $canonicalSkillHasher.Dispose()
+}
 $skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
 if ($skillHashManifestText.Contains("`r") -or
     -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
