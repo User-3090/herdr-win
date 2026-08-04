@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Before you start:** Read [CONTRIBUTING.md](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md).
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md).
 
         Use this form for a problem observed in a herdr-win Windows snapshot. If practical, try the same workflow with upstream Herdr and report the result below. Do not report a fork-only failure to upstream.
 

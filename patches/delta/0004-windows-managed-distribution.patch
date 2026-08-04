@@ -1,4 +1,4 @@
-From 370314ec474ea6b0374fa8403dc46896cd8a2d33 Mon Sep 17 00:00:00 2001
+From 23212042d245d6bae03736a8d3a8305b9e9a1ae5 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -55286,7 +55286,7 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5bd68958ea5dae757d86bfb80b2d7019e269be8
+index 0000000000000000000000000000000000000000..5be26f22a6ad8628ad40986a56495cc0ec66bf4a
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
 @@ -0,0 +1,486 @@
@@ -55337,7 +55337,7 @@ index 0000000000000000000000000000000000000000..f5bd68958ea5dae757d86bfb80b2d701
 +$Copyright = "Herdr contributors"
 +$CommandName = "herdr"
 +$DistributionName = "Herdr Win"
-+$ProductUrl = "https://github.com/User-3090/herdr-win"
++$ProductUrl = "https://github.com/hdosys/herdr-win"
 +$UpstreamUrl = "https://github.com/ogulcancelik/herdr"
 +$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
 +$InstallerTestMarkerPrefix = "herdr"
@@ -56303,7 +56303,7 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..f2930e1572fa570639fe19a9ae0845af2ee9686e
+index 0000000000000000000000000000000000000000..17d1b4e48983ac6979bf5366fa8a1bd6c563256b
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
 @@ -0,0 +1,764 @@
@@ -56985,7 +56985,7 @@ index 0000000000000000000000000000000000000000..f2930e1572fa570639fe19a9ae0845af
 +        self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
 +        self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
 +        self.assertIn(
-+            '$ProductUrl = "https://github.com/User-3090/herdr-win"', packager
++            '$ProductUrl = "https://github.com/hdosys/herdr-win"', packager
 +        )
 +        self.assertIn('"/DINFO_PRODUCTURL=$ProductUrl"', packager)
 +        self.assertIn(
@@ -58922,7 +58922,7 @@ index e56ac087226af0bb995b6678980eccf828156d92..2751ab2cadc32380db14644d98703bb8
      }
 diff --git a/src/distribution.rs b/src/distribution.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435dab97b38
+index 0000000000000000000000000000000000000000..aa63fa9f40734f7566eccd9ad366bf5ff4449243
 --- /dev/null
 +++ b/src/distribution.rs
 @@ -0,0 +1,40 @@
@@ -58930,20 +58930,20 @@ index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435
 +
 +pub(crate) const UPDATE_CHANNEL: &str = "preview";
 +pub(crate) const PREVIEW_MANIFEST_URL: &str =
-+    "https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json";
++    "https://raw.githubusercontent.com/hdosys/herdr-win/master/website/preview.json";
 +// herdr-win has no stable channel. Keep dormant stable code fork-owned so an
 +// accidental channel regression fails to parse instead of contacting upstream.
 +pub(crate) const STABLE_MANIFEST_URL: &str = PREVIEW_MANIFEST_URL;
 +
 +#[cfg(windows)]
 +pub(crate) const WINDOWS_RELEASE_DOWNLOAD_PREFIX: &str =
-+    "https://github.com/User-3090/herdr-win/releases/download/";
++    "https://github.com/hdosys/herdr-win/releases/download/";
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
 +
-+    const FORK_RAW_PREFIX: &str = "https://raw.githubusercontent.com/User-3090/herdr-win/";
++    const FORK_RAW_PREFIX: &str = "https://raw.githubusercontent.com/hdosys/herdr-win/";
 +
 +    #[test]
 +    fn preview_distribution_is_fork_owned() {
@@ -58961,7 +58961,7 @@ index 0000000000000000000000000000000000000000..a3eb76cf1ff6901c297639e037119435
 +    fn windows_release_assets_are_fork_owned() {
 +        assert_eq!(
 +            WINDOWS_RELEASE_DOWNLOAD_PREFIX,
-+            "https://github.com/User-3090/herdr-win/releases/download/"
++            "https://github.com/hdosys/herdr-win/releases/download/"
 +        );
 +        assert!(!WINDOWS_RELEASE_DOWNLOAD_PREFIX.contains("herdr.dev"));
 +    }

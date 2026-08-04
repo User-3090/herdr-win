@@ -660,7 +660,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('"/DINFO_COMPANYNAME=$CompanyName"', packager)
         self.assertIn('"/DINFO_COPYRIGHT=$Copyright"', packager)
         self.assertIn(
-            '$ProductUrl = "https://github.com/User-3090/herdr-win"', packager
+            '$ProductUrl = "https://github.com/hdosys/herdr-win"', packager
         )
         self.assertIn('"/DINFO_PRODUCTURL=$ProductUrl"', packager)
         self.assertIn(

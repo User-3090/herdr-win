@@ -2,20 +2,20 @@
 
 pub(crate) const UPDATE_CHANNEL: &str = "preview";
 pub(crate) const PREVIEW_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json";
+    "https://raw.githubusercontent.com/hdosys/herdr-win/master/website/preview.json";
 // herdr-win has no stable channel. Keep dormant stable code fork-owned so an
 // accidental channel regression fails to parse instead of contacting upstream.
 pub(crate) const STABLE_MANIFEST_URL: &str = PREVIEW_MANIFEST_URL;
 
 #[cfg(windows)]
 pub(crate) const WINDOWS_RELEASE_DOWNLOAD_PREFIX: &str =
-    "https://github.com/User-3090/herdr-win/releases/download/";
+    "https://github.com/hdosys/herdr-win/releases/download/";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const FORK_RAW_PREFIX: &str = "https://raw.githubusercontent.com/User-3090/herdr-win/";
+    const FORK_RAW_PREFIX: &str = "https://raw.githubusercontent.com/hdosys/herdr-win/";
 
     #[test]
     fn preview_distribution_is_fork_owned() {
@@ -33,7 +33,7 @@ mod tests {
     fn windows_release_assets_are_fork_owned() {
         assert_eq!(
             WINDOWS_RELEASE_DOWNLOAD_PREFIX,
-            "https://github.com/User-3090/herdr-win/releases/download/"
+            "https://github.com/hdosys/herdr-win/releases/download/"
         );
         assert!(!WINDOWS_RELEASE_DOWNLOAD_PREFIX.contains("herdr.dev"));
     }

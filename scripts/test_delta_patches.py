@@ -19,8 +19,12 @@ CONTROL_PATHS = {
     "docs/next/README.md",
     "website/preview.json",
 }
-FORK_RELEASE_PREFIX = "https://github.com/User-3090/herdr-win/releases/download/"
-FORK_RAW_PREFIX = "https://raw.githubusercontent.com/User-3090/herdr-win/"
+FORK_RELEASE_PREFIX = "https://github.com/hdosys/herdr-win/releases/download/"
+FORK_RELEASE_PREFIXES = (
+    FORK_RELEASE_PREFIX,
+    "https://github.com/User-3090/herdr-win/releases/download/",
+)
+FORK_RAW_PREFIX = "https://raw.githubusercontent.com/hdosys/herdr-win/"
 WINDOWS_ZIP_TARGET = "windows-x86_64"
 WINDOWS_INSTALLER_TARGET = "windows-x86_64-installer"
 PORTABLE_TARGET_NAMES = {
@@ -126,7 +130,7 @@ class DeltaPatchTests(unittest.TestCase):
                 portable = assets[target]
                 self.assertIsInstance(portable, dict)
                 self.assertTrue(
-                    str(portable.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+                    str(portable.get("url", "")).startswith(FORK_RELEASE_PREFIXES)
                 )
                 self.assertRegex(
                     str(portable.get("url", "")).rsplit("/", 1)[-1], name_pattern
@@ -138,7 +142,7 @@ class DeltaPatchTests(unittest.TestCase):
             windows = assets[WINDOWS_ZIP_TARGET]
             self.assertIsInstance(windows, dict)
             self.assertTrue(
-                str(windows.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+                str(windows.get("url", "")).startswith(FORK_RELEASE_PREFIXES)
             )
             self.assertRegex(str(windows.get("sha256", "")), r"^[0-9a-f]{64}$")
             self.assertEqual(windows.get("format"), "zip")
@@ -146,7 +150,7 @@ class DeltaPatchTests(unittest.TestCase):
                 installer = assets[WINDOWS_INSTALLER_TARGET]
                 self.assertIsInstance(installer, dict)
                 self.assertTrue(
-                    str(installer.get("url", "")).startswith(FORK_RELEASE_PREFIX)
+                    str(installer.get("url", "")).startswith(FORK_RELEASE_PREFIXES)
                 )
                 self.assertRegex(
                     str(installer.get("url", "")).rsplit("/", 1)[-1],
