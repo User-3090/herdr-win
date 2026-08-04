@@ -1,4 +1,4 @@
-From f57f0c99b4d893d84ef6494dabfb021caf312b34 Mon Sep 17 00:00:00 2001
+From 370314ec474ea6b0374fa8403dc46896cd8a2d33 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -18,10 +18,10 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
  packaging/windows/installer/project.nsi       |  447 +++
  packaging/windows/managed-skill-hashes.txt    |    2 +
- scripts/package_windows_conpty.py             |   24 +-
+ scripts/package_windows_conpty.py             |   39 +-
  scripts/package_windows_installer.ps1         |  486 +++
  scripts/preview.py                            |   84 +-
- scripts/test_package_windows_conpty.py        |   22 +-
+ scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  526 ++-
- 44 files changed, 9251 insertions(+), 371 deletions(-)
+ 44 files changed, 9280 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -55177,7 +55177,7 @@ index 0000000000000000000000000000000000000000..9ab18a9ffff00212c29ed096c503e284
 +herdr-managed-skill-hashes-v1
 +0786182f02ebf92708e09d82d79e4614d1a9c30bfc337643cc2af1d0fb9db29f
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
-index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b04df1106 100644
+index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c9933aeb6ec1 100644
 --- a/scripts/package_windows_conpty.py
 +++ b/scripts/package_windows_conpty.py
 @@ -16,7 +16,10 @@ from typing import Any
@@ -55191,15 +55191,44 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b
  
  
  def sha256_bytes(data: bytes) -> str:
-@@ -125,6 +128,7 @@ def stage_bundle(
+@@ -31,6 +34,20 @@ def sha256_file(path: Path) -> str:
+     return digest.hexdigest()
+ 
+ 
++def read_product_license() -> bytes:
++    data = PRODUCT_LICENSE_SOURCE.read_bytes()
++    normalized = data.replace(b"\r\n", b"\n")
++    header = normalized[:256]
++    if (
++        b"Apache License\n" not in header
++        or b"Version 2.0, January 2004\n" not in header
++        or b"AGPL" in normalized.upper()
++        or b"AFFERO" in normalized.upper()
++    ):
++        raise ValueError("product LICENSE must be the Apache License 2.0")
++    return data
++
++
+ def load_metadata(path: Path) -> dict[str, Any]:
+     data = json.loads(path.read_text(encoding="utf-8"))
+     if data.get("schema_version") != 1:
+@@ -113,6 +130,7 @@ def stage_bundle(
+         raise ValueError(f"output directory already exists: {output_dir}")
+     if not herdr_exe.is_file():
+         raise ValueError(f"Herdr executable does not exist: {herdr_exe}")
++    product_license = read_product_license()
+ 
+     acquire_package(metadata["package"], package_path)
+     bundle = metadata["bundles"][architecture]
+@@ -125,6 +143,7 @@ def stage_bundle(
          staging = Path(temporary) / "bundle"
          staging.mkdir()
          shutil.copy2(herdr_exe, staging / "herdr.exe")
-+        shutil.copy2(PRODUCT_LICENSE_SOURCE, staging / PRODUCT_LICENSE_PATH)
++        (staging / PRODUCT_LICENSE_PATH).write_bytes(product_license)
  
          for item in bundle["files"]:
              try:
-@@ -166,7 +170,7 @@ def stage_bundle(
+@@ -166,7 +185,7 @@ def stage_bundle(
  
  
  def expected_stage_files(metadata: dict[str, Any], architecture: str) -> set[str]:
@@ -55208,16 +55237,16 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b
      files.update(item["destination"] for item in metadata["bundles"][architecture]["files"])
      files.update(item["destination"] for item in metadata["notices"])
      return files
-@@ -186,6 +190,8 @@ def validate_stage(metadata_path: Path, architecture: str, stage_dir: Path) -> N
+@@ -186,6 +205,8 @@ def validate_stage(metadata_path: Path, architecture: str, stage_dir: Path) -> N
          )
      if (stage_dir / MARKER_PATH).read_bytes() != marker_data(metadata, architecture):
          raise ValueError("bundle marker does not match pinned ConPTY metadata")
-+    if (stage_dir / PRODUCT_LICENSE_PATH).read_bytes() != PRODUCT_LICENSE_SOURCE.read_bytes():
++    if (stage_dir / PRODUCT_LICENSE_PATH).read_bytes() != read_product_license():
 +        raise ValueError("staged LICENSE.txt does not match the product license")
      for item in metadata["bundles"][architecture]["files"]:
          path = stage_dir / PurePosixPath(item["destination"])
          actual_hash = sha256_file(path)
-@@ -206,7 +212,13 @@ def archive_bundle(
+@@ -206,7 +227,13 @@ def archive_bundle(
      with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
          for path in sorted(stage_dir.rglob("*")):
              if path.is_file():
@@ -55232,7 +55261,7 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b
  
  
  def parse_args() -> argparse.Namespace:
-@@ -224,6 +236,10 @@ def parse_args() -> argparse.Namespace:
+@@ -224,6 +251,10 @@ def parse_args() -> argparse.Namespace:
      archive.add_argument("--architecture", choices=("x86_64",), default="x86_64")
      archive.add_argument("--stage-dir", type=Path, required=True)
      archive.add_argument("--output", type=Path, required=True)
@@ -55243,7 +55272,7 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..5594ddb97fe550b1ba28d3240351129b
      return parser.parse_args()
  
  
-@@ -237,8 +253,10 @@ def main() -> None:
+@@ -237,8 +268,10 @@ def main() -> None:
              args.herdr_exe,
              args.output_dir,
          )
@@ -55920,7 +55949,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..115683892cad85d109f4e089f3743183
      current.add_argument("--manifest", default="website/preview.json")
      current.set_defaults(func=cmd_current_commit)
 diff --git a/scripts/test_package_windows_conpty.py b/scripts/test_package_windows_conpty.py
-index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..bf6be37eef8b0918a7513ea5a56cf8d167428428 100644
+index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..7a9f323734bd548969b6e4034be3cca557c89b31 100644
 --- a/scripts/test_package_windows_conpty.py
 +++ b/scripts/test_package_windows_conpty.py
 @@ -16,6 +16,8 @@ from scripts import package_windows_conpty as package
@@ -55947,7 +55976,28 @@ index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..bf6be37eef8b0918a7513ea5a56cf8d1
          for notice in metadata["notices"]:
              source = package.PROJECT_ROOT / notice["source"]
              self.assertEqual(package.sha256_file(source), notice["sha256"])
-@@ -115,6 +111,10 @@ class WindowsConptyPackageTests(unittest.TestCase):
+@@ -52,6 +48,20 @@ class WindowsConptyPackageTests(unittest.TestCase):
+         self.assertIn('conpty\\conpty.dll', wrapper)
+         self.assertIn('"*Microsoft Corporation*"', wrapper)
+ 
++    def test_product_license_is_apache_2_0_and_rejects_agpl(self) -> None:
++        license_bytes = package.read_product_license()
++        self.assertIn(b"Apache License", license_bytes)
++        self.assertIn(b"Version 2.0, January 2004", license_bytes)
++
++        with tempfile.TemporaryDirectory() as temporary:
++            agpl = Path(temporary) / "LICENSE"
++            agpl.write_text("GNU AFFERO GENERAL PUBLIC LICENSE\n", encoding="utf-8")
++            with mock.patch.object(package, "PRODUCT_LICENSE_SOURCE", agpl):
++                with self.assertRaisesRegex(
++                    ValueError, "product LICENSE must be the Apache License 2.0"
++                ):
++                    package.read_product_license()
++
+     def test_package_download_has_a_finite_timeout(self) -> None:
+         payload = b"package"
+         with tempfile.TemporaryDirectory() as temporary:
+@@ -115,6 +125,10 @@ class WindowsConptyPackageTests(unittest.TestCase):
              stage = root / "stage"
              package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
              package.validate_stage(metadata_path, "x86_64", stage)
@@ -55958,7 +56008,7 @@ index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..bf6be37eef8b0918a7513ea5a56cf8d1
  
              output = root / "herdr.zip"
              package.archive_bundle(metadata_path, "x86_64", stage, output)
-@@ -125,6 +125,16 @@ class WindowsConptyPackageTests(unittest.TestCase):
+@@ -125,6 +139,16 @@ class WindowsConptyPackageTests(unittest.TestCase):
                          package.load_metadata(metadata_path), "x86_64"
                      ),
                  )
