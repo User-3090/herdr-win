@@ -1,4 +1,4 @@
-From 3a0affd24f8732238c624bcec47d5c14013e2594 Mon Sep 17 00:00:00 2001
+From 573bd9ae2bf49ebb1e08dffb867604e7b8567898 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -19,13 +19,13 @@ Refs ogulcancelik/herdr#1947
  packaging/windows/installer/project.nsi       |  447 +++
  packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
- scripts/package_windows_installer.ps1         |  497 +++
+ scripts/package_windows_installer.ps1         |  501 +++
  scripts/preview.py                            |   84 +-
  scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  770 ++++
+ scripts/test_windows_installer.py             |  772 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  432 +++
  scripts/windows_installer_test.ps1            |  956 +++++
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  531 ++-
- 44 files changed, 9303 insertions(+), 371 deletions(-)
+ 44 files changed, 9309 insertions(+), 371 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -55287,10 +55287,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d411c1fbe3016228d76c1390bdc6fcafacbcd4bc
+index 0000000000000000000000000000000000000000..93418f47d45d8bdd393f1ff563bd608ab64545cb
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,497 @@
+@@ -0,0 +1,501 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -55679,11 +55679,12 @@ index 0000000000000000000000000000000000000000..d411c1fbe3016228d76c1390bdc6fcaf
 +    $canonicalSkillHasher.Dispose()
 +}
 +$skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
-+if ($skillHashManifestText.Contains("`r") -or
-+    -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
-+    throw "Managed skill hash manifest must use LF line endings and end with a newline."
++$skillHashManifestValidationText = $skillHashManifestText.Replace("`r`n", "`n")
++if ($skillHashManifestValidationText.Contains("`r") -or
++    -not $skillHashManifestValidationText.EndsWith("`n", [StringComparison]::Ordinal)) {
++    throw "Managed skill hash manifest must use valid line endings and end with a newline."
 +}
-+$skillHashManifestLines = @($skillHashManifestText.Substring(0, $skillHashManifestText.Length - 1) -split "`n")
++$skillHashManifestLines = @($skillHashManifestValidationText.Substring(0, $skillHashManifestValidationText.Length - 1) -split "`n")
 +if ($skillHashManifestLines.Count -lt 2 -or $skillHashManifestLines[0] -cne "herdr-managed-skill-hashes-v1") {
 +    throw "Managed skill hash manifest has an invalid header."
 +}
@@ -55735,6 +55736,9 @@ index 0000000000000000000000000000000000000000..d411c1fbe3016228d76c1390bdc6fcaf
 +try {
 +    $canonicalSkillSource = Join-Path $workingRoot "SKILL.md"
 +    [IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)
++    $canonicalSkillHashManifest = Join-Path $workingRoot "managed-skill-hashes.txt"
++    $canonicalSkillHashManifestBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillHashManifestValidationText)
++    [IO.File]::WriteAllBytes($canonicalSkillHashManifest, $canonicalSkillHashManifestBytes)
 +    $toolRoot = Join-Path $workingRoot "tool"
 +    Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
 +    $makensis = Join-Path $toolRoot "nsis-$NsisVersion\makensis.exe"
@@ -55756,7 +55760,7 @@ index 0000000000000000000000000000000000000000..d411c1fbe3016228d76c1390bdc6fcaf
 +        "/DARG_LAUNCHER_EXE=$LauncherExe",
 +        "/DARG_HELPER_PS1=$helperScript",
 +        "/DARG_SKILL_MD=$canonicalSkillSource",
-+        "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
++        "/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest",
 +        "/DARG_ARTWORK_DIR=$artworkDir",
 +        "/DINFO_PRODUCTNAME=$ProductName",
 +        "/DINFO_DISTRIBUTIONNAME=$DistributionName",
@@ -56315,10 +56319,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4f6874cdd2f52c0126b2a8a6f338ab107502a44
+index 0000000000000000000000000000000000000000..17aa6f5e596cfdd8fff75d7163a856f292d94c18
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,770 @@
+@@ -0,0 +1,772 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56502,7 +56506,9 @@ index 0000000000000000000000000000000000000000..c4f6874cdd2f52c0126b2a8a6f338ab1
 +        self.assertIn("$canonicalSkillHasher.ComputeHash($canonicalSkillBytes)", packager)
 +        self.assertNotIn("::HashData", packager)
 +        self.assertIn('"/DARG_SKILL_MD=$canonicalSkillSource"', packager)
-+        self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$skillHashManifest"', packager)
++        self.assertIn('$skillHashManifestValidationText = $skillHashManifestText.Replace("`r`n", "`n")', packager)
++        self.assertIn('[IO.File]::WriteAllBytes($canonicalSkillHashManifest, $canonicalSkillHashManifestBytes)', packager)
++        self.assertIn('"/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest"', packager)
 +        self.assertIn('$skillValidationText = $skillText.Replace("`r`n", "`n")', packager)
 +        self.assertIn("Unknown universal SKILL.md was overwritten", lifecycle)
 +        self.assertIn("Known universal SKILL.md was not updated", lifecycle)

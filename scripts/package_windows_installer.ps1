@@ -386,11 +386,12 @@ try {
     $canonicalSkillHasher.Dispose()
 }
 $skillHashManifestText = (New-Object Text.UTF8Encoding($false, $true)).GetString([IO.File]::ReadAllBytes($skillHashManifest))
-if ($skillHashManifestText.Contains("`r") -or
-    -not $skillHashManifestText.EndsWith("`n", [StringComparison]::Ordinal)) {
-    throw "Managed skill hash manifest must use LF line endings and end with a newline."
+$skillHashManifestValidationText = $skillHashManifestText.Replace("`r`n", "`n")
+if ($skillHashManifestValidationText.Contains("`r") -or
+    -not $skillHashManifestValidationText.EndsWith("`n", [StringComparison]::Ordinal)) {
+    throw "Managed skill hash manifest must use valid line endings and end with a newline."
 }
-$skillHashManifestLines = @($skillHashManifestText.Substring(0, $skillHashManifestText.Length - 1) -split "`n")
+$skillHashManifestLines = @($skillHashManifestValidationText.Substring(0, $skillHashManifestValidationText.Length - 1) -split "`n")
 if ($skillHashManifestLines.Count -lt 2 -or $skillHashManifestLines[0] -cne "herdr-managed-skill-hashes-v1") {
     throw "Managed skill hash manifest has an invalid header."
 }
@@ -442,6 +443,9 @@ New-Item -ItemType Directory -Path $workingRoot | Out-Null
 try {
     $canonicalSkillSource = Join-Path $workingRoot "SKILL.md"
     [IO.File]::WriteAllBytes($canonicalSkillSource, $canonicalSkillBytes)
+    $canonicalSkillHashManifest = Join-Path $workingRoot "managed-skill-hashes.txt"
+    $canonicalSkillHashManifestBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($skillHashManifestValidationText)
+    [IO.File]::WriteAllBytes($canonicalSkillHashManifest, $canonicalSkillHashManifestBytes)
     $toolRoot = Join-Path $workingRoot "tool"
     Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot
     $makensis = Join-Path $toolRoot "nsis-$NsisVersion\makensis.exe"
@@ -463,7 +467,7 @@ try {
         "/DARG_LAUNCHER_EXE=$LauncherExe",
         "/DARG_HELPER_PS1=$helperScript",
         "/DARG_SKILL_MD=$canonicalSkillSource",
-        "/DARG_SKILL_HASH_MANIFEST=$skillHashManifest",
+        "/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest",
         "/DARG_ARTWORK_DIR=$artworkDir",
         "/DINFO_PRODUCTNAME=$ProductName",
         "/DINFO_DISTRIBUTIONNAME=$DistributionName",
