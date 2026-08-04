@@ -1,4 +1,4 @@
-From e25e4fe3c3736708d7db49497f881746e17599e5 Mon Sep 17 00:00:00 2001
+From f57f0c99b4d893d84ef6494dabfb021caf312b34 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -61290,7 +61290,7 @@ index 2f31e76223bbd4125e236810c2c6602d1f2e07a5..a9ed267c4dad535ee9cb3f4302cbfab9
          .arg("client")
          .env(
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index b6898af4409078b4bea8e7b96670f996e5c06175..1bc8243ee74929e58db539598ecd917bfe52fc1c 100644
+index 63239b1f622c11ca4cb22446c67f7e0fe6ea319d..277aa3db742f61644d9278aa089c847ee06be365 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
 @@ -209,9 +209,11 @@ fn validate_running_server_compatibility() -> io::Result<()> {

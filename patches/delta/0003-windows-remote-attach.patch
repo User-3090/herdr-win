@@ -1,4 +1,4 @@
-From 0549ee366c94d9895803fa846989ae8f91c70758 Mon Sep 17 00:00:00 2001
+From 296bd9f06d8ffb15d5315c8a9622b51f54e78c6a Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Sun, 26 Jul 2026 06:47:17 +0200
 Subject: [PATCH 2/4] feat(windows): unify remote attach and image transport
@@ -41,14 +41,14 @@ Refs ogulcancelik/herdr#1947
  src/remote.rs                                 |  149 +-
  src/remote/attach.rs                          | 3622 +++++++++++++++++
  src/remote/unix.rs                            | 3091 +-------------
- src/remote/windows.rs                         |  129 +
- src/server/autodetect.rs                      |   46 +-
+ src/remote/windows.rs                         |  124 +
+ src/server/autodetect.rs                      |   48 +-
  src/server/client_transport.rs                |   51 +-
  src/server/clipboard_image.rs                 |   12 +-
  src/server/headless.rs                        |  248 +-
  src/ui.rs                                     |   69 +-
  src/update.rs                                 |    5 +
- 41 files changed, 5664 insertions(+), 3436 deletions(-)
+ 41 files changed, 5660 insertions(+), 3437 deletions(-)
  create mode 100644 src/platform/unix_common.rs
  create mode 100644 src/platform/windows/clipboard_image.rs
  create mode 100644 src/remote/attach.rs
@@ -9564,10 +9564,10 @@ index 6fe927c1cc0f99c4f2fbfd99bf9b758f4acfd15e..b776871efa79e4e73c2ab385c3372bfe
 -}
 diff --git a/src/remote/windows.rs b/src/remote/windows.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346fa0cfc00
+index 0000000000000000000000000000000000000000..e70fcab4a58553113b3f3f7a28ea2ff3d33d1d3b
 --- /dev/null
 +++ b/src/remote/windows.rs
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,124 @@
 +//! Windows remote-host side of the SSH stdio bridge.
 +
 +use std::io;
@@ -9603,12 +9603,7 @@ index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346
 +
 +fn ensure_remote_server_running() -> io::Result<()> {
 +    let socket_path = crate::server::socket_paths::client_socket_path();
-+    if crate::server::autodetect::is_server_listening() {
-+        let status = crate::api::read_runtime_status_at(
-+            &crate::api::socket_path(),
-+            Duration::from_millis(500),
-+        )?
-+        .ok_or_else(|| io::Error::other("remote server status API is unavailable"))?;
++    if let Some(status) = crate::server::autodetect::read_server_status()? {
 +        if status.protocol == Some(crate::protocol::PROTOCOL_VERSION) {
 +            return Ok(());
 +        }
@@ -9698,7 +9693,7 @@ index 0000000000000000000000000000000000000000..e2a53dbedcea1dee78e8beea60f55346
 +    }
 +}
 diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
-index 337c388f9a2bedd4e72159317e160e8bab6d92d0..b6898af4409078b4bea8e7b96670f996e5c06175 100644
+index 337c388f9a2bedd4e72159317e160e8bab6d92d0..63239b1f622c11ca4cb22446c67f7e0fe6ea319d 100644
 --- a/src/server/autodetect.rs
 +++ b/src/server/autodetect.rs
 @@ -31,7 +31,6 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -9709,6 +9704,15 @@ index 337c388f9a2bedd4e72159317e160e8bab6d92d0..b6898af4409078b4bea8e7b96670f996
  // ---------------------------------------------------------------------------
  // Server detection
  // ---------------------------------------------------------------------------
+@@ -91,7 +90,7 @@ fn is_server_listening_at(socket_path: &Path) -> bool {
+     }
+ }
+ 
+-fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
++pub(crate) fn read_server_status() -> io::Result<Option<crate::api::RuntimeStatus>> {
+     crate::api::read_runtime_status_at(&crate::api::socket_path(), STATUS_REQUEST_TIMEOUT)
+ }
+ 
 @@ -117,16 +116,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
          Err(err) => return Err(err),
      };
