@@ -1,4 +1,4 @@
-From e35375d89ddc16f76c50730021fae9aeca28aa74 Mon Sep 17 00:00:00 2001
+From 503365388534847ffc486da5275ec70330d62c01 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -20,7 +20,7 @@ Refs ogulcancelik/herdr#1947
  packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
  scripts/package_windows_installer.ps1         |  501 +++
- scripts/preview.py                            |   84 +-
+ scripts/preview.py                            |   88 +-
  scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  531 ++-
- 44 files changed, 9319 insertions(+), 371 deletions(-)
+ 44 files changed, 9321 insertions(+), 373 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -55793,7 +55793,7 @@ index 0000000000000000000000000000000000000000..93418f47d45d8bdd393f1ff563bd608a
 +
 +Write-Host "Created $DistributionName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
-index fa55d623d865cfe1f797ab3efad58ae842f91c7c..115683892cad85d109f4e089f3743183957f83aa 100644
+index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51ffba676d 100644
 --- a/scripts/preview.py
 +++ b/scripts/preview.py
 @@ -5,6 +5,7 @@ import argparse
@@ -55950,6 +55950,22 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..115683892cad85d109f4e089f3743183
  def main() -> int:
      parser = argparse.ArgumentParser(description="Preview channel release helpers")
      sub = parser.add_subparsers(required=True)
+@@ -299,13 +350,13 @@ def main() -> int:
+     notes.add_argument("--commit", required=True)
+     notes.add_argument("--build-id", required=True)
+     notes.add_argument("--base-version", required=True)
+-    notes.add_argument("--repo", default="herdrdev/herdr")
++    notes.add_argument("--repo", default="ogulcancelik/herdr")
+     notes.add_argument("--output", required=True)
+     notes.set_defaults(func=cmd_notes)
+ 
+     manifest = sub.add_parser("manifest")
+     manifest.add_argument("--output", default="website/preview.json")
+-    manifest.add_argument("--repo", default="herdrdev/herdr")
++    manifest.add_argument("--repo", default="ogulcancelik/herdr")
+     manifest.add_argument("--tag", required=True)
+     manifest.add_argument("--build-id", required=True)
+     manifest.add_argument("--commit", required=True)
 @@ -315,8 +366,13 @@ def main() -> int:
      manifest.add_argument("--notes", required=True)
      manifest.add_argument("--sha-file")

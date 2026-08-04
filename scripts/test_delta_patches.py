@@ -351,6 +351,10 @@ class DeltaPatchTests(unittest.TestCase):
             "replayed preview generator differs from the selected control revision",
             workflow,
         )
+        self.assertIn('git -C source rev-parse "HEAD:scripts/preview.py"', workflow)
+        self.assertIn('git -C control rev-parse "HEAD:scripts/preview.py"', workflow)
+        self.assertNotIn("sourceGeneratorHash", workflow)
+        self.assertNotIn("controlGeneratorHash", workflow)
         build_section, promotion_section = workflow.split("\n  publish:\n", 1)
         self.assertIn("cargo build --release", build_section)
         self.assertNotIn("cargo build", promotion_section)

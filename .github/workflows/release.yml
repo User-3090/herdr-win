@@ -517,9 +517,15 @@ jobs:
             throw "tested preview generator differs from replay HEAD"
           }
           Copy-Item -LiteralPath control\patches\delta\series -Destination (Join-Path $artifactRoot "PATCH_SERIES.txt")
-          $sourceGeneratorHash = (Get-FileHash -LiteralPath source\scripts\preview.py -Algorithm SHA256).Hash
-          $controlGeneratorHash = (Get-FileHash -LiteralPath control\scripts\preview.py -Algorithm SHA256).Hash
-          if ($sourceGeneratorHash -ne $controlGeneratorHash) {
+          $sourceGeneratorBlob = (& git -C source rev-parse "HEAD:scripts/preview.py").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "could not resolve replayed preview generator blob"
+          }
+          $controlGeneratorBlob = (& git -C control rev-parse "HEAD:scripts/preview.py").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "could not resolve control preview generator blob"
+          }
+          if ($sourceGeneratorBlob -cne $controlGeneratorBlob) {
             throw "replayed preview generator differs from the selected control revision"
           }
 
