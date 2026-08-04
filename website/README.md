@@ -1,5 +1,8 @@
 # herdr website
 
+> [!NOTE]
+> This is inherited official-upstream website tooling. herdr-win does not publish versioned documentation during its release workflow; it builds and promotes retained binaries, then writes only `website/preview.json`.
+
 The homepage is `index.html`. The documentation source is in `src/content/docs/` and is rendered by Astro Starlight.
 
 ```bash
@@ -10,12 +13,12 @@ bun run build
 
 The build output is `dist/`. Configure Cloudflare Pages to use `website` as the project root and publish `dist`.
 
-Stable docs live in `src/content/docs/`. Unreleased docs live in `../docs/next/website/src/content/docs/` and are generated at `/docs/preview/`. Immutable release snapshots live in `../docs/versions/` and are generated at `/docs/<version>/`.
+For official upstream Herdr, stable docs live in `src/content/docs/`, unreleased docs live in `../docs/next/website/src/content/docs/`, and immutable release snapshots live in `../docs/versions/`.
 
-Do not promote docs manually before a release. After the GitHub Release succeeds, release CI runs:
+The following official-upstream command is not part of herdr-win release automation:
 
 ```bash
 node website/scripts/docs-versions.mjs publish <tag>
 ```
 
-This snapshots the tagged next docs and promotes the same tagged content to stable before the website deploy. Use `node website/scripts/docs-versions.mjs check` to validate committed snapshots against their release tags.
+It snapshots tagged upstream docs and promotes the same tagged content to stable before the upstream website deploy. Use `node website/scripts/docs-versions.mjs check` only when maintaining those inherited snapshots.

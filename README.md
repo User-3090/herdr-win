@@ -2,7 +2,7 @@
 
 **A native Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr), maintained as a small, reviewable patch queue—not a permanent fork.**
 
-[![Patch replay](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml) [![Candidate build](https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/hdosys/herdr-win/blob/master/rust-toolchain.toml) ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4?logo=windows11&logoColor=white) [![Built with Herdr Sandbox](https://img.shields.io/badge/built%20with-Herdr%20Sandbox-0078D4?logo=windows11&logoColor=white)](https://github.com/hdosys/herdr-sandbox) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/hdosys/herdr-win/blob/master/LICENSE)
+[![Patch replay](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml) [![Candidate build](https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/hdosys/herdr-win/blob/master/rust-toolchain.toml) [![Built with Herdr Sandbox](https://img.shields.io/badge/built%20with-Herdr%20Sandbox-0078D4?logo=windows11&logoColor=white)](https://github.com/hdosys/herdr-sandbox) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/hdosys/herdr-win/blob/master/LICENSE)
 
 `herdr-win` is an unofficial, upstream-first delivery lane for Herdr on Windows. It keeps the normal `herdr` command and workflow, adds Windows behavior that has not yet landed upstream, and publishes tested snapshots from an exact reviewed Herdr release plus four explicit patches.
 
@@ -65,22 +65,15 @@ An upstream refresh is deliberate: select the latest stable release, replay the 
 
 ## Install
 
-Windows x86_64 is the maintained distribution target. Download the newest setup and its matching `.sha256` file from [Releases](https://github.com/hdosys/herdr-win/releases).
+Windows x86_64 is the managed distribution target. Each release also carries matching Linux and macOS binaries for remote endpoints that must speak the same wire protocol.
 
 ### Setup (recommended)
 
-Verify the download before running it:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png" alt="Herdr Win setup welcome page" width="585">
+</p>
 
-```powershell
-$setup = Get-Item .\herdr-win_v*_windows_amd64_setup.exe
-$sidecar = "$($setup.FullName).sha256"
-$expected = ((Get-Content -LiteralPath $sidecar -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-$actual = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -cne $expected) { throw "herdr-win setup checksum mismatch" }
-& $setup.FullName
-```
-
-Setup installs for the current user without administrator access, adds `herdr` to the user `PATH`, and registers an uninstaller. Open a new terminal and run:
+Download the newest `herdr-win_v<version>_windows_amd64_setup.exe` from [Releases](https://github.com/hdosys/herdr-win/releases) and run it. Setup installs for the current user without administrator access, adds `herdr` to the user `PATH`, and registers an uninstaller. Open a new terminal and run:
 
 ```powershell
 herdr
@@ -88,12 +81,18 @@ herdr
 
 Use `herdr update` from an ordinary terminal after detaching from active Herdr sessions. Updates preserve running sessions and activate the new verified snapshot when it is safe. Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
 
-### Portable ZIP
+### Portable Windows ZIP
 
-The release also includes `herdr-win_v<version>_windows_amd64.zip` and a matching checksum. Verify it the same way, extract the complete archive into one directory, and run `herdr.exe`.
+The release also includes `herdr-win_v<version>_windows_amd64.zip`. Extract the complete archive into one directory and run `herdr.exe`.
 
 > [!WARNING]
-> The Herdr executable and setup are currently unsigned, so Windows may show a SmartScreen warning. Run them only after the SHA-256 matches the sidecar from the same release.
+> The Herdr executable and setup are currently unsigned, so Windows may show a SmartScreen warning. Download release artifacts only from this repository.
+
+### Matching Linux and macOS binaries
+
+Each release includes raw `linux_amd64`, `linux_arm64`, `macos_amd64`, and `macos_arm64` executables. They are compatibility companions for remote hosts, not managed installers.
+
+herdr-win currently uses wire protocol 20. A remote client and server must agree on that protocol, so an official Herdr build with a different protocol is not interchangeable. Use matching binaries from the same herdr-win release on every endpoint.
 
 For general commands, configuration, and agent integrations, use the [official Herdr documentation](https://herdr.dev/docs/).
 
@@ -128,8 +127,8 @@ Ordinary pushes do not publish binaries.
 
 ## Issues and contributions
 
-- Use [upstream Herdr](https://github.com/ogulcancelik/herdr) for general product behavior and cross-platform issues.
-- Use [herdr-win issues](https://github.com/hdosys/herdr-win/issues) for behavior specific to this Windows distribution.
+- Use [upstream Herdr](https://github.com/ogulcancelik/herdr) for general product behavior that reproduces with an official upstream build.
+- Use [herdr-win issues](https://github.com/hdosys/herdr-win/issues) for this distribution's artifacts, update feed, workflows, or maintained patches.
 - Read [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) before changing the queue or release automation.
 
 ## Credits and license

@@ -212,7 +212,11 @@ class DeltaPatchTests(unittest.TestCase):
             base[:12],
             "https://github.com/hdosys/herdr-sandbox",
             "https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach",
+            "https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png",
             "Upstreamed in Herdr v0.8.0",
+            "wire protocol 20",
+            "linux_amd64",
+            "macos_arm64",
             "## For upstream maintainers",
             "https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg",
             "https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg",
@@ -224,6 +228,13 @@ class DeltaPatchTests(unittest.TestCase):
             self.assertIn(patch_name, readme)
         self.assertNotIn("User-3090/herdr-win/actions/workflows", readme)
         self.assertNotIn("## Identity and compatibility", readme)
+        self.assertNotIn("Get-FileHash", readme)
+        self.assertNotIn("platform-Windows%20x64", readme)
+        screenshot = PROJECT_ROOT / "docs" / "assets" / "herdr-win-setup-welcome.png"
+        screenshot_bytes = screenshot.read_bytes()
+        self.assertEqual(screenshot_bytes[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(int.from_bytes(screenshot_bytes[16:20], "big"), 585)
+        self.assertEqual(int.from_bytes(screenshot_bytes[20:24], "big"), 479)
         workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         self.assertFalse(

@@ -9,6 +9,8 @@ __pycache__/
 .DS_Store
 
 /docs/*
+!/docs/assets/
+!/docs/assets/**
 !/docs/next/
 !/docs/next/**
 !/docs/versions/

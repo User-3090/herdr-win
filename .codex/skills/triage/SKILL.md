@@ -1,21 +1,21 @@
 ---
 name: triage
-description: Triage open herdr GitHub issues into a concise decision-first Markdown table. Use when the user says "triage", asks to triage open issues, asks which issues need attention, or wants issue priority/recommendation lights for herdr.
+description: Triage open herdr-win GitHub issues into a concise decision-first Markdown table. Use when the user asks which fork issues need attention or wants issue priority/recommendation lights.
 ---
 
-# Herdr Issue Triage
+# herdr-win issue triage
 
-Use this skill only inside the herdr repository.
+Use this skill only inside the `hdosys/herdr-win` repository.
 
-When the user says `triage`, inspect open GitHub issues for `ogulcancelik/herdr` and return a concise Markdown table. Prefer GitHub MCP tools when available. If they are unavailable, use `gh issue list` / `gh issue view` only when authenticated access is already configured.
+When the user says `triage`, inspect open GitHub issues for `hdosys/herdr-win` and return a concise Markdown table. Query official `ogulcancelik/herdr` only when the user explicitly requests upstream triage. Prefer GitHub MCP tools when available. If they are unavailable, use `gh issue list` / `gh issue view` only when authenticated access is already configured.
 
 Use this table shape:
 
 | Light | Recommendation | Issue | Age | Reactions | Why |
 |---|---|---|---:|---:|---|
-| 🔴 | fix now | [#123](https://github.com/ogulcancelik/herdr/issues/123) | 18d | 5 | user-visible regression |
-| 🟡 | queue | [#124](https://github.com/ogulcancelik/herdr/issues/124) | 42d | 2 | useful but not blocking |
-| 🔵 | defer | [#125](https://github.com/ogulcancelik/herdr/issues/125) | 7d | 0 | cosmetic polish |
+| 🔴 | fix now | [#123](https://github.com/hdosys/herdr-win/issues/123) | 18d | 5 | user-visible regression |
+| 🟡 | queue | [#124](https://github.com/hdosys/herdr-win/issues/124) | 42d | 2 | useful but not blocking |
+| 🔵 | defer | [#125](https://github.com/hdosys/herdr-win/issues/125) | 7d | 0 | cosmetic polish |
 
 Keep issue numbers as Markdown links. Use days since issue creation for `Age`. Use total reactions for `Reactions`; include a compact breakdown only when it changes interpretation, such as `7 (5 👍, 2 👀)`.
 

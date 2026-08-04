@@ -1,5 +1,8 @@
 # Herdr agent guide
 
+> [!NOTE]
+> This is inherited official-upstream Herdr guidance. herdr-win-specific installation, release, and issue-routing information lives in the repository README.
+
 You are reading this because a human asked you to help them understand, set up, or troubleshoot Herdr. This file gives you the concept model, the setup path, and the diagnosis recipes so you can guide them accurately. Canonical documentation lives at https://herdr.dev/docs/ — link the human there for depth, and verify any command you are unsure about against those pages instead of guessing.
 
 If you are running *inside* a Herdr pane (the environment variable `HERDR_ENV=1` is set), Herdr also ships a skill file that teaches you to control Herdr yourself through the `herdr` CLI: https://raw.githubusercontent.com/ogulcancelik/herdr/master/skills/herdr/SKILL.md. That file is about you operating Herdr; this file is about you teaching a human.

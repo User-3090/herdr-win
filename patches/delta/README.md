@@ -29,6 +29,8 @@ files and do not belong in this product patch queue.
 
 ## Refreshing the queue
 
+Run this procedure only for a current user-authorized official-upstream refresh. Ordinary fork work must use the commit already recorded in `BASE` without querying or fetching newer upstream source.
+
 1. Query the official latest stable release, fetch and peel its `v<version>` tag,
    verify it is neither draft nor prerelease, and start a clean branch at that
    exact commit.
