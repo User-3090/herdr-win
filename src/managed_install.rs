@@ -1,5 +1,7 @@
 //! Shared managed-install identity and path contract.
 
+#[cfg(windows)]
+use std::fs;
 use std::{io, path::PathBuf};
 
 pub(crate) const RUNTIME_RECORD_HEADER: &str = "herdr-runtime-v1";
@@ -7,6 +9,11 @@ pub(crate) const RUNTIME_RECORD_HEADER: &str = "herdr-runtime-v1";
 #[allow(dead_code)]
 pub(crate) const POINTER_RECORD_HEADER: &str = "herdr-pointer-v1";
 pub(crate) const MANAGED_BIN_MARKER: &[u8] = b"herdr-managed-bin-v1\n";
+#[cfg(windows)]
+// Shared with the launcher binary, which never inspects updater ownership.
+#[allow(dead_code)]
+pub(crate) const WINGET_PACKAGE_MANAGER_RECORD: &[u8] =
+    b"herdr-package-manager-v1\nmanager=winget\n";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BuildId(String);
@@ -140,6 +147,13 @@ impl ManagedInstall {
         self.state_dir().join("installer-helper.ps1")
     }
 
+    #[cfg(windows)]
+    // Shared with the launcher binary, which never inspects updater ownership.
+    #[allow(dead_code)]
+    pub(crate) fn package_manager_path(&self) -> PathBuf {
+        self.state_dir().join("package-manager")
+    }
+
     pub(crate) fn lease_path(&self, build_id: &BuildId) -> PathBuf {
         self.leases_dir()
             .join(format!("{}.lease", build_id.as_str()))
@@ -179,6 +193,68 @@ pub(crate) fn current_payload_is_managed() -> io::Result<bool> {
         )
     })?;
     Ok(crate::platform::managed_install_command_executable(current.clone())? != current)
+}
+
+#[cfg(windows)]
+// The launcher compiles this module but never enters the product updater path.
+#[allow(dead_code)]
+pub(crate) fn current_install_is_winget() -> io::Result<bool> {
+    let current = std::env::current_exe().map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("failed to determine the physical Herdr executable path: {err}"),
+        )
+    })?;
+    let command = crate::platform::managed_install_command_executable(current.clone())?;
+    if command == current {
+        return Ok(false);
+    }
+    let root = command
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "managed Herdr command path has no install root: {}",
+                    command.display()
+                ),
+            )
+        })?;
+    let marker = ManagedInstall::new(root.to_path_buf()).package_manager_path();
+    match fs::read(&marker) {
+        Ok(bytes) => {
+            validate_winget_package_manager_record(&bytes, &marker)?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read managed Herdr package-manager marker {}: {err}",
+                marker.display()
+            ),
+        )),
+    }
+}
+
+#[cfg(windows)]
+// The launcher compiles this module but never validates updater ownership.
+#[allow(dead_code)]
+fn validate_winget_package_manager_record(
+    bytes: &[u8],
+    source: &std::path::Path,
+) -> io::Result<()> {
+    if bytes != WINGET_PACKAGE_MANAGER_RECORD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "managed Herdr package-manager marker {} is not the exact WinGet record",
+                source.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, windows))]
@@ -225,5 +301,18 @@ mod tests {
             );
         }
         assert!(parse_record(&[0xff], POINTER_RECORD_HEADER, source).is_err());
+    }
+
+    #[test]
+    fn winget_package_manager_record_is_exact() {
+        let source = std::path::Path::new("package-manager");
+        validate_winget_package_manager_record(WINGET_PACKAGE_MANAGER_RECORD, source).unwrap();
+        for invalid in [
+            b"herdr-package-manager-v1\nmanager=winget".as_slice(),
+            b"herdr-package-manager-v1\r\nmanager=winget\r\n".as_slice(),
+            b"herdr-package-manager-v1\nmanager=other\n".as_slice(),
+        ] {
+            assert!(validate_winget_package_manager_record(invalid, source).is_err());
+        }
     }
 }

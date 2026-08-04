@@ -1,4 +1,4 @@
-From 503365388534847ffc486da5275ec70330d62c01 Mon Sep 17 00:00:00 2001
+From bb255eac09311be4baafc796a725007366c631a5 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3105 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 3152 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -16,7 +16,7 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  447 +++
+ packaging/windows/installer/project.nsi       |  455 +++
  packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
  scripts/package_windows_installer.ps1         |  501 +++
@@ -25,10 +25,10 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  180 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  773 ++++
+ scripts/test_windows_installer.py             |  800 +++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  441 +++
- scripts/windows_installer_test.ps1            |  956 +++++
+ scripts/windows_installer_test.ps1            |  978 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -40,7 +40,7 @@ Refs ogulcancelik/herdr#1947
  src/config/model.rs                           |   10 -
  src/distribution.rs                           |   40 +
  src/main.rs                                   |   19 +-
- src/managed_install.rs                        |  229 ++
+ src/managed_install.rs                        |  318 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  158 +-
  src/platform/windows/launcher.rs              | 1065 ++++++
@@ -48,8 +48,8 @@ Refs ogulcancelik/herdr#1947
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  531 ++-
- 44 files changed, 9321 insertions(+), 373 deletions(-)
+ src/update.rs                                 |  606 +++-
+ 44 files changed, 9571 insertions(+), 391 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -151,10 +151,10 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857fc3b8e761
+index 0000000000000000000000000000000000000000..b41e8030841b0208299f70d0159270947d83a308
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3105 @@
+@@ -0,0 +1,3152 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
@@ -172,6 +172,8 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    [string]$BuildId,
 +    [string]$DisplayVersion,
 +    [string]$NumericVersion,
++    [ValidateSet("Direct", "WinGet")]
++    [string]$InstallManager = "Direct",
 +    [ValidateSet("Keep", "Remove")]
 +    [string]$SettingsDisposition = "Keep",
 +    [ValidateSet("Keep", "Auto", "Remove")]
@@ -214,6 +216,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +$script:InstallManifestHeader = "herdr-install-manifest-v1"
 +$script:ManagedSkillHashesHeader = "herdr-managed-skill-hashes-v1"
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
++$script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"
 +$script:UninstallMarkerText = "herdr-uninstall-v1`n"
 +$script:TransactionMarkerName = ".herdr-installer-transaction"
 +$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
@@ -1341,6 +1344,35 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    }
 +}
 +
++function Assert-HerdrPackageManagerMarker {
++    param([Parameter(Mandatory = $true)][string]$StateDir)
++
++    $marker = Join-Path $StateDir "package-manager"
++    if (-not (Test-Path -LiteralPath $marker)) {
++        return
++    }
++    Assert-HerdrRegularFile -Path $marker
++    if ((Read-HerdrStrictUtf8 -Path $marker) -cne $script:PackageManagerMarkerText) {
++        throw "Managed Herdr package-manager marker is invalid: $marker"
++    }
++}
++
++function Set-HerdrPackageManagerMarker {
++    param(
++        [Parameter(Mandatory = $true)][string]$StateDir,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct"
++    )
++
++    $marker = Join-Path $StateDir "package-manager"
++    if (Test-Path -LiteralPath $marker) {
++        Assert-HerdrPackageManagerMarker -StateDir $StateDir
++        return
++    }
++    if ($InstallManager -ceq "WinGet") {
++        Write-HerdrDurableText -Path $marker -Text $script:PackageManagerMarkerText
++    }
++}
++
 +function Assert-HerdrManagedRoot {
 +    param([Parameter(Mandatory = $true)][string]$InstallRoot)
 +
@@ -1352,7 +1384,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
 +    $stateDir = Join-Path $InstallRoot "state"
 +    Assert-HerdrRegularDirectory -Path $stateDir
-+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")
++    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
 +        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
 +        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1372,6 +1404,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
 +    Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
 +    $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
++    Assert-HerdrPackageManagerMarker -StateDir $stateDir
 +    Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
 +    [void](Get-HerdrPendingLauncher -StateDir $stateDir)
 +
@@ -1412,7 +1445,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    if ((Read-HerdrStrictUtf8 -Path (Join-Path $stateDir "uninstall.pending")) -cne $script:UninstallMarkerText) {
 +        throw "Invalid Herdr uninstall retry marker."
 +    }
-+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
++    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
 +        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
 +        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1428,6 +1461,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +    } else {
 +        $null
 +    }
++    Assert-HerdrPackageManagerMarker -StateDir $stateDir
 +    if (Test-Path -LiteralPath (Join-Path $InstallRoot "bin")) {
 +        if ($null -eq $installManifest) {
 +            throw "Cannot validate remaining managed bin without install.manifest."
@@ -1633,7 +1667,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        return
 +    }
 +    Assert-HerdrRegularDirectory -Path $stateDir
-+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
++    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
 +        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
 +        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1649,6 +1683,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        (Read-HerdrStrictUtf8 -Path $stateManifest) -cne $InstallManifestText) {
 +        throw "Interrupted uninstall install.manifest differs from its transaction ownership record."
 +    }
++    Assert-HerdrPackageManagerMarker -StateDir $stateDir
 +    foreach ($pointerName in @("active", "pending")) {
 +        $pointer = Join-Path $stateDir $pointerName
 +        if (Test-Path -LiteralPath $pointer) {
@@ -2519,7 +2554,8 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        [Parameter(Mandatory = $true)][string]$HelperSourcePath,
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
-+        [Parameter(Mandatory = $true)][string]$NumericVersion
++        [Parameter(Mandatory = $true)][string]$NumericVersion,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct"
 +    )
 +
 +    New-Item -ItemType Directory -Path (Join-Path $Destination "bin\managed-install-v1") -Force | Out-Null
@@ -2538,6 +2574,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion
 +    )
++    Set-HerdrPackageManagerMarker -StateDir (Join-Path $Destination "state") -InstallManager $InstallManager
 +    Assert-HerdrManagedRoot -InstallRoot $Destination
 +}
 +
@@ -2565,6 +2602,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
 +        [int]$LockTimeoutMilliseconds = 30000
 +    )
 +
@@ -2609,6 +2647,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +                }
 +                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
 +                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
++                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +                return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
 +            }
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
@@ -2616,6 +2655,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
 +                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
 +                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
++                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +                return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
 +            }
 +            Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -2627,6 +2667,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +            }
 +            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
 +            [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
++            Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +            return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
 +        } finally {
 +            $coordination.Dispose()
@@ -2652,6 +2693,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
 +        [int]$LockTimeoutMilliseconds = 30000
 +    )
 +
@@ -2709,6 +2751,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
++            -InstallManager $InstallManager `
 +            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    } else {
 +        $transaction = New-HerdrTransaction -Kind "fresh" -InstallRoot $InstallRoot
@@ -2722,7 +2765,8 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +                -HelperSourcePath $HelperSourcePath `
 +                -BuildId $BuildId `
 +                -DisplayVersion $DisplayVersion `
-+                -NumericVersion $NumericVersion
++                -NumericVersion $NumericVersion `
++                -InstallManager $InstallManager
 +            Publish-HerdrFreshTransaction `
 +                -Transaction $transaction `
 +                -InstallRoot $InstallRoot
@@ -2994,6 +3038,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        [Parameter(Mandatory = $true)][string]$BuildId,
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
 +        [int]$LifecycleLockTimeoutMilliseconds = 30000
 +    )
 +
@@ -3015,7 +3060,8 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +            -ClaudeSkillsRoot $claudeSkillsRoot `
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
-+            -NumericVersion $NumericVersion
++            -NumericVersion $NumericVersion `
++            -InstallManager $InstallManager
 +        $pathUpdate = Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -PreviouslyOwned $previousPathOwnership
 +        Set-HerdrArpRegistration `
 +            -InstallRoot $InstallRoot `
@@ -3133,7 +3179,7 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +        if ($null -ne $pendingLauncher) {
 +            Remove-Item -LiteralPath $pendingLauncher.Path -Force
 +        }
-+        foreach ($name in @("active", "pending", "install.manifest")) {
++        foreach ($name in @("active", "pending", "install.manifest", "package-manager")) {
 +            $path = Join-Path $stateDir $name
 +            if (Test-Path -LiteralPath $path) {
 +                Remove-Item -LiteralPath $path -Force
@@ -3215,7 +3261,8 @@ index 0000000000000000000000000000000000000000..efdeed7084b5e3fec494be38ebce857f
 +                    -SkillHashManifestPath $SkillHashManifestPath `
 +                    -BuildId $BuildId `
 +                    -DisplayVersion $DisplayVersion `
-+                    -NumericVersion $NumericVersion
++                    -NumericVersion $NumericVersion `
++                    -InstallManager $InstallManager
 +                if ($result.Status -ceq "Pending") {
 +                    [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
 +                } else {
@@ -54717,10 +54764,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe797c8adfef
+index 0000000000000000000000000000000000000000..95e1f905c0fe5de9788b93adf68e802a324f1930
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,455 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -54825,6 +54872,7 @@ index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe79
 +Var HelperExitCode
 +Var HelperOutput
 +Var StartGate
++Var InstallManager
 +Var SettingsDisposition
 +Var SettingsCheckbox
 +Var SkillDisposition
@@ -55009,6 +55057,13 @@ index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe79
 +
 +Function .onInit
 +  SetShellVarContext current
++  StrCpy $InstallManager "Direct"
++  ${GetParameters} $0
++  ClearErrors
++  ${GetOptions} "$0" "/WINGET" $1
++  ${IfNot} ${Errors}
++    StrCpy $InstallManager "WinGet"
++  ${EndIf}
 +  ${IfNot} ${RunningX64}
 +    Push "${INFO_DISTRIBUTIONNAME} requires 64-bit Windows."
 +    Call FailInstall
@@ -55129,7 +55184,7 @@ index 0000000000000000000000000000000000000000..af37602e313a34f4fef7c00f677bbe79
 +
 +installer_inputs_ready:
 +  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -56335,10 +56390,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..dccb53f4ff9f3ab1813e3b7ac84a2d32725db92a
+index 0000000000000000000000000000000000000000..55c89bb8fc57caf83e5151a49b23540d7fc1c273
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,773 @@
+@@ -0,0 +1,800 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56448,6 +56503,33 @@ index 0000000000000000000000000000000000000000..dccb53f4ff9f3ab1813e3b7ac84a2d32
 +        self.assertIn("Pending; staged until old sessions exit.", helper)
 +        self.assertIn("herdr-install-manifest-v1", helper)
 +        self.assertNotIn("skill_sha256=", helper)
++
++    def test_winget_origin_marker_delegates_update_ownership(self) -> None:
++        helper = HELPER.read_text(encoding="utf-8")
++        nsi = NSI.read_text(encoding="utf-8")
++        managed_install = MANAGED_INSTALL.read_text(encoding="utf-8")
++        update = UPDATE.read_text(encoding="utf-8")
++        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
++        self.assertIn('${GetOptions} "$0" "/WINGET" $1', nsi)
++        self.assertIn('StrCpy $InstallManager "WinGet"', nsi)
++        self.assertIn('-InstallManager "$InstallManager"', nsi)
++        self.assertIn(
++            '$script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"',
++            helper,
++        )
++        self.assertIn('Join-Path $StateDir "package-manager"', helper)
++        self.assertIn('InstallManager -ceq "WinGet"', helper)
++        self.assertIn('"install.manifest", "package-manager"', helper)
++        self.assertIn(
++            'b"herdr-package-manager-v1\\nmanager=winget\\n"', managed_install
++        )
++        self.assertIn("current_install_is_winget", managed_install)
++        self.assertIn(
++            'winget upgrade --id hdosys.herdr-win --exact', update
++        )
++        self.assertIn("self-update is disabled for WinGet installs", update)
++        self.assertIn("Direct setup removed WinGet ownership", lifecycle)
++        self.assertIn("Malformed package-manager ownership was accepted", lifecycle)
 +
 +    def test_installer_owns_the_cross_agent_skill_lifecycle(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
@@ -57782,10 +57864,10 @@ index 0000000000000000000000000000000000000000..8cb8aee7f6b8fe2b3952c4e7891033ea
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..afe5fc303fceb885863927f41f9b5bb2f5e8a0bf
+index 0000000000000000000000000000000000000000..655cc15d8f7d1c6e2163b80c61a01a712a2237dc
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,978 @@
 +[CmdletBinding()]
 +param()
 +
@@ -57900,6 +57982,7 @@ index 0000000000000000000000000000000000000000..afe5fc303fceb885863927f41f9b5bb2
 +        [string]$BuildId,
 +        [string]$DisplayVersion,
 +        [string]$NumericVersion,
++        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
 +        [string]$SkillSource = $script:TestSkillSource,
 +        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
 +        [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
@@ -57920,6 +58003,7 @@ index 0000000000000000000000000000000000000000..afe5fc303fceb885863927f41f9b5bb2
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
++            -InstallManager $InstallManager `
 +            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    }
 +}
@@ -58334,6 +58418,7 @@ index 0000000000000000000000000000000000000000..afe5fc303fceb885863927f41f9b5bb2
 +    Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
 +    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
 +    Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\package-manager"))) "Direct setup published package-manager ownership."
 +    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
 +    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
@@ -58582,6 +58667,25 @@ index 0000000000000000000000000000000000000000..afe5fc303fceb885863927f41f9b5bb2
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path $runtimePayload) "corrupt" "Rejected corruption was silently repaired or deleted."
 +    [IO.File]::WriteAllBytes($runtimePayload, $ownedPayloadBytes)
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
++
++    # WinGet owns only installations carrying its exact setup marker. A later
++    # direct setup preserves that ownership, malformed markers fail closed, and
++    # uninstall removes the marker with the managed state root.
++    $wingetRoot = Join-Path $tempRoot "winget-install"
++    $wingetSkillsRoot = Join-Path $tempRoot "winget-agent-skills"
++    [void](Invoke-TestInstall -Root $wingetRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -InstallManager WinGet -AgentSkillsRoot $wingetSkillsRoot)
++    $wingetMarker = Join-Path $wingetRoot "state\package-manager"
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "WinGet setup did not publish its exact package-manager marker."
++    [void](Invoke-TestInstall -Root $wingetRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -InstallManager Direct -AgentSkillsRoot $wingetSkillsRoot)
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "Direct setup removed WinGet ownership from an existing package-managed install."
++    $wingetRetry = Invoke-TestInstall -Root $wingetRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -InstallManager WinGet -AgentSkillsRoot $wingetSkillsRoot
++    Assert-Equal $wingetRetry.Status "AlreadyActive" "Repeated WinGet setup was not idempotent."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "Repeated WinGet setup changed its package-manager marker."
++    Write-TestFile -Path $wingetMarker -Text "invalid"
++    Assert-Throws { Assert-HerdrManagedRoot -InstallRoot $wingetRoot } "package-manager marker is invalid" "Malformed package-manager ownership was accepted."
++    Write-TestFile -Path $wingetMarker -Text $script:PackageManagerMarkerText
++    Invoke-TestUninstall -Root $wingetRoot -AgentSkillsRoot $wingetSkillsRoot -ProcessProvider { @() }
++    Assert-True (-not (Test-Path -LiteralPath $wingetRoot)) "WinGet-owned managed root survived uninstall."
 +
 +    # Setup preserves and rejects every non-current layout. The user must remove
 +    # an earlier installation before retrying the current setup.
@@ -59084,12 +59188,14 @@ index dcb647cbdfb69a4babef6a2c0dd764b424c55f6f..54c7cd46dc7d3af572d3e4b7be85d0a4
                  "Inspect socket API metadata and live runtime state",
 diff --git a/src/managed_install.rs b/src/managed_install.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd259d5b64ab
+index 0000000000000000000000000000000000000000..6828b151868c4410dee547151794166b37c7ed6f
 --- /dev/null
 +++ b/src/managed_install.rs
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,318 @@
 +//! Shared managed-install identity and path contract.
 +
++#[cfg(windows)]
++use std::fs;
 +use std::{io, path::PathBuf};
 +
 +pub(crate) const RUNTIME_RECORD_HEADER: &str = "herdr-runtime-v1";
@@ -59097,6 +59203,11 @@ index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd25
 +#[allow(dead_code)]
 +pub(crate) const POINTER_RECORD_HEADER: &str = "herdr-pointer-v1";
 +pub(crate) const MANAGED_BIN_MARKER: &[u8] = b"herdr-managed-bin-v1\n";
++#[cfg(windows)]
++// Shared with the launcher binary, which never inspects updater ownership.
++#[allow(dead_code)]
++pub(crate) const WINGET_PACKAGE_MANAGER_RECORD: &[u8] =
++    b"herdr-package-manager-v1\nmanager=winget\n";
 +
 +#[derive(Clone, Debug, PartialEq, Eq)]
 +pub(crate) struct BuildId(String);
@@ -59230,6 +59341,13 @@ index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd25
 +        self.state_dir().join("installer-helper.ps1")
 +    }
 +
++    #[cfg(windows)]
++    // Shared with the launcher binary, which never inspects updater ownership.
++    #[allow(dead_code)]
++    pub(crate) fn package_manager_path(&self) -> PathBuf {
++        self.state_dir().join("package-manager")
++    }
++
 +    pub(crate) fn lease_path(&self, build_id: &BuildId) -> PathBuf {
 +        self.leases_dir()
 +            .join(format!("{}.lease", build_id.as_str()))
@@ -59269,6 +59387,68 @@ index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd25
 +        )
 +    })?;
 +    Ok(crate::platform::managed_install_command_executable(current.clone())? != current)
++}
++
++#[cfg(windows)]
++// The launcher compiles this module but never enters the product updater path.
++#[allow(dead_code)]
++pub(crate) fn current_install_is_winget() -> io::Result<bool> {
++    let current = std::env::current_exe().map_err(|err| {
++        io::Error::new(
++            err.kind(),
++            format!("failed to determine the physical Herdr executable path: {err}"),
++        )
++    })?;
++    let command = crate::platform::managed_install_command_executable(current.clone())?;
++    if command == current {
++        return Ok(false);
++    }
++    let root = command
++        .parent()
++        .and_then(std::path::Path::parent)
++        .ok_or_else(|| {
++            io::Error::new(
++                io::ErrorKind::InvalidData,
++                format!(
++                    "managed Herdr command path has no install root: {}",
++                    command.display()
++                ),
++            )
++        })?;
++    let marker = ManagedInstall::new(root.to_path_buf()).package_manager_path();
++    match fs::read(&marker) {
++        Ok(bytes) => {
++            validate_winget_package_manager_record(&bytes, &marker)?;
++            Ok(true)
++        }
++        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
++        Err(err) => Err(io::Error::new(
++            err.kind(),
++            format!(
++                "failed to read managed Herdr package-manager marker {}: {err}",
++                marker.display()
++            ),
++        )),
++    }
++}
++
++#[cfg(windows)]
++// The launcher compiles this module but never validates updater ownership.
++#[allow(dead_code)]
++fn validate_winget_package_manager_record(
++    bytes: &[u8],
++    source: &std::path::Path,
++) -> io::Result<()> {
++    if bytes != WINGET_PACKAGE_MANAGER_RECORD {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!(
++                "managed Herdr package-manager marker {} is not the exact WinGet record",
++                source.display()
++            ),
++        ));
++    }
++    Ok(())
 +}
 +
 +#[cfg(all(test, windows))]
@@ -59315,6 +59495,19 @@ index 0000000000000000000000000000000000000000..4d81c44ee46e0f41253c52cf44e0bd25
 +            );
 +        }
 +        assert!(parse_record(&[0xff], POINTER_RECORD_HEADER, source).is_err());
++    }
++
++    #[test]
++    fn winget_package_manager_record_is_exact() {
++        let source = std::path::Path::new("package-manager");
++        validate_winget_package_manager_record(WINGET_PACKAGE_MANAGER_RECORD, source).unwrap();
++        for invalid in [
++            b"herdr-package-manager-v1\nmanager=winget".as_slice(),
++            b"herdr-package-manager-v1\r\nmanager=winget\r\n".as_slice(),
++            b"herdr-package-manager-v1\nmanager=other\n".as_slice(),
++        ] {
++            assert!(validate_winget_package_manager_record(invalid, source).is_err());
++        }
 +    }
 +}
 diff --git a/src/platform/mod.rs b/src/platform/mod.rs
@@ -61421,7 +61614,7 @@ index d17bfa91b62a42d32f06bb596315ca02a05c3f96..8ebfaeb5245404eecdfa8037646322b4
                  err.kind(),
                  format!("failed to determine herdr executable path: {err}"),
 diff --git a/src/update.rs b/src/update.rs
-index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061f6e83286 100644
+index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..c8b5be40d1e54eb97a7088c0e11d78d73ae98463 100644
 --- a/src/update.rs
 +++ b/src/update.rs
 @@ -1,6 +1,6 @@
@@ -61440,7 +61633,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  use std::fs;
  #[cfg(not(windows))]
  use std::io;
-@@ -16,15 +15,14 @@ use std::io;
+@@ -16,17 +15,17 @@ use std::io;
  use std::io::{BufRead, BufReader, IsTerminal, Write};
  use std::path::{Path, PathBuf};
  use std::process::Command;
@@ -61457,8 +61650,11 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
 -const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
  const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
  const HERDR_UPDATE_COMMAND: &str = "herdr update";
++const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact";
  const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
-@@ -42,6 +40,17 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+ const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
+ const NIX_UPDATE_COMMAND: &str = "update through Nix";
+@@ -42,6 +41,17 @@ const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
  const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
  #[cfg(not(windows))]
  const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -61476,7 +61672,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  fn fake_release_notes_body(version: &str) -> String {
      let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
          .ok()
-@@ -107,9 +116,9 @@ enum UpdateChannel {
+@@ -107,9 +117,9 @@ enum UpdateChannel {
  
  impl UpdateChannel {
      fn configured() -> Self {
@@ -61489,7 +61685,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
          }
      }
  
-@@ -125,6 +134,7 @@ impl UpdateChannel {
+@@ -125,6 +135,7 @@ impl UpdateChannel {
  struct AssetRef {
      url: String,
      sha256: Option<String>,
@@ -61497,7 +61693,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  }
  
  impl<'de> Deserialize<'de> for AssetRef {
-@@ -137,6 +147,7 @@ impl<'de> Deserialize<'de> for AssetRef {
+@@ -137,6 +148,7 @@ impl<'de> Deserialize<'de> for AssetRef {
              serde_json::Value::String(url) if !url.trim().is_empty() => Ok(Self {
                  url: url.trim().to_string(),
                  sha256: None,
@@ -61505,7 +61701,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              }),
              serde_json::Value::Object(mut object) => {
                  let url = object
-@@ -146,12 +157,16 @@ impl<'de> Deserialize<'de> for AssetRef {
+@@ -146,12 +158,16 @@ impl<'de> Deserialize<'de> for AssetRef {
                  let sha256 = object
                      .remove("sha256")
                      .and_then(|value| value.as_str().map(str::to_string));
@@ -61522,7 +61718,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
                  })
              }
              _ => Err(serde::de::Error::custom(
-@@ -273,6 +288,7 @@ struct ReleaseInfo {
+@@ -273,6 +289,7 @@ struct ReleaseInfo {
      target_protocol: Option<u32>,
      download_url: String,
      sha256: Option<String>,
@@ -61530,7 +61726,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      notes_body: String,
  }
  
-@@ -283,11 +299,11 @@ impl ReleaseInfo {
+@@ -283,11 +300,11 @@ impl ReleaseInfo {
  }
  
  fn fetch_update_manifest() -> Result<UpdateManifest, String> {
@@ -61544,7 +61740,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  }
  
  fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
-@@ -297,6 +313,8 @@ where
+@@ -297,6 +314,8 @@ where
      let output = crate::noninteractive_process::curl_command()
          .args([
              "-sfL",
@@ -61553,7 +61749,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              "--retry",
              "3",
              "--connect-timeout",
-@@ -338,6 +356,94 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
+@@ -338,6 +357,94 @@ fn handle_manifest_announcement(version: &str, value: Option<&serde_json::Value>
      }
  }
  
@@ -61648,7 +61844,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
      let current = Version::current();
      let latest = Version::parse(&manifest.version)
-@@ -356,11 +462,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+@@ -356,11 +463,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
      }
  
      let (os, arch) = platform_target();
@@ -61663,7 +61859,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -373,6 +481,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
+@@ -373,6 +482,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
          target_protocol: manifest.protocol,
          download_url,
          sha256: asset.sha256.clone(),
@@ -61671,7 +61867,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
          notes_body,
      }))
  }
-@@ -393,6 +502,32 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
+@@ -393,6 +503,32 @@ fn preview_display_version(base_version: &str, build_id: &str) -> String {
      )
  }
  
@@ -61704,7 +61900,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  fn release_info_from_preview_manifest(
      manifest: &PreviewManifest,
  ) -> Result<Option<ReleaseInfo>, String> {
-@@ -403,14 +538,24 @@ fn release_info_from_preview_manifest(
+@@ -403,14 +539,24 @@ fn release_info_from_preview_manifest(
          ));
      }
      let build_id = manifest.build_id.trim();
@@ -61731,7 +61927,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  
      let version = Version::parse(&manifest.base_version).ok_or_else(|| {
          format!(
-@@ -423,7 +568,7 @@ fn release_info_from_preview_manifest(
+@@ -423,7 +569,7 @@ fn release_info_from_preview_manifest(
          return Err("preview manifest notes are empty".into());
      }
      let (os, arch) = platform_target();
@@ -61740,7 +61936,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      if let Some(archived) = manifest.builds.get(build_id) {
          if archived.base_version != manifest.base_version
              || archived.commit != manifest.commit
-@@ -446,6 +591,8 @@ fn release_info_from_preview_manifest(
+@@ -446,6 +592,8 @@ fn release_info_from_preview_manifest(
                  .and_then(|build| build.assets.get(&asset_key))
          })
          .ok_or_else(|| format!("no binary for {asset_key} in preview manifest"))?;
@@ -61749,7 +61945,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      let download_url = asset.url.clone();
  
      Ok(Some(ReleaseInfo {
-@@ -458,6 +605,7 @@ fn release_info_from_preview_manifest(
+@@ -458,6 +606,7 @@ fn release_info_from_preview_manifest(
          target_protocol: Some(manifest.protocol),
          download_url,
          sha256: asset.sha256.clone(),
@@ -61757,7 +61953,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
          notes_body,
      }))
  }
-@@ -628,53 +776,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
+@@ -628,53 +777,148 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
  }
  
  #[cfg(windows)]
@@ -61791,7 +61987,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
 +    root: PathBuf,
 +    path: PathBuf,
 +}
- 
++
 +#[cfg(windows)]
 +impl Drop for DownloadedWindowsInstaller {
 +    fn drop(&mut self) {
@@ -61842,7 +62038,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
 +        .ok_or("selected Windows update asset has an invalid setup filename")?;
 +    let path = root.join(asset_name);
 +    let download = DownloadedWindowsInstaller { root, path };
-+
+ 
 +    let status = crate::noninteractive_process::curl_command()
 +        .args(["-sfL", "--max-time", "120", "-o"])
 +        .arg(&download.path)
@@ -61944,7 +62140,80 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  }
  
  // ---------------------------------------------------------------------------
-@@ -2024,22 +2267,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -1732,7 +1976,9 @@ fn print_running_session_update_outcomes(
+ // ---------------------------------------------------------------------------
+ 
+ pub(crate) fn update_install_command() -> &'static str {
+-    if is_homebrew_managed_install() {
++    if winget_managed_install_for_guidance() {
++        WINGET_UPDATE_COMMAND
++    } else if is_homebrew_managed_install() {
+         HOMEBREW_UPDATE_COMMAND
+     } else if is_mise_managed_install() {
+         MISE_UPDATE_COMMAND
+@@ -1748,6 +1994,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
+         HERDR_UPDATE_COMMAND => {
+             "detach, run `herdr update`, then follow its restart guidance".to_string()
+         }
++        WINGET_UPDATE_COMMAND => {
++            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready".to_string()
++        }
+         HOMEBREW_UPDATE_COMMAND => {
+             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
+         }
+@@ -1786,6 +2035,28 @@ fn is_mise_managed_install() -> bool {
+     is_mise_managed_exe_path_following_links(&current_exe)
+ }
+ 
++fn is_winget_managed_install() -> Result<bool, String> {
++    #[cfg(windows)]
++    {
++        crate::managed_install::current_install_is_winget()
++            .map_err(|err| format!("failed to inspect WinGet install ownership: {err}"))
++    }
++    #[cfg(not(windows))]
++    {
++        Ok(false)
++    }
++}
++
++fn winget_managed_install_for_guidance() -> bool {
++    match is_winget_managed_install() {
++        Ok(managed) => managed,
++        Err(err) => {
++            tracing::warn!(error = %err, "could not inspect WinGet install ownership");
++            false
++        }
++    }
++}
++
+ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
+     let Ok(current_exe) = env::current_exe() else {
+         return None;
+@@ -1796,7 +2067,9 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
+ 
+ pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
+ {
+-    if is_homebrew_managed_install() {
++    if winget_managed_install_for_guidance() {
++        Some("Use `winget upgrade --id hdosys.herdr-win --exact` to update WinGet installs.")
++    } else if is_homebrew_managed_install() {
+         Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
+     } else if is_mise_managed_install() {
+         Some("Use `mise upgrade herdr` to update mise installs.")
+@@ -1958,6 +2231,11 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
+ /// Manual self-update command (`herdr update`).
+ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+     let channel = UpdateChannel::configured();
++    if is_winget_managed_install()? {
++        return Err(format!(
++            "self-update is disabled for WinGet installs; run `{WINGET_UPDATE_COMMAND}`"
++        ));
++    }
+     #[cfg(windows)]
+     if channel == UpdateChannel::Stable {
+         return Err(
+@@ -2024,22 +2302,20 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      #[cfg(windows)]
      {
          let _ = options;
@@ -61979,7 +62248,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      }
  
      #[cfg(not(windows))]
-@@ -2079,6 +2320,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
+@@ -2079,6 +2355,7 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
      Ok(release.version)
  }
  
@@ -61987,7 +62256,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
  fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
      let status = Command::new(updated_exe)
          .args(["integration", "status", "--outdated-only"])
-@@ -2246,6 +2488,153 @@ fn platform_target() -> (&'static str, &'static str) {
+@@ -2246,6 +2523,173 @@ fn platform_target() -> (&'static str, &'static str) {
  // Tests
  // ---------------------------------------------------------------------------
  
@@ -62136,12 +62405,32 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
 +            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 +        );
 +    }
++
++    #[test]
++    fn update_install_instruction_distinguishes_install_from_restart() {
++        assert_eq!(
++            update_install_instruction(HERDR_UPDATE_COMMAND),
++            "detach, run `herdr update`, then follow its restart guidance"
++        );
++        assert_eq!(
++            update_install_instruction(WINGET_UPDATE_COMMAND),
++            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready"
++        );
++        assert_eq!(
++            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
++            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
++        );
++        assert_eq!(
++            update_install_instruction(MISE_UPDATE_COMMAND),
++            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
++        );
++    }
 +}
 +
  #[cfg(all(test, unix))]
  mod tests {
      use super::*;
-@@ -2325,6 +2714,7 @@ mod tests {
+@@ -2325,6 +2769,7 @@ mod tests {
              target_protocol,
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62149,7 +62438,30 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              notes_body: "### Changed\n- One".to_string(),
          }
      }
-@@ -2702,6 +3092,7 @@ mod tests {
+@@ -2598,22 +3043,6 @@ mod tests {
+         assert_eq!(body, "### Fixed\n- Brew notes");
+     }
+ 
+-    #[test]
+-    fn update_install_instruction_distinguishes_install_from_restart() {
+-        assert_eq!(
+-            update_install_instruction(HERDR_UPDATE_COMMAND),
+-            "detach, run `herdr update`, then follow its restart guidance"
+-        );
+-        assert_eq!(
+-            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
+-            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
+-        );
+-        assert_eq!(
+-            update_install_instruction(MISE_UPDATE_COMMAND),
+-            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
+-        );
+-    }
+-
+     #[test]
+     fn fake_release_notes_default_to_real_large_changelog_section() {
+         let _guard = env_lock().lock().unwrap();
+@@ -2702,6 +3131,7 @@ mod tests {
              target_protocol: Some(2),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62157,7 +62469,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              notes_body: "### Changed\n- One".to_string(),
          };
          let incompatible_release = ReleaseInfo {
-@@ -2944,6 +3335,7 @@ mod tests {
+@@ -2944,6 +3374,7 @@ mod tests {
              target_protocol: Some(3),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62165,7 +62477,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              notes_body: "### Changed\n- One".to_string(),
          };
          let plan = RunningServerUpdatePlan {
-@@ -3079,6 +3471,7 @@ mod tests {
+@@ -3079,6 +3510,7 @@ mod tests {
              target_protocol: Some(77),
              download_url: "https://example.com/herdr".to_string(),
              sha256: None,
@@ -62173,7 +62485,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
              notes_body: "### Changed\n- One".to_string(),
          };
  
-@@ -3387,7 +3780,7 @@ mod tests {
+@@ -3387,7 +3819,7 @@ mod tests {
              r####"{{
                  "channel": "preview",
                  "base_version": "9.9.9",
@@ -62182,7 +62494,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
                  "commit": "abcdef1234567890",
                  "built_at": "2026-06-02T03:00:00Z",
                  "protocol": 77,
-@@ -3399,7 +3792,7 @@ mod tests {
+@@ -3399,7 +3831,7 @@ mod tests {
                      }}
                  }},
                  "builds": {{
@@ -62191,7 +62503,7 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
                          "base_version": "9.9.9",
                          "commit": "abcdef1234567890",
                          "built_at": "2026-06-02T03:00:00Z",
-@@ -3421,7 +3814,7 @@ mod tests {
+@@ -3421,7 +3853,7 @@ mod tests {
              .expect("preview update");
  
          assert_eq!(release.channel, UpdateChannel::Preview);
@@ -62202,3 +62514,4 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..65ef7015f0a96407fa87d591ecabd061
      }
 -- 
 2.55.0.windows.3
+

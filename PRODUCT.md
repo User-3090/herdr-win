@@ -65,14 +65,21 @@ tests remain the detailed implementation truth.
   released and no managed process or lease remains. Exact installer-owned remnants
   are removed and setup continues with a fresh install when necessary; unknown or
   ambiguous content is preserved rather than deleted.
-- Snapshot updates use only the fork-owned immutable setup asset and verified
-  digest through the fork-owned update feed. Existing managed sessions continue on
-  their current runtime; a newer runtime may remain staged until old sessions exit,
+- Direct setup and portable installs update through only the fork-owned immutable
+  setup asset and verified digest through the fork-owned update feed. Existing
+  managed sessions continue on their current runtime; a newer runtime may remain
+  staged until old sessions exit,
   after which future launches switch atomically. The post-exit maintenance path
   then publishes any pending launcher and removes every exact unleased runtime
   except Active and optional Pending. Busy or ambiguous content is preserved and
   reported. A hard process-tree kill leaves pending state recoverable for the next
   safe launch or setup. Update never terminates active Herdr sessions.
+- A copy installed by WinGet updates only through
+  `winget upgrade --id hdosys.herdr-win --exact`; `herdr update` refuses to
+  replace package-managed bytes and user-facing update actions show that WinGet
+  command. Running direct setup over the exact current managed root preserves
+  existing WinGet ownership rather than creating competing update paths. Uninstall
+  removes that ownership with the managed program.
 - Uninstall requires managed sessions to be closed and never terminates them. It
   removes the managed program, only its own user `PATH` entry, **Herdr Win** Installed
   Apps registration, and installer-known `SKILL.md` copies at its managed universal

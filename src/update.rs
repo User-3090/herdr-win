@@ -25,6 +25,7 @@ use serde::{Deserialize, Deserializer};
 
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
+const WINGET_UPDATE_COMMAND: &str = "winget upgrade --id hdosys.herdr-win --exact";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const MISE_UPDATE_COMMAND: &str = "mise upgrade herdr";
 const NIX_UPDATE_COMMAND: &str = "update through Nix";
@@ -1975,7 +1976,9 @@ fn print_running_session_update_outcomes(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn update_install_command() -> &'static str {
-    if is_homebrew_managed_install() {
+    if winget_managed_install_for_guidance() {
+        WINGET_UPDATE_COMMAND
+    } else if is_homebrew_managed_install() {
         HOMEBREW_UPDATE_COMMAND
     } else if is_mise_managed_install() {
         MISE_UPDATE_COMMAND
@@ -1990,6 +1993,9 @@ pub(crate) fn update_install_instruction(install_command: &str) -> String {
     match install_command {
         HERDR_UPDATE_COMMAND => {
             "detach, run `herdr update`, then follow its restart guidance".to_string()
+        }
+        WINGET_UPDATE_COMMAND => {
+            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready".to_string()
         }
         HOMEBREW_UPDATE_COMMAND => {
             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready".to_string()
@@ -2029,6 +2035,28 @@ fn is_mise_managed_install() -> bool {
     is_mise_managed_exe_path_following_links(&current_exe)
 }
 
+fn is_winget_managed_install() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        crate::managed_install::current_install_is_winget()
+            .map_err(|err| format!("failed to inspect WinGet install ownership: {err}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+fn winget_managed_install_for_guidance() -> bool {
+    match is_winget_managed_install() {
+        Ok(managed) => managed,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not inspect WinGet install ownership");
+            false
+        }
+    }
+}
+
 pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
     let Ok(current_exe) = env::current_exe() else {
         return None;
@@ -2039,7 +2067,9 @@ pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static
 
 pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
 {
-    if is_homebrew_managed_install() {
+    if winget_managed_install_for_guidance() {
+        Some("Use `winget upgrade --id hdosys.herdr-win --exact` to update WinGet installs.")
+    } else if is_homebrew_managed_install() {
         Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
     } else if is_mise_managed_install() {
         Some("Use `mise upgrade herdr` to update mise installs.")
@@ -2201,6 +2231,11 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     let channel = UpdateChannel::configured();
+    if is_winget_managed_install()? {
+        return Err(format!(
+            "self-update is disabled for WinGet installs; run `{WINGET_UPDATE_COMMAND}`"
+        ));
+    }
     #[cfg(windows)]
     if channel == UpdateChannel::Stable {
         return Err(
@@ -2633,6 +2668,26 @@ mod cross_platform_tests {
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
     }
+
+    #[test]
+    fn update_install_instruction_distinguishes_install_from_restart() {
+        assert_eq!(
+            update_install_instruction(HERDR_UPDATE_COMMAND),
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
+        assert_eq!(
+            update_install_instruction(WINGET_UPDATE_COMMAND),
+            "detach, run `winget upgrade --id hdosys.herdr-win --exact`, then restart this Herdr session when ready"
+        );
+        assert_eq!(
+            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
+            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
+        );
+        assert_eq!(
+            update_install_instruction(MISE_UPDATE_COMMAND),
+            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2986,22 +3041,6 @@ mod tests {
         );
 
         assert_eq!(body, "### Fixed\n- Brew notes");
-    }
-
-    #[test]
-    fn update_install_instruction_distinguishes_install_from_restart() {
-        assert_eq!(
-            update_install_instruction(HERDR_UPDATE_COMMAND),
-            "detach, run `herdr update`, then follow its restart guidance"
-        );
-        assert_eq!(
-            update_install_instruction(HOMEBREW_UPDATE_COMMAND),
-            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
-        );
-        assert_eq!(
-            update_install_instruction(MISE_UPDATE_COMMAND),
-            "detach, run `mise upgrade herdr`, then restart this Herdr session when ready"
-        );
     }
 
     #[test]

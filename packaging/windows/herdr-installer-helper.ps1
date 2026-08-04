@@ -11,9 +11,12 @@ param(
     [string]$SkillSourcePath,
     [string]$SkillHashManifestPath,
     [string]$ProductName = "Herdr",
+    [string]$PackageRoot,
     [string]$BuildId,
     [string]$DisplayVersion,
     [string]$NumericVersion,
+    [ValidateSet("Direct", "WinGet")]
+    [string]$InstallManager = "Direct",
     [ValidateSet("Keep", "Remove")]
     [string]$SettingsDisposition = "Keep",
     [ValidateSet("Keep", "Auto", "Remove")]
@@ -56,6 +59,7 @@ $script:RuntimeManifestHeader = "herdr-runtime-manifest-v1"
 $script:InstallManifestHeader = "herdr-install-manifest-v1"
 $script:ManagedSkillHashesHeader = "herdr-managed-skill-hashes-v1"
 $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
+$script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"
 $script:UninstallMarkerText = "herdr-uninstall-v1`n"
 $script:TransactionMarkerName = ".herdr-installer-transaction"
 $script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
@@ -1183,6 +1187,35 @@ function Assert-HerdrLeasesDirectory {
     }
 }
 
+function Assert-HerdrPackageManagerMarker {
+    param([Parameter(Mandatory = $true)][string]$StateDir)
+
+    $marker = Join-Path $StateDir "package-manager"
+    if (-not (Test-Path -LiteralPath $marker)) {
+        return
+    }
+    Assert-HerdrRegularFile -Path $marker
+    if ((Read-HerdrStrictUtf8 -Path $marker) -cne $script:PackageManagerMarkerText) {
+        throw "Managed Herdr package-manager marker is invalid: $marker"
+    }
+}
+
+function Set-HerdrPackageManagerMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$StateDir,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct"
+    )
+
+    $marker = Join-Path $StateDir "package-manager"
+    if (Test-Path -LiteralPath $marker) {
+        Assert-HerdrPackageManagerMarker -StateDir $StateDir
+        return
+    }
+    if ($InstallManager -ceq "WinGet") {
+        Write-HerdrDurableText -Path $marker -Text $script:PackageManagerMarkerText
+    }
+}
+
 function Assert-HerdrManagedRoot {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
@@ -1194,7 +1227,7 @@ function Assert-HerdrManagedRoot {
     Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
     $stateDir = Join-Path $InstallRoot "state"
     Assert-HerdrRegularDirectory -Path $stateDir
-    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")
+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager")
     foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
         $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
         if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1214,6 +1247,7 @@ function Assert-HerdrManagedRoot {
     Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
     Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
     $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
+    Assert-HerdrPackageManagerMarker -StateDir $stateDir
     Assert-HerdrManagedBin -BinDir (Join-Path $InstallRoot "bin") -ExpectedBootstrapSha256 $installManifest.BootstrapSha256
     [void](Get-HerdrPendingLauncher -StateDir $stateDir)
 
@@ -1254,7 +1288,7 @@ function Assert-HerdrUninstallRetryRoot {
     if ((Read-HerdrStrictUtf8 -Path (Join-Path $stateDir "uninstall.pending")) -cne $script:UninstallMarkerText) {
         throw "Invalid Herdr uninstall retry marker."
     }
-    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
     foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
         $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
         if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1270,6 +1304,7 @@ function Assert-HerdrUninstallRetryRoot {
     } else {
         $null
     }
+    Assert-HerdrPackageManagerMarker -StateDir $stateDir
     if (Test-Path -LiteralPath (Join-Path $InstallRoot "bin")) {
         if ($null -eq $installManifest) {
             throw "Cannot validate remaining managed bin without install.manifest."
@@ -1475,7 +1510,7 @@ function Assert-HerdrInterruptedUninstallRoot {
         return
     }
     Assert-HerdrRegularDirectory -Path $stateDir
-    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "uninstall.pending")
+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
     foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
         $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
         if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
@@ -1491,6 +1526,7 @@ function Assert-HerdrInterruptedUninstallRoot {
         (Read-HerdrStrictUtf8 -Path $stateManifest) -cne $InstallManifestText) {
         throw "Interrupted uninstall install.manifest differs from its transaction ownership record."
     }
+    Assert-HerdrPackageManagerMarker -StateDir $stateDir
     foreach ($pointerName in @("active", "pending")) {
         $pointer = Join-Path $stateDir $pointerName
         if (Test-Path -LiteralPath $pointer) {
@@ -2361,7 +2397,8 @@ function New-HerdrManagedRootTree {
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
-        [Parameter(Mandatory = $true)][string]$NumericVersion
+        [Parameter(Mandatory = $true)][string]$NumericVersion,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct"
     )
 
     New-Item -ItemType Directory -Path (Join-Path $Destination "bin\managed-install-v1") -Force | Out-Null
@@ -2380,6 +2417,7 @@ function New-HerdrManagedRootTree {
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion
     )
+    Set-HerdrPackageManagerMarker -StateDir (Join-Path $Destination "state") -InstallManager $InstallManager
     Assert-HerdrManagedRoot -InstallRoot $Destination
 }
 
@@ -2407,6 +2445,7 @@ function Install-HerdrManagedUpgrade {
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
         [int]$LockTimeoutMilliseconds = 30000
     )
 
@@ -2451,6 +2490,7 @@ function Install-HerdrManagedUpgrade {
                 }
                 Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
                 [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
+                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
                 return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
             }
             Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
@@ -2458,6 +2498,7 @@ function Install-HerdrManagedUpgrade {
             if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
                 Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
                 [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
+                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
                 return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
             }
             Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
@@ -2469,6 +2510,7 @@ function Install-HerdrManagedUpgrade {
             }
             Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
             [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
+            Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
             return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
         } finally {
             $coordination.Dispose()
@@ -2494,6 +2536,7 @@ function Install-HerdrLayout {
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
         [int]$LockTimeoutMilliseconds = 30000
     )
 
@@ -2551,6 +2594,7 @@ function Install-HerdrLayout {
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
+            -InstallManager $InstallManager `
             -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     } else {
         $transaction = New-HerdrTransaction -Kind "fresh" -InstallRoot $InstallRoot
@@ -2564,7 +2608,8 @@ function Install-HerdrLayout {
                 -HelperSourcePath $HelperSourcePath `
                 -BuildId $BuildId `
                 -DisplayVersion $DisplayVersion `
-                -NumericVersion $NumericVersion
+                -NumericVersion $NumericVersion `
+                -InstallManager $InstallManager
             Publish-HerdrFreshTransaction `
                 -Transaction $transaction `
                 -InstallRoot $InstallRoot
@@ -2836,6 +2881,7 @@ function Invoke-HerdrInstall {
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
         [int]$LifecycleLockTimeoutMilliseconds = 30000
     )
 
@@ -2857,7 +2903,8 @@ function Invoke-HerdrInstall {
             -ClaudeSkillsRoot $claudeSkillsRoot `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
-            -NumericVersion $NumericVersion
+            -NumericVersion $NumericVersion `
+            -InstallManager $InstallManager
         $pathUpdate = Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -PreviouslyOwned $previousPathOwnership
         Set-HerdrArpRegistration `
             -InstallRoot $InstallRoot `
@@ -2975,7 +3022,7 @@ function Invoke-HerdrUninstallLayout {
         if ($null -ne $pendingLauncher) {
             Remove-Item -LiteralPath $pendingLauncher.Path -Force
         }
-        foreach ($name in @("active", "pending", "install.manifest")) {
+        foreach ($name in @("active", "pending", "install.manifest", "package-manager")) {
             $path = Join-Path $stateDir $name
             if (Test-Path -LiteralPath $path) {
                 Remove-Item -LiteralPath $path -Force
@@ -3037,6 +3084,16 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         switch ($Action) {
             "Install" {
+                if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
+                    throw "PackageRoot is required for Install."
+                }
+                $PackageRoot = Get-HerdrFullPath -Path $PackageRoot
+                $StageDir = Join-Path $PackageRoot "payload"
+                $LauncherPath = Join-Path $PackageRoot "app-launcher.exe"
+                $UninstallerPath = Join-Path $PackageRoot "uninstall.exe"
+                $HelperSourcePath = Join-Path $PackageRoot "installer-helper.ps1"
+                $SkillSourcePath = Join-Path $PackageRoot "skill\SKILL.md"
+                $SkillHashManifestPath = Join-Path $PackageRoot "skill\managed-skill-hashes.txt"
                 $result = Invoke-HerdrInstall `
                     -InstallRoot $InstallRoot `
                     -StageDir $StageDir `
@@ -3047,7 +3104,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -SkillHashManifestPath $SkillHashManifestPath `
                     -BuildId $BuildId `
                     -DisplayVersion $DisplayVersion `
-                    -NumericVersion $NumericVersion
+                    -NumericVersion $NumericVersion `
+                    -InstallManager $InstallManager
                 if ($result.Status -ceq "Pending") {
                     [Console]::Out.WriteLine("$script:ProductName $($result.BuildId): Pending; staged until old sessions exit.")
                 } else {

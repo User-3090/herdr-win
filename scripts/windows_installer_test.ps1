@@ -112,6 +112,7 @@ function Invoke-TestInstall {
         [string]$BuildId,
         [string]$DisplayVersion,
         [string]$NumericVersion,
+        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
         [string]$SkillSource = $script:TestSkillSource,
         [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
@@ -132,6 +133,7 @@ function Invoke-TestInstall {
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
+            -InstallManager $InstallManager `
             -LockTimeoutMilliseconds $LockTimeoutMilliseconds
     }
 }
@@ -546,6 +548,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
     $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
     Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\package-manager"))) "Direct setup published package-manager ownership."
     Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
     Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
     Assert-HerdrManagedRoot -InstallRoot $installRoot
@@ -794,6 +797,25 @@ try {
     Assert-Equal (Read-HerdrStrictUtf8 -Path $runtimePayload) "corrupt" "Rejected corruption was silently repaired or deleted."
     [IO.File]::WriteAllBytes($runtimePayload, $ownedPayloadBytes)
     Assert-HerdrManagedRoot -InstallRoot $installRoot
+
+    # WinGet owns only installations carrying its exact setup marker. A later
+    # direct setup preserves that ownership, malformed markers fail closed, and
+    # uninstall removes the marker with the managed state root.
+    $wingetRoot = Join-Path $tempRoot "winget-install"
+    $wingetSkillsRoot = Join-Path $tempRoot "winget-agent-skills"
+    [void](Invoke-TestInstall -Root $wingetRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -InstallManager WinGet -AgentSkillsRoot $wingetSkillsRoot)
+    $wingetMarker = Join-Path $wingetRoot "state\package-manager"
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "WinGet setup did not publish its exact package-manager marker."
+    [void](Invoke-TestInstall -Root $wingetRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -InstallManager Direct -AgentSkillsRoot $wingetSkillsRoot)
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "Direct setup removed WinGet ownership from an existing package-managed install."
+    $wingetRetry = Invoke-TestInstall -Root $wingetRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -InstallManager WinGet -AgentSkillsRoot $wingetSkillsRoot
+    Assert-Equal $wingetRetry.Status "AlreadyActive" "Repeated WinGet setup was not idempotent."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path $wingetMarker) $script:PackageManagerMarkerText "Repeated WinGet setup changed its package-manager marker."
+    Write-TestFile -Path $wingetMarker -Text "invalid"
+    Assert-Throws { Assert-HerdrManagedRoot -InstallRoot $wingetRoot } "package-manager marker is invalid" "Malformed package-manager ownership was accepted."
+    Write-TestFile -Path $wingetMarker -Text $script:PackageManagerMarkerText
+    Invoke-TestUninstall -Root $wingetRoot -AgentSkillsRoot $wingetSkillsRoot -ProcessProvider { @() }
+    Assert-True (-not (Test-Path -LiteralPath $wingetRoot)) "WinGet-owned managed root survived uninstall."
 
     # Setup preserves and rejects every non-current layout. The user must remove
     # an earlier installation before retrying the current setup.

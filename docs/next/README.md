@@ -20,7 +20,7 @@ This repository provides that focused delivery path:
 - **Useful Windows behavior now:** fixes can ship without turning the fork into a separate product.
 - **A visible delta:** every retained change belongs to one reviewable mailbox instead of disappearing into branch history.
 - **An upstream route:** code that lands upstream is removed from the queue rather than maintained twice.
-- **Reproducible snapshots:** source, patch order, build identity, artifacts, and checksums stay connected.
+- **Reproducible snapshots:** source, patch order, build identity, artifacts, and SHA-256 digests stay connected.
 
 ## What differs from upstream
 
@@ -31,7 +31,7 @@ The table is intentionally capability-level. The patch files contain the exact i
 | Native ConPTY foundation | ✅ **Upstreamed in Herdr v0.8.0** | herdr-win now reuses upstream's ConPTY and packaging foundation instead of carrying a duplicate implementation. |
 | Terminal fidelity | **Maintained here** · [`0001`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | Windows appearance, color and cursor fidelity, rendering, and VTI input behavior. |
 | Windows remote attach and image bridge | **Maintained here** · [`0003`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | Windows SSH and named-pipe attachment, shared remote orchestration, and bounded clipboard/drop image transport. |
-| Managed Windows snapshots | **Maintained here** · [`0004`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | Verified Windows packages, per-user setup, portable archives, updates, and safe runtime handoff. |
+| Managed Windows snapshots | **Maintained here** · [`0004`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | Verified Windows packages, per-user setup, portable archives, package-manager update ownership, and safe runtime handoff. |
 | OpenCode lifecycle reporting | **Maintained here** · [`0005`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | Retry-aware status correlation so active retries stay quiet and terminal failures remain visible. |
 
 The Windows remote/image bridge builds on [nsxdavid's `feat/windows-remote-attach` work](https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach). The maintained mailbox adapts and extends that foundation within this queue.
@@ -56,7 +56,7 @@ flowchart LR
     B --> P1
     P5 --> R["Fresh replay"]
     R --> G["Native + cross-platform gates"]
-    G --> A["Setup · ZIP · checksums"]
+    G --> A["Setup · ZIP · digests"]
 ```
 
 [`patches/delta/BASE`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/BASE) records the exact upstream stable commit. [`series`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/series) is the only application order. Each patch is a full-index, binary-safe mailbox with one logical responsibility.
@@ -79,7 +79,17 @@ Download the newest `herdr-win_v<version>_windows_amd64_setup.exe` from [Release
 herdr
 ```
 
-Use `herdr update` from an ordinary terminal after detaching from active Herdr sessions. Updates preserve running sessions and activate the new verified snapshot when it is safe. Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
+For setup downloaded directly from Releases, use `herdr update` from an ordinary terminal after detaching from active Herdr sessions. Updates preserve running sessions and activate the new verified snapshot when it is safe. A WinGet-owned installation instead updates through:
+
+```powershell
+winget upgrade --id hdosys.herdr-win --exact
+```
+
+Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
+
+### Verify the download
+
+GitHub records a SHA-256 digest for every immutable release asset. Before running setup, verify the downloaded file against the `digest` for the same filename in that tagged release's GitHub metadata.
 
 ### Portable Windows ZIP
 

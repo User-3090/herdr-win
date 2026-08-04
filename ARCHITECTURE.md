@@ -82,6 +82,15 @@ behavior; code and tests remain the detailed implementation truth.
   user-settings removal, and recoverable install/uninstall state. Rust owns runtime
   selection and
   downloading/verifying/launching the immutable installer asset.
+- NSIS accepts `/WINGET` as the sole explicit package-manager origin signal and
+  passes a bounded Direct/WinGet value into the helper. The helper owns the optional
+  strict UTF-8 `state/package-manager` record; only the exact
+  `herdr-package-manager-v1\nmanager=winget\n` bytes establish WinGet ownership.
+  Fresh WinGet setup publishes it with the managed tree, repeated WinGet or direct
+  setup preserves it, and uninstall removes it. Rust derives ownership only through
+  the validated current managed-install root; malformed or unreadable records fail
+  closed rather than being inferred from PATH, ARP, process ancestry, or WinGet
+  metadata.
 - The persistent sibling lifecycle lock distinguishes a live operation from a dead
   transaction. Once that exclusive lock is acquired, setup and uninstall validate
   every matching transaction marker, root manifest, remaining managed tree, lease,
@@ -188,6 +197,12 @@ behavior; code and tests remain the detailed implementation truth.
   sidecars. Candidate sidecars remain internal verification inputs; GitHub records
   SHA-256 for every immutable release asset and the update manifest carries the same
   six verified digests.
+- A WinGet community submission is generated only after immutable promotion and
+  remains external release output under ignored `target/`, not a second checked-in
+  package tree. Its multi-file manifest uses package ID `hdosys.herdr-win`, the
+  CalVer as `PackageVersion`, x64 per-user NSIS metadata, the exact immutable setup
+  URL and GitHub-recorded SHA-256, and silent switches `/S /WINGET`. Neither the
+  release workflow nor ordinary repository delivery submits the external PR.
 - Publication and the generated manifest proceed only when all six target assets
   have verified SHA-256 digests; retained historical manifest entries may remain
   Windows-only.

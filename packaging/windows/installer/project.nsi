@@ -102,6 +102,7 @@ Var PowerShellPath
 Var HelperExitCode
 Var HelperOutput
 Var StartGate
+Var InstallManager
 Var SettingsDisposition
 Var SettingsCheckbox
 Var SkillDisposition
@@ -286,6 +287,13 @@ FunctionEnd
 
 Function .onInit
   SetShellVarContext current
+  StrCpy $InstallManager "Direct"
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} "$0" "/WINGET" $1
+  ${IfNot} ${Errors}
+    StrCpy $InstallManager "WinGet"
+  ${EndIf}
   ${IfNot} ${RunningX64}
     Push "${INFO_DISTRIBUTIONNAME} requires 64-bit Windows."
     Call FailInstall
@@ -406,7 +414,7 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
 
 installer_inputs_ready:
   DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -StageDir "$PLUGINSDIR\payload" -LauncherPath "$PLUGINSDIR\app-launcher.exe" -UninstallerPath "$PLUGINSDIR\uninstall.exe" -HelperSourcePath "$PLUGINSDIR\installer-helper.ps1" -SkillSourcePath "$PLUGINSDIR\skill\SKILL.md" -SkillHashManifestPath "$PLUGINSDIR\skill\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete

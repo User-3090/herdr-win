@@ -108,6 +108,33 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("herdr-install-manifest-v1", helper)
         self.assertNotIn("skill_sha256=", helper)
 
+    def test_winget_origin_marker_delegates_update_ownership(self) -> None:
+        helper = HELPER.read_text(encoding="utf-8")
+        nsi = NSI.read_text(encoding="utf-8")
+        managed_install = MANAGED_INSTALL.read_text(encoding="utf-8")
+        update = UPDATE.read_text(encoding="utf-8")
+        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
+        self.assertIn('${GetOptions} "$0" "/WINGET" $1', nsi)
+        self.assertIn('StrCpy $InstallManager "WinGet"', nsi)
+        self.assertIn('-InstallManager "$InstallManager"', nsi)
+        self.assertIn(
+            '$script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"',
+            helper,
+        )
+        self.assertIn('Join-Path $StateDir "package-manager"', helper)
+        self.assertIn('InstallManager -ceq "WinGet"', helper)
+        self.assertIn('"install.manifest", "package-manager"', helper)
+        self.assertIn(
+            'b"herdr-package-manager-v1\\nmanager=winget\\n"', managed_install
+        )
+        self.assertIn("current_install_is_winget", managed_install)
+        self.assertIn(
+            'winget upgrade --id hdosys.herdr-win --exact', update
+        )
+        self.assertIn("self-update is disabled for WinGet installs", update)
+        self.assertIn("Direct setup removed WinGet ownership", lifecycle)
+        self.assertIn("Malformed package-manager ownership was accepted", lifecycle)
+
     def test_installer_owns_the_cross_agent_skill_lifecycle(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
         nsi = NSI.read_text(encoding="utf-8")
@@ -165,10 +192,12 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn(
             '/oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"', nsi
         )
-        self.assertIn('-SkillSourcePath "$PLUGINSDIR\\skill\\SKILL.md"', nsi)
         self.assertIn(
-            '-SkillHashManifestPath "$PLUGINSDIR\\skill\\managed-skill-hashes.txt"',
-            nsi,
+            '$SkillSourcePath = Join-Path $PackageRoot "skill\\SKILL.md"', helper
+        )
+        self.assertIn(
+            '$SkillHashManifestPath = Join-Path $PackageRoot "skill\\managed-skill-hashes.txt"',
+            helper,
         )
         self.assertIn(
             '$skillSource = Join-Path $projectRoot "skills\\herdr\\SKILL.md"',
@@ -351,6 +380,20 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertNotIn("SendNotifyMessage", nsi)
         self.assertIn('-ProductName "${INFO_DISTRIBUTIONNAME}"', nsi)
+        install_command = next(
+            line for line in nsi.splitlines() if " -Action Install " in line
+        )
+        self.assertIn('-PackageRoot "$PLUGINSDIR"', install_command)
+        self.assertEqual(install_command.count("$PLUGINSDIR"), 2)
+        for redundant_path_argument in (
+            "-StageDir",
+            "-LauncherPath",
+            "-UninstallerPath",
+            "-HelperSourcePath",
+            "-SkillSourcePath",
+            "-SkillHashManifestPath",
+        ):
+            self.assertNotIn(redundant_path_argument, install_command)
         self.assertIn('!insertmacro MUI_LANGUAGE "English"', nsi)
         self.assertEqual(nsi.count("!insertmacro MUI_LANGUAGE"), 1)
         self.assertNotIn("LANG_GERMAN", nsi)
