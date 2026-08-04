@@ -1,137 +1,137 @@
 # herdr-win
 
-**An unofficial, upstream-first Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr).**
+**A native Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr), maintained as a small, reviewable patch queue—not a permanent fork.**
 
-[![Patch replay](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/ci.yml) [![Manual release](https://github.com/User-3090/herdr-win/actions/workflows/release.yml/badge.svg)](https://github.com/User-3090/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/User-3090/herdr-win/blob/master/rust-toolchain.toml) [![Upstream](https://img.shields.io/badge/upstream-ogulcancelik%2Fherdr-181717?logo=github)](https://github.com/ogulcancelik/herdr) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/User-3090/herdr-win/blob/master/LICENSE)
+[![Patch replay](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml) [![Candidate build](https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/hdosys/herdr-win/blob/master/rust-toolchain.toml) ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4?logo=windows11&logoColor=white) [![Built with Herdr Sandbox](https://img.shields.io/badge/built%20with-Herdr%20Sandbox-0078D4?logo=windows11&logoColor=white)](https://github.com/hdosys/herdr-sandbox) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/hdosys/herdr-win/blob/master/LICENSE)
 
-`herdr-win` exists to advance Herdr's Windows support. It publishes native snapshots by replaying a small, explicit patch queue on the latest reviewed stable Herdr release selected during each manual refresh and recorded in `patches/delta/BASE`; between refreshes that stable base remains pinned. Windows x86_64 is the first supported target; other upstream-supported platforms are planned. Upstream refreshes and releases are both manual, and no scheduled workflow rebases, tests, or publishes current upstream. It is an unofficial distribution and patch control plane—not a separate product line—and keeps the delta reviewable, replayable, and suitable for upstream integration.
+`herdr-win` is an unofficial, upstream-first delivery lane for Herdr on Windows. It keeps the normal `herdr` command and workflow, adds Windows behavior that has not yet landed upstream, and publishes tested snapshots from an exact reviewed Herdr release plus four explicit patches.
 
-[Install](#install-a-windows-snapshot) · [Patch queue](#maintained-windows-delta) · [Upstream review](#for-upstream-maintainers) · [Releases](#how-manual-releases-work) · [Contributing](#contributing) · [Upstream docs](https://herdr.dev/docs/)
+[Why it exists](#why-it-exists) · [What it adds](#what-differs-from-upstream) · [Install](#install) · [Patch flow](#how-the-patch-queue-works) · [Upstream review](#for-upstream-maintainers) · [Maintaining](#maintaining-the-project) · [Herdr Sandbox](#sister-project-herdr-sandbox)
 
 > [!NOTE]
-> General Herdr documentation, behavior, and issue ownership remain upstream. Fork identity appears in repository, release, update-channel, setup, and Installed Apps presentation; the executable and runtime identity stay `herdr`. The explicit Windows behavior delta is mapped below.
+> Upstream Herdr owns the general CLI, configuration, integrations, and product documentation. This repository owns only its Windows-focused delta and distribution. Reproduce general issues with upstream Herdr before reporting them here.
 
-## Identity and compatibility
+## Why it exists
 
-Only the fork's repository and release-channel identity change. Runtime-facing names stay compatible with upstream:
+Herdr already runs on Windows, but a good Windows release needs more than a binary that compiles. Terminal fidelity, remote attachment, safe packaging, updates, and native verification all need clear ownership.
 
-| Surface | Name |
-| --- | --- |
-| Repository and snapshot releases | `herdr-win` |
-| Windows setup and Installed Apps | **Herdr Win** |
-| Executable and command | `herdr.exe` / `herdr` |
-| Cargo package | `herdr` |
-| Configuration, state, sessions, sockets, and protocol | `herdr` |
+This repository provides that focused delivery path:
 
-You can switch between an upstream Herdr build and a herdr-win build without migrating configuration or learning a second command. Stop running sessions before manually replacing a portable executable.
+- **Useful Windows behavior now:** fixes can ship without turning the fork into a separate product.
+- **A visible delta:** every retained change belongs to one reviewable mailbox instead of disappearing into branch history.
+- **An upstream route:** code that lands upstream is removed from the queue rather than maintained twice.
+- **Reproducible snapshots:** source, patch order, build identity, artifacts, and checksums stay connected.
 
-## Install a Windows snapshot
+## What differs from upstream
 
-Snapshots currently target Windows amd64. When the newest [herdr-win prerelease](https://github.com/User-3090/herdr-win/releases) includes `herdr-win_v<YYYY.MM.DD.N>_windows_amd64_setup.exe`, use it for a normal per-user install. Its SHA-256 is published in the fork's [update manifest](https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json); until that asset appears, use the portable ZIP below.
+The table is intentionally capability-level. The patch files contain the exact implementation and tests.
 
-```powershell
-$manifest = Invoke-RestMethod https://raw.githubusercontent.com/User-3090/herdr-win/master/website/preview.json -TimeoutSec 30
-$asset = $manifest.assets.'windows-x86_64-installer'
-if ($null -eq $asset) { throw "No managed installer is published yet; use the portable ZIP below" }
-$setupName = [IO.Path]::GetFileName(([Uri][string]$asset.url).AbsolutePath)
-$setup = Join-Path $PWD $setupName
-Invoke-WebRequest $asset.url -OutFile $setup -TimeoutSec 120
-$actual = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -cne [string] $asset.sha256) { throw "herdr-win setup checksum mismatch" }
-& $setup
+| Area | Status | What this repository contributes |
+| --- | --- | --- |
+| Native ConPTY foundation | ✅ **Upstreamed in Herdr v0.8.0** | herdr-win now reuses upstream's ConPTY and packaging foundation instead of carrying a duplicate implementation. |
+| Terminal fidelity | **Maintained here** · [`0001`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | Windows appearance, color and cursor fidelity, rendering, and VTI input behavior. |
+| Windows remote attach and image bridge | **Maintained here** · [`0003`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | Windows SSH and named-pipe attachment, shared remote orchestration, and bounded clipboard/drop image transport. |
+| Managed Windows snapshots | **Maintained here** · [`0004`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | Verified Windows packages, per-user setup, portable archives, updates, and safe runtime handoff. |
+| OpenCode lifecycle reporting | **Maintained here** · [`0005`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | Retry-aware status correlation so active retries stay quiet and terminal failures remain visible. |
+
+The Windows remote/image bridge builds on [nsxdavid's `feat/windows-remote-attach` work](https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach). The maintained mailbox adapts and extends that foundation within this queue.
+
+## Sister project: Herdr Sandbox
+
+herdr-win is developed and validated with [**Herdr Sandbox**](https://github.com/hdosys/herdr-sandbox), a disposable native Windows development environment for coding agents. It provides the clean Windows toolchains and realistic native boundary used to build and test this fork; it is a sister project, not a runtime dependency.
+
+## How the patch queue works
+
+```mermaid
+flowchart LR
+    U["Upstream Herdr<br/>v0.8.0"] --> B["BASE<br/>346411fa21af"]
+
+    subgraph Q["patches/delta/series"]
+        direction LR
+        P1["0001<br/>Terminal fidelity"] --> P3["0003<br/>Remote attach"]
+        P3 --> P4["0004<br/>Windows distribution"]
+        P4 --> P5["0005<br/>OpenCode lifecycle"]
+    end
+
+    B --> P1
+    P5 --> R["Fresh replay"]
+    R --> G["Native + cross-platform gates"]
+    G --> A["Setup · ZIP · checksums"]
 ```
 
-The English-only, keyboard-operable Windows setup consistently presents the distribution as **Herdr Win** while the repository and release slug remains `herdr-win`. Welcome and Finish show the current reviewed Herdr base version and identify Herdr Win as an unofficial distribution of that stable release plus the maintained Windows patches. Welcome does not expose or offer a choice for the fixed `%LOCALAPPDATA%\Programs\Herdr` destination. Setup requires no administrator privileges, presents the Apache-2.0 license before modifying files, puts its stable `bin` directory first on your user `PATH` when no effective equivalent is already present, never claims an equivalent user-owned entry, and registers **Herdr Win** in **Windows Settings → Apps → Installed apps**. This shadows but does not modify another upstream/native `herdr` installation. Finish shows the first `herdr` command and separate optional links to the [herdr-win fork](https://github.com/User-3090/herdr-win) and [official Herdr project](https://github.com/ogulcancelik/herdr); setup never opens either automatically. During the progress page, the managed PowerShell helper validates and transactionally activates the immutable runtime, then updates PATH, Installed Apps, and managed skill copies; this can take several seconds and is not an artificial wait. The same license remains available as `LICENSE.txt`. Setup copies upstream's canonical agent skill to `%USERPROFILE%\.agents\skills\herdr\SKILL.md` and, when Claude Code is detected, to its configured or default `.claude\skills\herdr\SKILL.md`. Install and update create a missing copy or replace only a byte-for-byte version known from the current or a historical installer. A customized copy stays in place and setup shows a warning; every sibling file and directory remains untouched. The executable and command remain `herdr.exe` and `herdr`.
+[`patches/delta/BASE`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/BASE) records the exact upstream stable commit. [`series`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/series) is the only application order. Each patch is a full-index, binary-safe mailbox with one logical responsibility.
 
-The managed installation has one launcher at `bin\herdr.exe`; it starts the selected immutable payload directly. Runtime directories do not contain another launcher. Setup replaces an idle launcher immediately or stages a replacement whose hash and embedded build ID are validated until the final managed payload exits, then the existing helper publishes it atomically and prunes every exact unleased runtime except Active and optional Pending. Busy or ambiguous content is preserved. A hard process-tree kill leaves pending work recoverable for the next safe launch or setup.
+An upstream refresh is deliberate: select the latest stable release, replay the complete queue, remove behavior upstream now owns, regenerate changed mailboxes, and verify a fresh replay. `BASE` never follows upstream `master` automatically.
 
-Setup updates only an exact current managed installation. A dead transaction from an interrupted current setup or uninstall is validated and cleared automatically once no managed process remains, so setup can repair the partial install without manual marker cleanup. The former layout with a launcher inside each runtime is intentionally incompatible. If setup rejects another existing installation, uninstall its **Herdr** or **Herdr Win** entry from **Windows Settings → Apps → Installed apps**, then run setup again. Setup preserves that directory and registration until you uninstall them; it does not migrate, back up, remove, or duplicate that installation.
+## Install
 
-For a portable or manual install, download both:
+Windows x86_64 is the maintained distribution target. Download the newest setup and its matching `.sha256` file from [Releases](https://github.com/hdosys/herdr-win/releases).
 
-- `herdr-win_v<YYYY.MM.DD.N>_windows_amd64.zip`
-- `herdr-win_v<YYYY.MM.DD.N>_windows_amd64.zip.sha256`
+### Setup (recommended)
 
-Verify the archive in PowerShell:
+Verify the download before running it:
 
 ```powershell
-$archive = (Resolve-Path .\herdr-win_v*_windows_amd64.zip).Path
-$checksum = (Resolve-Path "$archive.sha256").Path
-$expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
-$actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "herdr-win checksum mismatch" }
+$setup = Get-Item .\herdr-win_v*_windows_amd64_setup.exe
+$sidecar = "$($setup.FullName).sha256"
+$expected = ((Get-Content -LiteralPath $sidecar -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -cne $expected) { throw "herdr-win setup checksum mismatch" }
+& $setup.FullName
 ```
 
-Extract the ZIP into a new, empty directory and keep the complete directory together. It contains `herdr.exe`, the pinned Microsoft ConPTY runtime, its integrity marker, and third-party notices. Then run `herdr.exe` directly or add that directory to your user `PATH`.
+Setup installs for the current user without administrator access, adds `herdr` to the user `PATH`, and registers an uninstaller. Open a new terminal and run:
+
+```powershell
+herdr
+```
+
+Use `herdr update` from an ordinary terminal after detaching from active Herdr sessions. Updates preserve running sessions and activate the new verified snapshot when it is safe. Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
+
+### Portable ZIP
+
+The release also includes `herdr-win_v<version>_windows_amd64.zip` and a matching checksum. Verify it the same way, extract the complete archive into one directory, and run `herdr.exe`.
 
 > [!WARNING]
-> The Herdr executable and setup are not code-signed, so Windows may show a SmartScreen warning. Verify the manifest digest or ZIP sidecar before running either artifact. The bundled Microsoft ConPTY binaries are signature-checked during packaging.
+> The Herdr executable and setup are currently unsigned, so Windows may show a SmartScreen warning. Run them only after the SHA-256 matches the sidecar from the same release.
 
-### Automatic snapshot updates
-
-The runtime reuses Herdr's existing `preview` update mechanism, but it reads only the fork-owned manifest and assets. herdr-win calls these artifacts **snapshots** to avoid implying that they correspond to upstream's separate preview releases. It checks at startup and every 30 minutes while running and shows Herdr's normal update-ready indicator when a newer snapshot exists. Run `herdr update` from an ordinary PowerShell after detaching from Herdr; it downloads the immutable NSIS asset, verifies its SHA-256, and runs setup silently without terminating active sessions.
-
-If older managed sessions are still active, the update is reported as staged. Those sessions continue on their original runtime. After the last old payload exits, future launches switch atomically, any pending launcher is published, and obsolete unleased runtimes are pruned automatically. Running `herdr update` from a portable herdr-win ZIP similarly moves future launches to the managed installation. The manifest is generated from tested artifacts only after their immutable prerelease is published; a final independent gate downloads and verifies both Windows assets. There is no fallback to upstream update sources.
-
-### Uninstall
-
-Close all managed Herdr sessions, then uninstall **Herdr Win** from **Windows Settings → Apps → Installed apps**. The uninstaller refuses to remove an active installation and never terminates sessions. It removes the managed program, only its own user `PATH` entry, and Installed Apps registration. One skill-removal checkbox covers the managed universal and Claude `SKILL.md` copies. It starts selected only when every existing copy is installer-known or absent; a customized copy leaves it clear, and selecting it explicitly authorizes that exact file's removal. Every skill sibling remains untouched, and a `herdr` skill directory is removed only after its `SKILL.md` was removed and the directory is empty. A previously shadowed upstream/native `herdr` becomes visible in new processes. **Remove Herdr settings and session data** is clear by default, preserving `%USERPROFILE%\.herdr` for a later installation unless you select it. Silent uninstall removes known skill copies automatically, preserves customized copies unless you pass `/REMOVE_SKILL`, and still requires `/REMOVE_SETTINGS` to delete settings.
-
-## Maintained Windows delta
-
-The release product delta is exactly the ordered mailbox queue in [`patches/delta/series`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/series). [`BASE`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/BASE) records the exact upstream stable-release commit selected during the latest reviewed manual refresh.
-
-| Patch | Review scope |
-| --- | --- |
-| [`0001`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | **Terminal appearance:** host appearance and color transport, cursor fidelity, terminal rendering, and Windows VTI input behavior. |
-| [`0003`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | **Remote attach:** shared orchestration, the Windows SSH/named-pipe backend, bounded clipboard/drop image transport, and a PATH-resolved Windows-host bridge. |
-| [`0004`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | **Managed Windows distribution:** deterministic ConPTY packaging, one updateable launcher, immutable leased runtimes with automatic pruning, strict per-user NSIS install/update/uninstall, and fork-owned update sources. |
-| [`0005`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | **OpenCode lifecycle:** correlate errors with explicit retry and idle events so active retries stay quiet while terminal failures remain actionable. |
-
-Until matching platform artifacts are implemented, this channel cannot automatically install the corresponding snapshot binary on a Linux or macOS remote. Use a pre-provisioned matching target or provide a matching build through `HERDR_REMOTE_BINARY` when attaching from a snapshot.
-
-See the [queue documentation](https://github.com/User-3090/herdr-win/blob/master/patches/delta/README.md) for its refresh policy. [`patches/upstream/`](https://github.com/User-3090/herdr-win/tree/master/patches/upstream) is a frozen legacy archive retained so existing patch links continue to work.
+For general commands, configuration, and agent integrations, use the [official Herdr documentation](https://herdr.dev/docs/).
 
 ## For upstream maintainers
 
-You do not need to infer product changes from fork branch history. The four mailboxes above are the complete maintained behavior delta:
+The four files in `patches/delta/series` are the complete maintained product delta. You do not need to infer behavior from this fork's development history.
 
-1. start at the exact commit recorded by [`BASE`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/BASE);
-2. apply the filenames from [`series`](https://github.com/User-3090/herdr-win/blob/master/patches/delta/series) in order with `git am --3way`;
-3. review each mailbox's rationale, full-index diff, tests, and documentation as one responsibility-oriented unit; and
-4. use the replay and verification procedure in [`CONTRIBUTING.md`](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md) to reproduce the queue on a fresh upstream checkout.
+1. Start at the exact commit in [`BASE`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/BASE).
+2. Apply [`series`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/series) in order with `git am --3way`.
+3. Review each mailbox as one responsibility-oriented change with its implementation, tests, and documentation.
+4. Follow [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) to reproduce the replay and verification gates.
 
-The mailboxes are review units, not a request to merge each one unchanged. Patch 0003 combines shared remote orchestration with Windows SSH/named-pipe integration, and patch 0004 contains fork-only distribution URLs; either mailbox can be split along those ownership boundaries if upstream adopts its generic parts. Repository branding, workflows, release manifests, and publication automation remain outside the product queue.
+The mailboxes are review units, not a request to merge each one unchanged. Generic parts can be split along upstream ownership boundaries. Fork branding, release workflows, and publication state stay outside the product queue.
 
-## How manual releases work
+## Maintaining the project
 
-The **Build and promote herdr-win release** workflow has two explicit manual operations.
+Refresh and release are intentionally separate manual operations:
 
-Choose `build` and supply one herdr-win CalVer `YYYY.MM.DD.N`. That operation:
+- **Refresh:** select and review a stable upstream release, then replay and minimize the queue.
+- **Build:** replay recorded `BASE`, run the complete gates, and retain one candidate with provenance and checksums.
+- **Promote:** publish those exact retained bytes without rebuilding or repackaging them.
 
-1. checks out the reviewed upstream stable-release commit recorded in `BASE` and verifies its `v<Cargo version>` tag;
-2. applies `patches/delta/series` without resolving conflicts automatically;
-3. runs the Windows formatting, lint, focused tests, ConPTY, installer, and runtime probes plus the Linux/macOS target builds and machine checks; and
-4. retains the complete six-target candidate, checksum sidecars, and provenance metadata for 14 days without creating a tag, release, or manifest commit.
+Ordinary pushes do not publish binaries.
 
-After reviewing the successful candidate, choose `promote` and supply its workflow run ID. Promotion verifies that the run succeeded in this workflow on the still-current control commit and that its provenance, complete file set, and every digest agree. It then publishes those exact retained bytes without replaying source, compiling, or packaging, generates the preview manifest, and independently verifies that the public update feed exposes the tested build. If the candidate expired or `master` advanced, build a new candidate instead.
+| Need | Canonical owner |
+| --- | --- |
+| User-visible fork behavior | [`PRODUCT.md`](https://github.com/hdosys/herdr-win/blob/master/PRODUCT.md) |
+| Technical boundaries | [`ARCHITECTURE.md`](https://github.com/hdosys/herdr-win/blob/master/ARCHITECTURE.md) |
+| Patch ownership and refresh policy | [`patches/delta/README.md`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/README.md) |
+| Replay, verification, and release procedure | [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) |
+| Open work | [`BACKLOG.md`](https://github.com/hdosys/herdr-win/blob/master/BACKLOG.md) |
 
-CalVer is the human herdr-win release identity; the release title, notes, and setup metadata visibly pair it with the stable upstream Herdr version while machine-consumed filenames remain compatible. Source/control hashes remain exact provenance. The workflow never selects current upstream `master`, updates `BASE`, or rewrites the maintained queue. Selecting the latest stable release and refreshing the queue is a separate explicit manual maintenance operation.
+## Issues and contributions
 
-A replay, build, package, candidate-validation, or publication failure prevents the subsequent release state. The final public-feed check can fail after the immutable prerelease and manifest commit already exist; that leaves the workflow failed for diagnosis rather than mutating published artifacts. Ordinary pushes do not build or publish binaries. For release purposes this repository is the control plane; every candidate builds a fresh checkout of recorded `BASE` rather than treating a long-lived integration branch as release source.
+- Use [upstream Herdr](https://github.com/ogulcancelik/herdr) for general product behavior and cross-platform issues.
+- Use [herdr-win issues](https://github.com/hdosys/herdr-win/issues) for behavior specific to this Windows distribution.
+- Read [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) before changing the queue or release automation.
 
-## Documentation and issue routing
+## Credits and license
 
-Use the [upstream documentation](https://herdr.dev/docs/) for the `herdr` CLI, configuration, agent integrations, and general behavior. Fork-specific behavior and limitations are documented here and in the maintained patch queue.
-
-For a Windows-fork problem, open a [herdr-win issue](https://github.com/User-3090/herdr-win/issues) with the release tag, Windows version, terminal, shell, and a minimal reproduction. Reproduce a problem with an upstream build before reporting it upstream; fork-only failures belong here.
-
-## Contributing
-
-Read [`CONTRIBUTING.md`](https://github.com/User-3090/herdr-win/blob/master/CONTRIBUTING.md) before changing the queue or automation. AI agents must also follow [`AGENTS.md`](https://github.com/User-3090/herdr-win/blob/master/AGENTS.md).
-
-## Attribution and license
-
-Herdr is created and maintained upstream by [Can Çelik](https://github.com/ogulcancelik). Consider [sponsoring upstream Herdr](https://github.com/sponsors/ogulcancelik) if the project is useful to you.
-
-herdr-win is distributed under the upstream [Apache License 2.0](https://github.com/User-3090/herdr-win/blob/master/LICENSE).
+Herdr is created and maintained upstream by [Can Çelik](https://github.com/ogulcancelik). herdr-win is distributed under the [Apache License 2.0](https://github.com/hdosys/herdr-win/blob/master/LICENSE).

@@ -33,7 +33,7 @@ active memory owner.
 ## Identity and source invariants
 
 - Official upstream: `ogulcancelik/herdr`.
-- This repository: `User-3090/herdr-win`, an unofficial Windows-focused
+- This repository: `hdosys/herdr-win`, an unofficial Windows-focused
   distribution fork.
 - Release source is replayed upstream source plus the maintained delta, not an
   independently developed product line.

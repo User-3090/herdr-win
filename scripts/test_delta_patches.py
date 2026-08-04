@@ -206,16 +206,24 @@ class DeltaPatchTests(unittest.TestCase):
             (PROJECT_ROOT / "docs" / "next" / "README.md").read_bytes(),
         )
         readme = readme_bytes.decode("utf-8")
-        self.assertIn(
-            r"%USERPROFILE%\.agents\skills\herdr\SKILL.md",
-            readme,
-        )
-        self.assertIn("configured or default `.claude\\skills\\herdr\\SKILL.md`", readme)
-        self.assertIn("known from the current or a historical installer", readme)
-        self.assertIn("A customized copy stays in place", readme)
-        self.assertIn("One skill-removal checkbox", readme)
-        self.assertIn("`/REMOVE_SKILL`", readme)
-        self.assertIn("only after its `SKILL.md` was removed", readme)
+        base = (DELTA_ROOT / "BASE").read_text(encoding="utf-8").strip()
+        for required in (
+            "```mermaid",
+            base[:12],
+            "https://github.com/hdosys/herdr-sandbox",
+            "https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach",
+            "Upstreamed in Herdr v0.8.0",
+            "## For upstream maintainers",
+            "https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg",
+            "https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg",
+        ):
+            self.assertIn(required, readme)
+        for patch_name in (DELTA_ROOT / "series").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            self.assertIn(patch_name, readme)
+        self.assertNotIn("User-3090/herdr-win/actions/workflows", readme)
+        self.assertNotIn("## Identity and compatibility", readme)
         workflow_path = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
         self.assertTrue(workflow_path.is_file())
         self.assertFalse(
