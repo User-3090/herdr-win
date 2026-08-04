@@ -342,6 +342,15 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn("package_windows_installer.ps1", promotion_section)
         self.assertEqual(workflow.count("[void] $descendant.Handle"), 2)
 
+    def test_patch_replay_workflow_uses_recorded_base(self) -> None:
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Replay delta on recorded BASE", workflow)
+        self.assertIn("control/patches/delta/BASE", workflow)
+        self.assertIn("ref: ${{ steps.upstream_source.outputs.ref }}", workflow)
+        self.assertNotIn("ref: master", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
