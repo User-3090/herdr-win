@@ -1735,7 +1735,7 @@ jobs:
           }
 
           $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Herdr"
-          $arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr"
+          $arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Herdr Win"
           if ((Test-Path -LiteralPath $installRoot) -or (Test-Path -LiteralPath $arpKey)) {
             throw "public-feed installer gate requires a clean runner"
           }
