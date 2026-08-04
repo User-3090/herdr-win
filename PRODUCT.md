@@ -111,6 +111,9 @@ tests remain the detailed implementation truth.
   candidate build of the selected upstream source plus the maintained queue.
   Promotion never rebuilds or repackages them. The portable ZIP, managed installer,
   and manifest digest identify the same source.
+- Each snapshot also includes raw Linux and macOS executables for amd64 and arm64,
+  built from that same candidate for remote endpoints that require the matching wire
+  protocol. Windows x86_64 remains the managed distribution target.
 - Each release has a manually selected herdr-win CalVer `YYYY.MM.DD.N` and is based
   on the exact latest upstream stable release selected during the most recent
   explicit refresh. Updater-facing tags and assets retain
