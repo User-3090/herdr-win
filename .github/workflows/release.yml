@@ -1422,7 +1422,7 @@ jobs:
                    | .assets[$key].url == ($prefix + $tag + "/" + $names[$key])
                      and .assets[$key].sha256 == $shas[0][$key]] | all)
              and ([.assets, (.builds[]?.assets)] | all(valid_asset_group))
-             and ([.assets[]?, (.builds[]?.assets[]?)] | all(.url | startswith($prefix)))' \
+             and ([.assets[]?, (.builds[$build_id].assets[]?)] | all(.url | startswith($prefix)))' \
             website/preview.json >/dev/null
 
           if git diff --quiet -- website/preview.json; then
