@@ -4,6 +4,7 @@ param(
     [string]$Action,
 
     [string]$InstallRoot,
+    [string]$UserProfileRoot = $env:USERPROFILE,
     [string]$StageDir,
     [string]$LauncherPath,
     [string]$UninstallerPath,
@@ -2725,6 +2726,7 @@ function Remove-HerdrArpRegistration {
 function Invoke-HerdrInstall {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$UserProfileRoot,
         [Parameter(Mandatory = $true)][string]$StageDir,
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
@@ -2740,13 +2742,18 @@ function Invoke-HerdrInstall {
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
         $allowCurrentRootConvergence = Test-Path -LiteralPath $script:ArpKey
         $legacyQuietUninstall = Test-HerdrLegacyQuietUninstallRegistration -InstallRoot $InstallRoot
         $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
-        $agentSkillsRoot = Get-HerdrAgentSkillsRoot
-        $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled) { Get-HerdrClaudeSkillsRoot } else { $null }
+        $agentSkillsRoot = Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile
+        $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled -UserProfileRoot $userProfile) {
+            Get-HerdrClaudeSkillsRoot -UserProfileRoot $userProfile
+        } else {
+            $null
+        }
         $result = Install-HerdrLayout `
             -InstallRoot $InstallRoot `
             -StageDir $StageDir `
@@ -2930,6 +2937,7 @@ function Invoke-HerdrUninstall {
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
     $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
         Assert-HerdrArpOwnership -InstallRoot $InstallRoot
@@ -2938,8 +2946,8 @@ function Invoke-HerdrUninstall {
         $preservedSkillPaths = @(
             Invoke-HerdrUninstallLayout `
                 -InstallRoot $InstallRoot `
-                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
-                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval) `
+                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile) `
+                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval -UserProfileRoot $userProfile) `
                 -KnownSkillHashes $knownSkillHashes `
                 -SkillDisposition $SkillDisposition `
                 -AllowCurrentRootConvergence $allowCurrentRootConvergence `
@@ -2950,7 +2958,7 @@ function Invoke-HerdrUninstall {
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
         if ($SettingsDisposition -ceq "Remove") {
             try {
-                Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
+                Remove-HerdrUserSettings -UserProfileRoot $userProfile
             } catch {
                 [Console]::Out.WriteLine(
                     "Warning: Selected Herdr settings cleanup was incomplete; locked or unsafe settings were preserved. $($_.Exception.Message)"
@@ -2979,6 +2987,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $SkillHashManifestPath = Join-Path $PackageRoot "skill\managed-skill-hashes.txt"
                 $result = Invoke-HerdrInstall `
                     -InstallRoot $InstallRoot `
+                    -UserProfileRoot $UserProfileRoot `
                     -StageDir $StageDir `
                     -LauncherPath $LauncherPath `
                     -UninstallerPath $UninstallerPath `
@@ -3003,6 +3012,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $preservedSkillPaths = @(
                     Invoke-HerdrUninstall `
                         -InstallRoot $InstallRoot `
+                        -UserProfileRoot $UserProfileRoot `
                         -SettingsDisposition $SettingsDisposition `
                         -SkillHashManifestPath $SkillHashManifestPath `
                         -SkillDisposition $SkillDisposition `
@@ -3016,7 +3026,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
             "GetSkillRemovalDefault" {
                 $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
-                [Console]::Out.Write((Get-HerdrSkillRemovalDefault -KnownHashes $knownSkillHashes))
+                $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
+                [Console]::Out.Write((Get-HerdrSkillRemovalDefault `
+                    -KnownHashes $knownSkillHashes `
+                    -AgentSkillsRoot (Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile) `
+                    -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval -UserProfileRoot $userProfile)))
             }
             "CompleteMaintenance" {
                 $result = Invoke-HerdrCompleteMaintenance `

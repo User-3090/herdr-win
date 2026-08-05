@@ -37,7 +37,18 @@ try {
         throw "Quiet uninstall requires a nonempty regular non-reparse uninstaller."
     }
 
-    $temporaryUninstaller = Join-Path ([IO.Path]::GetTempPath()) ("herdr-uninstall-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    $userProfileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($userProfileRoot)) {
+        throw "Quiet uninstall could not locate the current user's profile."
+    }
+    $temporaryDirectory = [IO.Path]::GetFullPath((Join-Path $userProfileRoot "AppData\Local\Temp"))
+    [void][IO.Directory]::CreateDirectory($temporaryDirectory)
+    $temporaryDirectoryItem = Get-Item -LiteralPath $temporaryDirectory -Force
+    if ($temporaryDirectoryItem -isnot [IO.DirectoryInfo] -or
+        ($temporaryDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Quiet uninstall requires a regular non-reparse user temp directory."
+    }
+    $temporaryUninstaller = Join-Path $temporaryDirectory ("herdr-uninstall-" + [Guid]::NewGuid().ToString("N") + ".exe")
     [IO.File]::Copy($Uninstaller, $temporaryUninstaller, $false)
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $temporaryUninstaller

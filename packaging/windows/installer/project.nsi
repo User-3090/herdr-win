@@ -159,6 +159,11 @@ LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME}
 !else
   !define APP_UNINSTALL_FAULT_ARGS ""
 !endif
+!ifdef TEST_USER_PROFILE_ROOT
+  !define APP_USER_PROFILE_ROOT "${TEST_USER_PROFILE_ROOT}"
+!else
+  !define APP_USER_PROFILE_ROOT "$PROFILE"
+!endif
 
 Function SetPowerShellPath
   StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
@@ -291,6 +296,18 @@ FunctionEnd
 
 Function .onInit
   SetShellVarContext current
+  !ifdef TEST_USER_PROFILE_ROOT
+    StrCpy $INSTDIR "${TEST_USER_PROFILE_ROOT}\AppData\Local\Programs\${INFO_PRODUCTNAME}"
+  !else
+  StrCmp $PROFILE "" 0 installer_profile_ready
+  Push "The current Windows user profile is unavailable; setup did not change this computer."
+  Call FailInstall
+installer_profile_ready:
+  StrCmp $LOCALAPPDATA "" installer_local_appdata_fallback installer_local_appdata_ready
+installer_local_appdata_fallback:
+  StrCpy $INSTDIR "$PROFILE\AppData\Local\Programs\${INFO_PRODUCTNAME}"
+installer_local_appdata_ready:
+  !endif
   StrCpy $InstallManager "Direct"
   ${GetParameters} $0
   StrCpy $2 "$0 "
@@ -313,6 +330,10 @@ FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
+  StrCmp $PROFILE "" 0 uninstaller_profile_ready
+  Push "The current Windows user profile is unavailable; uninstall preserved the existing installation."
+  Call un.FailUninstall
+uninstaller_profile_ready:
   StrCpy $SettingsDisposition "Keep"
   StrCpy $SkillDisposition "Auto"
   ${GetParameters} $0
@@ -348,7 +369,7 @@ Function un.SettingsPage
   ${If} $SkillDisposition == "Auto"
     StrCpy $SkillDisposition "Keep"
     IfFileExists "$INSTDIR\state\installer-helper.ps1" 0 skill_default_done
-    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
+    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
     Pop $HelperExitCode
     Pop $HelperOutput
     StrCmp $HelperExitCode "0" 0 skill_default_done
@@ -421,7 +442,7 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
 
 installer_inputs_ready:
   DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" installer_complete
@@ -439,7 +460,7 @@ Section "Uninstall"
   SetAutoClose true
   ; The uninstaller carries its own helper so every retry uses one validation and
   ; lifecycle-lock owner even after an interrupted cleanup removed installed state.
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "0" un_helper_complete

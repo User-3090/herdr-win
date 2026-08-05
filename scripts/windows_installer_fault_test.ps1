@@ -139,7 +139,8 @@ if ($ownsAgentUserProfile) {
 } elseif (-not (Test-Path -LiteralPath $AgentUserProfileRoot -PathType Container)) {
     throw "AgentUserProfileRoot must be an existing test-owned directory: $AgentUserProfileRoot"
 }
-$env:USERPROFILE = [IO.Path]::GetFullPath($AgentUserProfileRoot)
+$AgentUserProfileRoot = [IO.Path]::GetFullPath($AgentUserProfileRoot)
+$env:USERPROFILE = $AgentUserProfileRoot
 $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local"
 $env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ".claude"
 if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
@@ -153,6 +154,9 @@ $skillPath = Join-Path $skillRoot "SKILL.md"
 $claudeSkillRoot = Join-Path $env:CLAUDE_CONFIG_DIR "skills\herdr"
 $claudeSkillPath = Join-Path $claudeSkillRoot "SKILL.md"
 $settingsRoot = Join-Path $env:USERPROFILE ".herdr"
+$inheritedUserProfileDecoy = Join-Path $AgentUserProfileRoot "inherited-userprofile-decoy"
+New-Item -ItemType Directory -Path $inheritedUserProfileDecoy | Out-Null
+$env:USERPROFILE = $inheritedUserProfileDecoy
 $allowedFaults = @(
     "after-uninstall-pending",
     "after-launcher-lock",
@@ -336,7 +340,8 @@ try {
             -NumericVersion $NumericVersion `
             -ProductName $ProductName `
             -OutputPath $installer `
-            -TestUninstallFault $fault
+            -TestUninstallFault $fault `
+            -TestUserProfileRoot $AgentUserProfileRoot
 
         $installExitCode = Start-TestProcess -FilePath $installer -Arguments @("/S")
         if ($installExitCode -ne 0) {
@@ -421,7 +426,8 @@ try {
         -DisplayVersion $DisplayVersion `
         -NumericVersion $NumericVersion `
         -ProductName $ProductName `
-        -OutputPath $modifiedInstaller
+        -OutputPath $modifiedInstaller `
+        -TestUserProfileRoot $AgentUserProfileRoot
     $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S", "/WINGETjunk")
     if ($modifiedInstallExit -ne 0) {
         throw "Modified-tree installer exited with $modifiedInstallExit."
@@ -565,7 +571,7 @@ try {
     }
     New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-reparse-residual")
-    $reparseStateTarget = Join-Path $env:USERPROFILE "settings-reparse-target"
+    $reparseStateTarget = Join-Path $AgentUserProfileRoot "settings-reparse-target"
     New-Item -ItemType Directory -Path $reparseStateTarget | Out-Null
     [IO.File]::WriteAllText((Join-Path $reparseStateTarget "outside.txt"), "preserve-external")
     $reparseStateLink = Join-Path $settingsRoot "external"

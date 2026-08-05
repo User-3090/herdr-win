@@ -237,6 +237,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("retained universal SKILL.md", fault_test)
         self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
         self.assertIn("AgentUserProfileRoot", fault_test)
+        self.assertIn("inherited-userprofile-decoy", fault_test)
+        self.assertIn("-TestUserProfileRoot $AgentUserProfileRoot", fault_test)
         self.assertIn('[string]$ProductName = "Herdr"', fault_test)
         self.assertIn('[string]$PackageName = "Herdr Win"', fault_test)
         self.assertIn("Uninstall\\$PackageName", fault_test)
@@ -427,7 +429,23 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             line for line in nsi.splitlines() if " -Action Install " in line
         )
         self.assertIn('-PackageRoot "$PLUGINSDIR"', install_command)
+        self.assertIn('-UserProfileRoot "${APP_USER_PROFILE_ROOT}"', install_command)
         self.assertEqual(install_command.count("$PLUGINSDIR"), 2)
+        self.assertIn('!define APP_USER_PROFILE_ROOT "$PROFILE"', nsi)
+        self.assertIn(
+            'StrCpy $INSTDIR "${TEST_USER_PROFILE_ROOT}\\AppData\\Local\\Programs\\${INFO_PRODUCTNAME}"',
+            nsi,
+        )
+        self.assertEqual(
+            nsi.count('-UserProfileRoot "${APP_USER_PROFILE_ROOT}"'), 3
+        )
+        self.assertIn('StrCmp $PROFILE "" 0 installer_profile_ready', nsi)
+        self.assertIn('StrCmp $LOCALAPPDATA "" installer_local_appdata_fallback', nsi)
+        self.assertIn(
+            'StrCpy $INSTDIR "$PROFILE\\AppData\\Local\\Programs\\${INFO_PRODUCTNAME}"',
+            nsi,
+        )
+        self.assertIn('StrCmp $PROFILE "" 0 uninstaller_profile_ready', nsi)
         for redundant_path_argument in (
             "-StageDir",
             "-LauncherPath",
@@ -638,6 +656,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('Arguments = "/S _?=$InstallRoot"', runner)
         self.assertIn("$installRootItem = Get-Item -LiteralPath $InstallRoot -Force", runner)
         self.assertIn("[IO.FileAttributes]::ReparsePoint", runner)
+        self.assertIn("[Environment+SpecialFolder]::UserProfile", runner)
+        self.assertIn(
+            'Join-Path $userProfileRoot "AppData\\Local\\Temp"', runner
+        )
+        self.assertNotIn("[IO.Path]::GetTempPath()", runner)
         self.assertIn("WaitForExit(180000)", runner)
         self.assertIn("exit $exitCode", runner)
         message_boxes = [match.start() for match in re.finditer(r"\bMessageBox\b", nsi)]
@@ -826,6 +849,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             packager,
         )
         self.assertIn('"/DTEST_UNINSTALL_FAULT=$TestUninstallFault"', packager)
+        self.assertIn('"/DTEST_USER_PROFILE_ROOT=$TestUserProfileRoot"', packager)
         self.assertNotIn("Microsoft.Windows.Console.ConPTY", packager)
 
     def test_updater_owns_a_bounded_kill_on_close_installer_job(self) -> None:

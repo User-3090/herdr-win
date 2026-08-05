@@ -1,4 +1,4 @@
-From 57cf373b287e978450ff3b03c2919b44ba554987 Mon Sep 17 00:00:00 2001
+From 6ec42c89929877b5492fa32f0b3a487d59969255 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3036 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 3050 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -16,19 +16,19 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  462 +++
+ packaging/windows/installer/project.nsi       |  483 +++
  packaging/windows/managed-skill-hashes.txt    |    3 +
- packaging/windows/uninstall-runner.ps1        |   72 +
+ packaging/windows/uninstall-runner.ps1        |   83 +
  scripts/package_windows_conpty.py             |   39 +-
- scripts/package_windows_installer.ps1         |  505 +++
+ scripts/package_windows_installer.ps1         |  520 +++
  scripts/preview.py                            |  124 +-
  scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  203 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  888 +++++
+ scripts/test_windows_installer.py             |  912 +++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
- scripts/windows_installer_fault_test.ps1      |  633 ++++
+ scripts/windows_installer_fault_test.ps1      |  639 ++++
  scripts/windows_installer_test.ps1            | 1078 ++++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
@@ -50,7 +50,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  878 ++++-
- 45 files changed, 10287 insertions(+), 392 deletions(-)
+ 45 files changed, 10378 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -153,16 +153,17 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9b6ec8601
+index 0000000000000000000000000000000000000000..703d9d6ce496a4af4b75b81c63a0224a6a8ee3ed
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3036 @@
+@@ -0,0 +1,3050 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
 +    [string]$Action,
 +
 +    [string]$InstallRoot,
++    [string]$UserProfileRoot = $env:USERPROFILE,
 +    [string]$StageDir,
 +    [string]$LauncherPath,
 +    [string]$UninstallerPath,
@@ -2884,6 +2885,7 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +function Invoke-HerdrInstall {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [Parameter(Mandatory = $true)][string]$UserProfileRoot,
 +        [Parameter(Mandatory = $true)][string]$StageDir,
 +        [Parameter(Mandatory = $true)][string]$LauncherPath,
 +        [Parameter(Mandatory = $true)][string]$UninstallerPath,
@@ -2899,13 +2901,18 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +    )
 +
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
++    $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
 +        $allowCurrentRootConvergence = Test-Path -LiteralPath $script:ArpKey
 +        $legacyQuietUninstall = Test-HerdrLegacyQuietUninstallRegistration -InstallRoot $InstallRoot
 +        $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
-+        $agentSkillsRoot = Get-HerdrAgentSkillsRoot
-+        $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled) { Get-HerdrClaudeSkillsRoot } else { $null }
++        $agentSkillsRoot = Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile
++        $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled -UserProfileRoot $userProfile) {
++            Get-HerdrClaudeSkillsRoot -UserProfileRoot $userProfile
++        } else {
++            $null
++        }
 +        $result = Install-HerdrLayout `
 +            -InstallRoot $InstallRoot `
 +            -StageDir $StageDir `
@@ -3089,6 +3096,7 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +    )
 +
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
++    $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
 +    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
@@ -3097,8 +3105,8 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +        $preservedSkillPaths = @(
 +            Invoke-HerdrUninstallLayout `
 +                -InstallRoot $InstallRoot `
-+                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot) `
-+                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval) `
++                -AgentSkillsRoot (Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile) `
++                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval -UserProfileRoot $userProfile) `
 +                -KnownSkillHashes $knownSkillHashes `
 +                -SkillDisposition $SkillDisposition `
 +                -AllowCurrentRootConvergence $allowCurrentRootConvergence `
@@ -3109,7 +3117,7 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +        Remove-HerdrArpRegistration -InstallRoot $InstallRoot
 +        if ($SettingsDisposition -ceq "Remove") {
 +            try {
-+                Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
++                Remove-HerdrUserSettings -UserProfileRoot $userProfile
 +            } catch {
 +                [Console]::Out.WriteLine(
 +                    "Warning: Selected Herdr settings cleanup was incomplete; locked or unsafe settings were preserved. $($_.Exception.Message)"
@@ -3138,6 +3146,7 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +                $SkillHashManifestPath = Join-Path $PackageRoot "skill\managed-skill-hashes.txt"
 +                $result = Invoke-HerdrInstall `
 +                    -InstallRoot $InstallRoot `
++                    -UserProfileRoot $UserProfileRoot `
 +                    -StageDir $StageDir `
 +                    -LauncherPath $LauncherPath `
 +                    -UninstallerPath $UninstallerPath `
@@ -3162,6 +3171,7 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +                $preservedSkillPaths = @(
 +                    Invoke-HerdrUninstall `
 +                        -InstallRoot $InstallRoot `
++                        -UserProfileRoot $UserProfileRoot `
 +                        -SettingsDisposition $SettingsDisposition `
 +                        -SkillHashManifestPath $SkillHashManifestPath `
 +                        -SkillDisposition $SkillDisposition `
@@ -3175,7 +3185,11 @@ index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9
 +            }
 +            "GetSkillRemovalDefault" {
 +                $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
-+                [Console]::Out.Write((Get-HerdrSkillRemovalDefault -KnownHashes $knownSkillHashes))
++                $userProfile = Get-HerdrUserProfileRoot -UserProfileRoot $UserProfileRoot
++                [Console]::Out.Write((Get-HerdrSkillRemovalDefault `
++                    -KnownHashes $knownSkillHashes `
++                    -AgentSkillsRoot (Get-HerdrAgentSkillsRoot -UserProfileRoot $userProfile) `
++                    -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval -UserProfileRoot $userProfile)))
 +            }
 +            "CompleteMaintenance" {
 +                $result = Invoke-HerdrCompleteMaintenance `
@@ -54650,10 +54664,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8e292e9c1
+index 0000000000000000000000000000000000000000..1f6f3422d31a2c24b30ee4ba477a92074f9413a6
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,483 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -54815,6 +54829,11 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +!else
 +  !define APP_UNINSTALL_FAULT_ARGS ""
 +!endif
++!ifdef TEST_USER_PROFILE_ROOT
++  !define APP_USER_PROFILE_ROOT "${TEST_USER_PROFILE_ROOT}"
++!else
++  !define APP_USER_PROFILE_ROOT "$PROFILE"
++!endif
 +
 +Function SetPowerShellPath
 +  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
@@ -54947,6 +54966,18 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +
 +Function .onInit
 +  SetShellVarContext current
++  !ifdef TEST_USER_PROFILE_ROOT
++    StrCpy $INSTDIR "${TEST_USER_PROFILE_ROOT}\AppData\Local\Programs\${INFO_PRODUCTNAME}"
++  !else
++  StrCmp $PROFILE "" 0 installer_profile_ready
++  Push "The current Windows user profile is unavailable; setup did not change this computer."
++  Call FailInstall
++installer_profile_ready:
++  StrCmp $LOCALAPPDATA "" installer_local_appdata_fallback installer_local_appdata_ready
++installer_local_appdata_fallback:
++  StrCpy $INSTDIR "$PROFILE\AppData\Local\Programs\${INFO_PRODUCTNAME}"
++installer_local_appdata_ready:
++  !endif
 +  StrCpy $InstallManager "Direct"
 +  ${GetParameters} $0
 +  StrCpy $2 "$0 "
@@ -54969,6 +55000,10 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +
 +Function un.onInit
 +  SetShellVarContext current
++  StrCmp $PROFILE "" 0 uninstaller_profile_ready
++  Push "The current Windows user profile is unavailable; uninstall preserved the existing installation."
++  Call un.FailUninstall
++uninstaller_profile_ready:
 +  StrCpy $SettingsDisposition "Keep"
 +  StrCpy $SkillDisposition "Auto"
 +  ${GetParameters} $0
@@ -55004,7 +55039,7 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +  ${If} $SkillDisposition == "Auto"
 +    StrCpy $SkillDisposition "Keep"
 +    IfFileExists "$INSTDIR\state\installer-helper.ps1" 0 skill_default_done
-+    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
++    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
 +    Pop $HelperExitCode
 +    Pop $HelperOutput
 +    StrCmp $HelperExitCode "0" 0 skill_default_done
@@ -55077,7 +55112,7 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +
 +installer_inputs_ready:
 +  DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" installer_complete
@@ -55095,7 +55130,7 @@ index 0000000000000000000000000000000000000000..099c94c4ac7ab0dbd1d9925c5c9e61a8
 +  SetAutoClose true
 +  ; The uninstaller carries its own helper so every retry uses one validation and
 +  ; lifecycle-lock owner even after an interrupted cleanup removed installed state.
-+  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
++  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "0" un_helper_complete
@@ -55127,10 +55162,10 @@ index 0000000000000000000000000000000000000000..2ab1a2278d6b249d176a75308ffa8c01
 +2752439d23fcc16235e1292599e7f7b31635166d6b01221d7bf759da5d571072
 diff --git a/packaging/windows/uninstall-runner.ps1 b/packaging/windows/uninstall-runner.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd68313f80a9626846faeeb3e2c6ce5b4f269b2c
+index 0000000000000000000000000000000000000000..b26ff344fad5b606db1fb50d99b12b8f87507e0f
 --- /dev/null
 +++ b/packaging/windows/uninstall-runner.ps1
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,83 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -55170,7 +55205,18 @@ index 0000000000000000000000000000000000000000..dd68313f80a9626846faeeb3e2c6ce5b
 +        throw "Quiet uninstall requires a nonempty regular non-reparse uninstaller."
 +    }
 +
-+    $temporaryUninstaller = Join-Path ([IO.Path]::GetTempPath()) ("herdr-uninstall-" + [Guid]::NewGuid().ToString("N") + ".exe")
++    $userProfileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
++    if ([string]::IsNullOrWhiteSpace($userProfileRoot)) {
++        throw "Quiet uninstall could not locate the current user's profile."
++    }
++    $temporaryDirectory = [IO.Path]::GetFullPath((Join-Path $userProfileRoot "AppData\Local\Temp"))
++    [void][IO.Directory]::CreateDirectory($temporaryDirectory)
++    $temporaryDirectoryItem = Get-Item -LiteralPath $temporaryDirectory -Force
++    if ($temporaryDirectoryItem -isnot [IO.DirectoryInfo] -or
++        ($temporaryDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
++        throw "Quiet uninstall requires a regular non-reparse user temp directory."
++    }
++    $temporaryUninstaller = Join-Path $temporaryDirectory ("herdr-uninstall-" + [Guid]::NewGuid().ToString("N") + ".exe")
 +    [IO.File]::Copy($Uninstaller, $temporaryUninstaller, $false)
 +    $startInfo = New-Object Diagnostics.ProcessStartInfo
 +    $startInfo.FileName = $temporaryUninstaller
@@ -55313,10 +55359,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d1ae3227d44fa062d437e1f9c704e1a0624f218b
+index 0000000000000000000000000000000000000000..e5912881a6014f81742c624102d6e45a153c6daf
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,505 @@
+@@ -0,0 +1,520 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -55351,7 +55397,9 @@ index 0000000000000000000000000000000000000000..d1ae3227d44fa062d437e1f9c704e1a0
 +        "after-uninstaller",
 +        "after-uninstall-runner"
 +    )]
-+    [string]$TestUninstallFault
++    [string]$TestUninstallFault,
++
++    [string]$TestUserProfileRoot
 +)
 +
 +Set-StrictMode -Version Latest
@@ -55650,6 +55698,14 @@ index 0000000000000000000000000000000000000000..d1ae3227d44fa062d437e1f9c704e1a0
 +if ($ProductName -cnotmatch $ProductNamePattern) {
 +    throw "Invalid product name '$ProductName'."
 +}
++if (-not [string]::IsNullOrWhiteSpace($TestUserProfileRoot)) {
++    $TestUserProfileRoot = (Resolve-Path -LiteralPath $TestUserProfileRoot).Path
++    if (-not (Test-Path -LiteralPath $TestUserProfileRoot -PathType Container) -or
++        (Get-Item -LiteralPath $TestUserProfileRoot -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint -or
++        $TestUserProfileRoot -match '[\r\n"$]') {
++        throw "TestUserProfileRoot must be a regular NSIS-safe directory: $TestUserProfileRoot"
++    }
++}
 +$UiVersion = Assert-VersionIdentity
 +
 +$projectRoot = Split-Path -Parent $PSScriptRoot
@@ -55812,6 +55868,11 @@ index 0000000000000000000000000000000000000000..d1ae3227d44fa062d437e1f9c704e1a0
 +    if (-not [string]::IsNullOrWhiteSpace($TestUninstallFault)) {
 +        $makensisArguments = @(
 +            "/DTEST_UNINSTALL_FAULT=$TestUninstallFault"
++        ) + $makensisArguments
++    }
++    if (-not [string]::IsNullOrWhiteSpace($TestUserProfileRoot)) {
++        $makensisArguments = @(
++            "/DTEST_USER_PROFILE_ROOT=$TestUserProfileRoot"
 +        ) + $makensisArguments
 +    }
 +    Invoke-NativeChecked $makensis $makensisArguments -TimeoutSeconds 180
@@ -56427,10 +56488,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284157d1194
+index 0000000000000000000000000000000000000000..25d00153daf3925ad23b1950a157ea1f3d931ef9
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,888 @@
+@@ -0,0 +1,912 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56670,6 +56731,8 @@ index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284
 +        self.assertIn("retained universal SKILL.md", fault_test)
 +        self.assertIn("Sibling-preserving skill uninstall passed", fault_test)
 +        self.assertIn("AgentUserProfileRoot", fault_test)
++        self.assertIn("inherited-userprofile-decoy", fault_test)
++        self.assertIn("-TestUserProfileRoot $AgentUserProfileRoot", fault_test)
 +        self.assertIn('[string]$ProductName = "Herdr"', fault_test)
 +        self.assertIn('[string]$PackageName = "Herdr Win"', fault_test)
 +        self.assertIn("Uninstall\\$PackageName", fault_test)
@@ -56860,7 +56923,23 @@ index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284
 +            line for line in nsi.splitlines() if " -Action Install " in line
 +        )
 +        self.assertIn('-PackageRoot "$PLUGINSDIR"', install_command)
++        self.assertIn('-UserProfileRoot "${APP_USER_PROFILE_ROOT}"', install_command)
 +        self.assertEqual(install_command.count("$PLUGINSDIR"), 2)
++        self.assertIn('!define APP_USER_PROFILE_ROOT "$PROFILE"', nsi)
++        self.assertIn(
++            'StrCpy $INSTDIR "${TEST_USER_PROFILE_ROOT}\\AppData\\Local\\Programs\\${INFO_PRODUCTNAME}"',
++            nsi,
++        )
++        self.assertEqual(
++            nsi.count('-UserProfileRoot "${APP_USER_PROFILE_ROOT}"'), 3
++        )
++        self.assertIn('StrCmp $PROFILE "" 0 installer_profile_ready', nsi)
++        self.assertIn('StrCmp $LOCALAPPDATA "" installer_local_appdata_fallback', nsi)
++        self.assertIn(
++            'StrCpy $INSTDIR "$PROFILE\\AppData\\Local\\Programs\\${INFO_PRODUCTNAME}"',
++            nsi,
++        )
++        self.assertIn('StrCmp $PROFILE "" 0 uninstaller_profile_ready', nsi)
 +        for redundant_path_argument in (
 +            "-StageDir",
 +            "-LauncherPath",
@@ -57071,6 +57150,11 @@ index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284
 +        self.assertIn('Arguments = "/S _?=$InstallRoot"', runner)
 +        self.assertIn("$installRootItem = Get-Item -LiteralPath $InstallRoot -Force", runner)
 +        self.assertIn("[IO.FileAttributes]::ReparsePoint", runner)
++        self.assertIn("[Environment+SpecialFolder]::UserProfile", runner)
++        self.assertIn(
++            'Join-Path $userProfileRoot "AppData\\Local\\Temp"', runner
++        )
++        self.assertNotIn("[IO.Path]::GetTempPath()", runner)
 +        self.assertIn("WaitForExit(180000)", runner)
 +        self.assertIn("exit $exitCode", runner)
 +        message_boxes = [match.start() for match in re.finditer(r"\bMessageBox\b", nsi)]
@@ -57259,6 +57343,7 @@ index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284
 +            packager,
 +        )
 +        self.assertIn('"/DTEST_UNINSTALL_FAULT=$TestUninstallFault"', packager)
++        self.assertIn('"/DTEST_USER_PROFILE_ROOT=$TestUserProfileRoot"', packager)
 +        self.assertNotIn("Microsoft.Windows.Console.ConPTY", packager)
 +
 +    def test_updater_owns_a_bounded_kill_on_close_installer_job(self) -> None:
@@ -57542,10 +57627,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..331dec1946e78838302c93b9325a825c
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b97797f32
+index 0000000000000000000000000000000000000000..42c465c338b3658f0855413a01a16aa9b048a758
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,633 @@
+@@ -0,0 +1,639 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57687,7 +57772,8 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +} elseif (-not (Test-Path -LiteralPath $AgentUserProfileRoot -PathType Container)) {
 +    throw "AgentUserProfileRoot must be an existing test-owned directory: $AgentUserProfileRoot"
 +}
-+$env:USERPROFILE = [IO.Path]::GetFullPath($AgentUserProfileRoot)
++$AgentUserProfileRoot = [IO.Path]::GetFullPath($AgentUserProfileRoot)
++$env:USERPROFILE = $AgentUserProfileRoot
 +$env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local"
 +$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ".claude"
 +if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
@@ -57701,6 +57787,9 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +$claudeSkillRoot = Join-Path $env:CLAUDE_CONFIG_DIR "skills\herdr"
 +$claudeSkillPath = Join-Path $claudeSkillRoot "SKILL.md"
 +$settingsRoot = Join-Path $env:USERPROFILE ".herdr"
++$inheritedUserProfileDecoy = Join-Path $AgentUserProfileRoot "inherited-userprofile-decoy"
++New-Item -ItemType Directory -Path $inheritedUserProfileDecoy | Out-Null
++$env:USERPROFILE = $inheritedUserProfileDecoy
 +$allowedFaults = @(
 +    "after-uninstall-pending",
 +    "after-launcher-lock",
@@ -57884,7 +57973,8 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +            -NumericVersion $NumericVersion `
 +            -ProductName $ProductName `
 +            -OutputPath $installer `
-+            -TestUninstallFault $fault
++            -TestUninstallFault $fault `
++            -TestUserProfileRoot $AgentUserProfileRoot
 +
 +        $installExitCode = Start-TestProcess -FilePath $installer -Arguments @("/S")
 +        if ($installExitCode -ne 0) {
@@ -57969,7 +58059,8 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +        -DisplayVersion $DisplayVersion `
 +        -NumericVersion $NumericVersion `
 +        -ProductName $ProductName `
-+        -OutputPath $modifiedInstaller
++        -OutputPath $modifiedInstaller `
++        -TestUserProfileRoot $AgentUserProfileRoot
 +    $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S", "/WINGETjunk")
 +    if ($modifiedInstallExit -ne 0) {
 +        throw "Modified-tree installer exited with $modifiedInstallExit."
@@ -58113,7 +58204,7 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +    }
 +    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-reparse-residual")
-+    $reparseStateTarget = Join-Path $env:USERPROFILE "settings-reparse-target"
++    $reparseStateTarget = Join-Path $AgentUserProfileRoot "settings-reparse-target"
 +    New-Item -ItemType Directory -Path $reparseStateTarget | Out-Null
 +    [IO.File]::WriteAllText((Join-Path $reparseStateTarget "outside.txt"), "preserve-external")
 +    $reparseStateLink = Join-Path $settingsRoot "external"
@@ -63327,3 +63418,4 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..6cb62f46daafa763deab9fc83aa0d3ed
      }
 -- 
 2.55.0.windows.3
+

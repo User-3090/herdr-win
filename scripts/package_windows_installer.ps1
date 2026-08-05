@@ -32,7 +32,9 @@ param(
         "after-uninstaller",
         "after-uninstall-runner"
     )]
-    [string]$TestUninstallFault
+    [string]$TestUninstallFault,
+
+    [string]$TestUserProfileRoot
 )
 
 Set-StrictMode -Version Latest
@@ -331,6 +333,14 @@ if ($BuildId -cnotmatch $BuildIdPattern) {
 if ($ProductName -cnotmatch $ProductNamePattern) {
     throw "Invalid product name '$ProductName'."
 }
+if (-not [string]::IsNullOrWhiteSpace($TestUserProfileRoot)) {
+    $TestUserProfileRoot = (Resolve-Path -LiteralPath $TestUserProfileRoot).Path
+    if (-not (Test-Path -LiteralPath $TestUserProfileRoot -PathType Container) -or
+        (Get-Item -LiteralPath $TestUserProfileRoot -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint -or
+        $TestUserProfileRoot -match '[\r\n"$]') {
+        throw "TestUserProfileRoot must be a regular NSIS-safe directory: $TestUserProfileRoot"
+    }
+}
 $UiVersion = Assert-VersionIdentity
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -493,6 +503,11 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($TestUninstallFault)) {
         $makensisArguments = @(
             "/DTEST_UNINSTALL_FAULT=$TestUninstallFault"
+        ) + $makensisArguments
+    }
+    if (-not [string]::IsNullOrWhiteSpace($TestUserProfileRoot)) {
+        $makensisArguments = @(
+            "/DTEST_USER_PROFILE_ROOT=$TestUserProfileRoot"
         ) + $makensisArguments
     }
     Invoke-NativeChecked $makensis $makensisArguments -TimeoutSeconds 180
