@@ -22,6 +22,7 @@ use crate::{
 };
 
 const PENDING_POINTER: &str = "pending";
+const UNINSTALL_PENDING_MARKER: &str = "uninstall.pending";
 const COORDINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const COORDINATION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const BUILD_ID_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
@@ -155,6 +156,7 @@ fn spawn_payload(
 ) -> io::Result<(Child, SharedLease, ConsoleCtrlHandler)> {
     let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
     install.validate_managed_bin()?;
+    reject_pending_uninstall(install)?;
     let runtime = select_runtime_locked(install)?;
     let lease = install.open_shared_lease(&runtime.build_id)?;
     let console_handler = ConsoleCtrlHandler::install()?;
@@ -174,6 +176,24 @@ fn spawn_payload(
     // Windows Command inherits the explicitly marked lease handle; the payload
     // validates and adopts that exact file before it can create descendants.
     Ok((child, lease, console_handler))
+}
+
+fn reject_pending_uninstall(install: &ManagedInstall) -> io::Result<()> {
+    let marker = install.state_dir().join(UNINSTALL_PENDING_MARKER);
+    match fs::symlink_metadata(&marker) {
+        Ok(_) => Err(invalid_data(format!(
+            "managed Herdr uninstall is pending at {}; retry uninstall before launching Herdr",
+            marker.display()
+        ))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(contextual(
+            err,
+            format!(
+                "failed to inspect managed Herdr uninstall state {}",
+                marker.display()
+            ),
+        )),
+    }
 }
 
 fn payload_command(executable: &Path, args: &[OsString]) -> Command {
@@ -800,6 +820,25 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(gate);
+    }
+
+    #[test]
+    fn pending_uninstall_blocks_payload_launch_before_runtime_spawn() {
+        let tree = TestTree::new("pending-uninstall");
+        tree.add_runtime(OLD_BUILD);
+        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
+        fs::write(
+            tree.root.join("state").join(UNINSTALL_PENDING_MARKER),
+            b"herdr-uninstall-v1\n",
+        )
+        .expect("write pending uninstall marker");
+
+        let error = match spawn_payload(&tree.install(), &[]) {
+            Ok(_) => panic!("pending uninstall launched a managed payload"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("uninstall is pending"));
     }
 
     #[test]

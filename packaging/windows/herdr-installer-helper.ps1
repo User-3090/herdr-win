@@ -1232,12 +1232,15 @@ function Assert-HerdrManagedRoot {
             throw "Managed Herdr root has an unrecognized owned layout: $($entry.FullName)"
         }
     }
-    foreach ($required in @("bin", "runtime", "state", "uninstall.exe")) {
+    foreach ($required in @("bin", "runtime", "state")) {
         if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $required))) {
             throw "Managed Herdr root is missing $required."
         }
     }
-    Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
+    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
+    if (Test-Path -LiteralPath $uninstaller) {
+        Assert-HerdrRegularFile -Path $uninstaller
+    }
     $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
     if (Test-Path -LiteralPath $uninstallRunner) {
         Assert-HerdrRegularFile -Path $uninstallRunner
@@ -1252,7 +1255,7 @@ function Assert-HerdrManagedRoot {
             throw "Unrecognized content in managed Herdr state: $($entry.FullName)"
         }
     }
-    foreach ($required in @("active", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")) {
+    foreach ($required in @("active", "leases", "launcher.lock", "install.manifest")) {
         if (-not (Test-Path -LiteralPath (Join-Path $stateDir $required))) {
             throw "Managed Herdr state is missing $required."
         }
@@ -1261,7 +1264,10 @@ function Assert-HerdrManagedRoot {
         throw "Managed Herdr uninstall is incomplete; rerun uninstall before installing."
     }
     Assert-HerdrRegularFile -Path (Join-Path $stateDir "launcher.lock")
-    Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
+    $installerHelper = Join-Path $stateDir "installer-helper.ps1"
+    if (Test-Path -LiteralPath $installerHelper) {
+        Assert-HerdrRegularFile -Path $installerHelper
+    }
     Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
     $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
     Assert-HerdrPackageManagerMarker -StateDir $stateDir
@@ -3298,7 +3304,13 @@ function Invoke-HerdrUninstall {
         [void](Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -InstallerOwned $pathOwned)
         Remove-HerdrArpRegistration -InstallRoot $InstallRoot
         if ($SettingsDisposition -ceq "Remove") {
-            Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
+            try {
+                Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
+            } catch {
+                [Console]::Out.WriteLine(
+                    "Warning: Selected Herdr settings cleanup was incomplete; locked or unsafe settings were preserved. $($_.Exception.Message)"
+                )
+            }
         }
         Remove-HerdrUninstallFaultMarker -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
         return $preservedSkillPaths

@@ -1,4 +1,4 @@
-From b8dd1320b329a2f2c1cc5c44b9dbe3d7786e6a2a Mon Sep 17 00:00:00 2001
+From 5bf3f2f84e6a04da99641cb236e68cb68e619456 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3379 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 3391 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -26,10 +26,10 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  203 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  827 ++++
+ scripts/test_windows_installer.py             |  868 +++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
- scripts/windows_installer_fault_test.ps1      |  512 +++
- scripts/windows_installer_test.ps1            | 1022 +++++
+ scripts/windows_installer_fault_test.ps1      |  633 +++
+ scripts/windows_installer_test.ps1            | 1059 +++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -44,13 +44,13 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  318 ++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  158 +-
- src/platform/windows/launcher.rs              | 1065 ++++++
+ src/platform/windows/launcher.rs              | 1104 ++++++
  src/platform/windows/managed_install.rs       |  689 ++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  878 ++++-
- 45 files changed, 10353 insertions(+), 392 deletions(-)
+ 45 files changed, 10603 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -153,10 +153,10 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..3027e3383bf988ebbbfab47290a313b2de3e7770
+index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46cbd86d4b
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3379 @@
+@@ -0,0 +1,3391 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
@@ -1391,12 +1391,15 @@ index 0000000000000000000000000000000000000000..3027e3383bf988ebbbfab47290a313b2
 +            throw "Managed Herdr root has an unrecognized owned layout: $($entry.FullName)"
 +        }
 +    }
-+    foreach ($required in @("bin", "runtime", "state", "uninstall.exe")) {
++    foreach ($required in @("bin", "runtime", "state")) {
 +        if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $required))) {
 +            throw "Managed Herdr root is missing $required."
 +        }
 +    }
-+    Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
++    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
++    if (Test-Path -LiteralPath $uninstaller) {
++        Assert-HerdrRegularFile -Path $uninstaller
++    }
 +    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
 +    if (Test-Path -LiteralPath $uninstallRunner) {
 +        Assert-HerdrRegularFile -Path $uninstallRunner
@@ -1411,7 +1414,7 @@ index 0000000000000000000000000000000000000000..3027e3383bf988ebbbfab47290a313b2
 +            throw "Unrecognized content in managed Herdr state: $($entry.FullName)"
 +        }
 +    }
-+    foreach ($required in @("active", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest")) {
++    foreach ($required in @("active", "leases", "launcher.lock", "install.manifest")) {
 +        if (-not (Test-Path -LiteralPath (Join-Path $stateDir $required))) {
 +            throw "Managed Herdr state is missing $required."
 +        }
@@ -1420,7 +1423,10 @@ index 0000000000000000000000000000000000000000..3027e3383bf988ebbbfab47290a313b2
 +        throw "Managed Herdr uninstall is incomplete; rerun uninstall before installing."
 +    }
 +    Assert-HerdrRegularFile -Path (Join-Path $stateDir "launcher.lock")
-+    Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
++    $installerHelper = Join-Path $stateDir "installer-helper.ps1"
++    if (Test-Path -LiteralPath $installerHelper) {
++        Assert-HerdrRegularFile -Path $installerHelper
++    }
 +    Assert-HerdrLeasesDirectory -LeasesDir (Join-Path $stateDir "leases")
 +    $installManifest = Read-HerdrInstallManifest -StateDir $stateDir
 +    Assert-HerdrPackageManagerMarker -StateDir $stateDir
@@ -3457,7 +3463,13 @@ index 0000000000000000000000000000000000000000..3027e3383bf988ebbbfab47290a313b2
 +        [void](Remove-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -InstallerOwned $pathOwned)
 +        Remove-HerdrArpRegistration -InstallRoot $InstallRoot
 +        if ($SettingsDisposition -ceq "Remove") {
-+            Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
++            try {
++                Remove-HerdrUserSettings -UserProfileRoot $UserProfileRoot
++            } catch {
++                [Console]::Out.WriteLine(
++                    "Warning: Selected Herdr settings cleanup was incomplete; locked or unsafe settings were preserved. $($_.Exception.Message)"
++                )
++            }
 +        }
 +        Remove-HerdrUninstallFaultMarker -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
 +        return $preservedSkillPaths
@@ -56770,10 +56782,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe334a620a5
+index 0000000000000000000000000000000000000000..554ac324422e1d5936589f95531f94bd068777ea
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,827 @@
+@@ -0,0 +1,868 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -56793,6 +56805,7 @@ index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe3
 +POWERSHELL_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
 +FAULT_TEST = PROJECT_ROOT / "scripts/windows_installer_fault_test.ps1"
 +MANAGED_INSTALL = PROJECT_ROOT / "src/managed_install.rs"
++WINDOWS_LAUNCHER = PROJECT_ROOT / "src/platform/windows/launcher.rs"
 +WINDOWS_PLATFORM = PROJECT_ROOT / "src/platform/windows.rs"
 +UPDATE = PROJECT_ROOT / "src/update.rs"
 +SKILL = PROJECT_ROOT / "skills" / "herdr" / "SKILL.md"
@@ -57091,6 +57104,7 @@ index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe3
 +    def test_helper_matches_the_launcher_lock_and_lease_contract(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
 +        launcher_contract = MANAGED_INSTALL.read_text(encoding="utf-8")
++        launcher = WINDOWS_LAUNCHER.read_text(encoding="utf-8")
 +        self.assertIn('join(format!("{}.lease", build_id.as_str()))', launcher_contract)
 +        self.assertIn('join("launcher.lock")', launcher_contract)
 +        self.assertIn("\\.lease$'", helper)
@@ -57098,7 +57112,21 @@ index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe3
 +        self.assertIn('Join-Path $stateDir "launcher.lock"', helper)
 +        self.assertIn("[IO.FileShare]::None", helper)
 +        self.assertIn("LockTimeoutMilliseconds", helper)
-+        self.assertIn("spawn_payload", (PROJECT_ROOT / "src/platform/windows/launcher.rs").read_text(encoding="utf-8"))
++        self.assertIn("spawn_payload", launcher)
++        spawn = launcher[
++            launcher.index("fn spawn_payload(") : launcher.index("fn payload_command(")
++        ]
++        self.assertLess(
++            spawn.index("CoordinationGate::acquire"),
++            spawn.index("reject_pending_uninstall"),
++        )
++        self.assertLess(
++            spawn.index("reject_pending_uninstall"),
++            spawn.index("select_runtime_locked"),
++        )
++        self.assertIn(
++            "pending_uninstall_blocks_payload_launch_before_runtime_spawn", launcher
++        )
 +        self.assertNotIn(
 +            "runtime_launcher_path",
 +            MANAGED_INSTALL.read_text(encoding="utf-8"),
@@ -57406,6 +57434,7 @@ index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe3
 +
 +    def test_helper_owns_fail_closed_optional_settings_removal(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
++        fault_test = FAULT_TEST.read_text(encoding="utf-8")
 +        cleanup = helper[
 +            helper.index("function Remove-HerdrUserSettings {") : helper.index(
 +                "function Install-HerdrSkillFile {"
@@ -57419,6 +57448,30 @@ index 0000000000000000000000000000000000000000..2716cb22bd638f0a021c7ada5439dfe3
 +            "Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot", cleanup
 +        )
 +        self.assertNotIn("Remove-Item -LiteralPath $settingsRoot -Recurse", cleanup)
++        uninstall = helper[
++            helper.index("function Invoke-HerdrUninstall {") : helper.index(
++                "if ($MyInvocation.InvocationName -ne '.')"
++            )
++        ]
++        self.assertLess(
++            uninstall.index("Remove-HerdrArpRegistration"),
++            uninstall.index("Remove-HerdrUserSettings"),
++        )
++        self.assertIn(
++            "Warning: Selected Herdr settings cleanup was incomplete", uninstall
++        )
++        self.assertIn("locked-state.exe", fault_test)
++        self.assertIn("Assert-TestUserPathRestored", fault_test)
++        self.assertIn("Reparse settings residual remained nonblocking", fault_test)
++        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
++        self.assertIn("Missing current-format uninstall runner was not repaired", lifecycle)
++        self.assertIn("Changed regular current-format uninstall runner was not repaired", lifecycle)
++        self.assertIn("Reserved runner type collision was accepted", lifecycle)
++        self.assertIn("Missing current-format installer control files were not repaired", lifecycle)
++        self.assertIn(
++            "Changed regular current-format installer control files were not repaired",
++            lifecycle,
++        )
 +        self.assertIn("DisplayName = $script:ProductName", helper)
 +
 +    def test_helper_residual_cleanup_is_exact_locked_and_fault_injected(self) -> None:
@@ -57824,10 +57877,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..331dec1946e78838302c93b9325a825c
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..d723e3df01704e4c2d5c801220ba38b578a6a858
+index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b97797f32
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,633 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -57920,6 +57973,32 @@ index 0000000000000000000000000000000000000000..d723e3df01704e4c2d5c801220ba38b5
 +    )
 +    if ($sent -eq [IntPtr]::Zero) {
 +        throw "Restored the user PATH but failed to broadcast the environment change."
++    }
++}
++
++function Assert-TestUserPathRestored {
++    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
++    if ($null -eq $key) {
++        throw "HKCU\Environment is unavailable while verifying PATH restoration."
++    }
++    try {
++        $actualExists = @($key.GetValueNames()) -contains "Path"
++        if ($actualExists -ne $originalUserPathExists) {
++            throw "Uninstall did not restore whether the user PATH value exists."
++        }
++        if ($actualExists) {
++            $actualValue = $key.GetValue(
++                "Path",
++                $null,
++                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
++            )
++            $actualKind = $key.GetValueKind("Path")
++            if ([string]$actualValue -cne [string]$originalUserPath -or $actualKind -ne $originalUserPathKind) {
++                throw "Uninstall did not restore the exact user PATH value and registry kind."
++            }
++        }
++    } finally {
++        $key.Dispose()
 +    }
 +}
 +
@@ -58306,6 +58385,101 @@ index 0000000000000000000000000000000000000000..d723e3df01704e4c2d5c801220ba38b5
 +        throw "Uninstall ignored /REMOVE_SETTINGS."
 +    }
 +    Write-Host "Sibling-preserving skill uninstall passed."
++
++    # Explicit settings cleanup is best effort after application/integration
++    # removal. A real running image under .herdr keeps only that residual while
++    # setup files, ARP registration, and the installer-owned PATH entry disappear.
++    $lockedStateInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
++    if ($lockedStateInstallExit -ne 0) {
++        throw "Locked-state test install exited with $lockedStateInstallExit."
++    }
++    Wait-TestCondition -Description "locked-state test install" -Condition {
++        (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and (Test-Path -LiteralPath $arpKey)
++    }
++    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
++    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-locked-residual")
++    $lockedStateExecutable = Join-Path $settingsRoot "locked-state.exe"
++    $systemPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
++    [IO.File]::Copy($systemPowerShell, $lockedStateExecutable, $false)
++    $lockedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Start-Sleep -Seconds 30"))
++    $lockedStateProcess = Start-Process -FilePath $lockedStateExecutable -ArgumentList @(
++        "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $lockedCommand
++    ) -PassThru -WindowStyle Hidden
++    try {
++        Start-Sleep -Milliseconds 250
++        if ($lockedStateProcess.HasExited) {
++            throw "Locked-state process exited before uninstall."
++        }
++        $lockedStateUninstaller = Join-Path $installRoot "uninstall.exe"
++        $lockedStateUninstallExit = Start-TestProcess -FilePath $lockedStateUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
++        if ($lockedStateUninstallExit -ne 0) {
++            throw "Locked-state uninstall exited with $lockedStateUninstallExit."
++        }
++        Wait-TestCondition -Description "locked-state uninstall" -Condition {
++            -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
++        }
++        Wait-TestUninstallerIdle
++        if ($lockedStateProcess.HasExited) {
++            throw "Locked-state process did not remain active through uninstall."
++        }
++        if (-not (Test-Path -LiteralPath $settingsRoot -PathType Container) -or
++            -not (Test-Path -LiteralPath $lockedStateExecutable -PathType Leaf)) {
++            throw "Locked-state uninstall did not preserve its undeletable settings residual."
++        }
++        Assert-TestUserPathRestored
++        Write-Host "Locked settings residual remained nonblocking."
++    } finally {
++        if (-not $lockedStateProcess.HasExited) {
++            $lockedStateProcess.Kill()
++            [void]$lockedStateProcess.WaitForExit(5000)
++        }
++        $lockedStateProcess.Dispose()
++        if (Test-Path -LiteralPath $settingsRoot) {
++            Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
++        }
++    }
++
++    $reparseStateInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
++    if ($reparseStateInstallExit -ne 0) {
++        throw "Reparse-state test install exited with $reparseStateInstallExit."
++    }
++    Wait-TestCondition -Description "reparse-state test install" -Condition {
++        (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and (Test-Path -LiteralPath $arpKey)
++    }
++    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
++    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-reparse-residual")
++    $reparseStateTarget = Join-Path $env:USERPROFILE "settings-reparse-target"
++    New-Item -ItemType Directory -Path $reparseStateTarget | Out-Null
++    [IO.File]::WriteAllText((Join-Path $reparseStateTarget "outside.txt"), "preserve-external")
++    $reparseStateLink = Join-Path $settingsRoot "external"
++    New-Item -ItemType Junction -Path $reparseStateLink -Target $reparseStateTarget | Out-Null
++    try {
++        $reparseStateUninstaller = Join-Path $installRoot "uninstall.exe"
++        $reparseStateUninstallExit = Start-TestProcess -FilePath $reparseStateUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
++        if ($reparseStateUninstallExit -ne 0) {
++            throw "Reparse-state uninstall exited with $reparseStateUninstallExit."
++        }
++        Wait-TestCondition -Description "reparse-state uninstall" -Condition {
++            -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
++        }
++        Wait-TestUninstallerIdle
++        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-reparse-residual" -or
++            [IO.File]::ReadAllText((Join-Path $reparseStateTarget "outside.txt")) -cne "preserve-external") {
++            throw "Reparse-state uninstall changed preserved settings or junction-target content."
++        }
++        Assert-TestUserPathRestored
++        Write-Host "Reparse settings residual remained nonblocking."
++    } finally {
++        if (Test-Path -LiteralPath $reparseStateLink) {
++            [IO.Directory]::Delete($reparseStateLink)
++        }
++        if (Test-Path -LiteralPath $settingsRoot) {
++            Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
++        }
++        if (Test-Path -LiteralPath $reparseStateTarget) {
++            Remove-Item -LiteralPath $reparseStateTarget -Recurse -Force -ErrorAction SilentlyContinue
++        }
++    }
 +} finally {
 +    Remove-TestInstallIfPresent
 +    if (Test-Path -LiteralPath $skillRoot) {
@@ -58342,10 +58516,10 @@ index 0000000000000000000000000000000000000000..d723e3df01704e4c2d5c801220ba38b5
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..0365dbfda514f1f7b41390bb2f2000d93365317a
+index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2e50bcc80
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,1022 @@
+@@ -0,0 +1,1059 @@
 +[CmdletBinding()]
 +param()
 +
@@ -58905,7 +59079,8 @@ index 0000000000000000000000000000000000000000..0365dbfda514f1f7b41390bb2f2000d9
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
-+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot $script:UninstallRunnerName)) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Fresh quiet-uninstall runner differs from its input."
++    $installedUninstallRunner = Join-Path $installRoot $script:UninstallRunnerName
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Fresh quiet-uninstall runner differs from its input."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
 +    $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
 +    Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
@@ -58915,6 +59090,42 @@ index 0000000000000000000000000000000000000000..0365dbfda514f1f7b41390bb2f2000d9
 +        Set-HerdrPendingLauncher -InstallRoot $installRoot -LauncherPath $wrongLauncher -BuildId $id2
 +    } "does not match runtime" "Pending launcher accepted a mismatched embedded build ID."
 +    Assert-True ($null -eq (Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state"))) "Rejected launcher left pending state."
++
++    # The current managed layout owns the new runner filename. Missing or changed
++    # regular bytes are repaired, while a type collision at that reserved path is
++    # preserved and rejected.
++    Remove-Item -LiteralPath $installedUninstallRunner -Force
++    $missingRunnerRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    Assert-Equal $missingRunnerRepair.Status "AlreadyActive" "Missing current-format uninstall runner was not repaired."
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Missing runner repair published the wrong bytes."
++    Write-TestFile -Path $installedUninstallRunner -Text "patched development runner"
++    $changedRunnerRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    Assert-Equal $changedRunnerRepair.Status "AlreadyActive" "Changed regular current-format uninstall runner was not repaired."
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Changed runner repair published the wrong bytes."
++    Remove-Item -LiteralPath $installedUninstallRunner -Force
++    New-Item -ItemType Directory -Path $installedUninstallRunner | Out-Null
++    Assert-Throws {
++        Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    } "not compatible.*Uninstall the existing Herdr or Herdr Win entry" "Reserved runner type collision was accepted."
++    Assert-True (Test-Path -LiteralPath $installedUninstallRunner -PathType Container) "Rejected runner type collision was changed."
++    Remove-Item -LiteralPath $installedUninstallRunner -Force
++    [void](Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1)
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Runner repair after collision cleanup published the wrong bytes."
++
++    $installedHelper = Join-Path $installRoot "state\installer-helper.ps1"
++    $installedUninstaller = Join-Path $installRoot "uninstall.exe"
++    Remove-Item -LiteralPath $installedHelper -Force
++    Remove-Item -LiteralPath $installedUninstaller -Force
++    $missingControlRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    Assert-Equal $missingControlRepair.Status "AlreadyActive" "Missing current-format installer control files were not repaired."
++    Assert-Equal (Get-HerdrSha256 -Path $installedHelper) (Get-HerdrSha256 -Path $helperPath) "Missing helper repair published the wrong bytes."
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstaller) (Get-HerdrSha256 -Path $uninstaller) "Missing uninstaller repair published the wrong bytes."
++    Write-TestFile -Path $installedHelper -Text "patched development helper"
++    Write-TestFile -Path $installedUninstaller -Text "patched development uninstaller"
++    $changedControlRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
++    Assert-Equal $changedControlRepair.Status "AlreadyActive" "Changed regular current-format installer control files were not repaired."
++    Assert-Equal (Get-HerdrSha256 -Path $installedHelper) (Get-HerdrSha256 -Path $helperPath) "Changed helper repair did not restore current bytes."
++    Assert-Equal (Get-HerdrSha256 -Path $installedUninstaller) (Get-HerdrSha256 -Path $uninstaller) "Changed uninstaller repair did not restore current bytes."
 +
 +    # The previous two-hop runtime layout is incompatible and must be rejected
 +    # before setup mutates the managed root or creates the new package identity.
@@ -60281,10 +60492,10 @@ index e3d9761014b79e10ae5a0c8e91a9fded952a2480..a92453bde980e358611bfe6944cb2add
          use base64::Engine as _;
 diff --git a/src/platform/windows/launcher.rs b/src/platform/windows/launcher.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc9563b904ef2
+index 0000000000000000000000000000000000000000..1091c10147f3e39d43c98518b9a91950e29aed21
 --- /dev/null
 +++ b/src/platform/windows/launcher.rs
-@@ -0,0 +1,1065 @@
+@@ -0,0 +1,1104 @@
 +use std::{
 +    ffi::{OsStr, OsString},
 +    fs,
@@ -60309,6 +60520,7 @@ index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc956
 +};
 +
 +const PENDING_POINTER: &str = "pending";
++const UNINSTALL_PENDING_MARKER: &str = "uninstall.pending";
 +const COORDINATION_TIMEOUT: Duration = Duration::from_secs(5);
 +const COORDINATION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 +const BUILD_ID_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
@@ -60442,6 +60654,7 @@ index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc956
 +) -> io::Result<(Child, SharedLease, ConsoleCtrlHandler)> {
 +    let _coordination = CoordinationGate::acquire(install, COORDINATION_TIMEOUT)?;
 +    install.validate_managed_bin()?;
++    reject_pending_uninstall(install)?;
 +    let runtime = select_runtime_locked(install)?;
 +    let lease = install.open_shared_lease(&runtime.build_id)?;
 +    let console_handler = ConsoleCtrlHandler::install()?;
@@ -60461,6 +60674,24 @@ index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc956
 +    // Windows Command inherits the explicitly marked lease handle; the payload
 +    // validates and adopts that exact file before it can create descendants.
 +    Ok((child, lease, console_handler))
++}
++
++fn reject_pending_uninstall(install: &ManagedInstall) -> io::Result<()> {
++    let marker = install.state_dir().join(UNINSTALL_PENDING_MARKER);
++    match fs::symlink_metadata(&marker) {
++        Ok(_) => Err(invalid_data(format!(
++            "managed Herdr uninstall is pending at {}; retry uninstall before launching Herdr",
++            marker.display()
++        ))),
++        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
++        Err(err) => Err(contextual(
++            err,
++            format!(
++                "failed to inspect managed Herdr uninstall state {}",
++                marker.display()
++            ),
++        )),
++    }
 +}
 +
 +fn payload_command(executable: &Path, args: &[OsString]) -> Command {
@@ -61087,6 +61318,25 @@ index 0000000000000000000000000000000000000000..1f0b0cefb035da3087883934bb7bc956
 +        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 +        assert!(started.elapsed() < Duration::from_secs(1));
 +        drop(gate);
++    }
++
++    #[test]
++    fn pending_uninstall_blocks_payload_launch_before_runtime_spawn() {
++        let tree = TestTree::new("pending-uninstall");
++        tree.add_runtime(OLD_BUILD);
++        tree.write_pointer(ACTIVE_POINTER, OLD_BUILD);
++        fs::write(
++            tree.root.join("state").join(UNINSTALL_PENDING_MARKER),
++            b"herdr-uninstall-v1\n",
++        )
++        .expect("write pending uninstall marker");
++
++        let error = match spawn_payload(&tree.install(), &[]) {
++            Ok(_) => panic!("pending uninstall launched a managed payload"),
++            Err(error) => error,
++        };
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++        assert!(error.to_string().contains("uninstall is pending"));
 +    }
 +
 +    #[test]

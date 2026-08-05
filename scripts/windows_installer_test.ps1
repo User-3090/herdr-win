@@ -557,7 +557,8 @@ try {
     Assert-HerdrManagedRoot -InstallRoot $installRoot
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
-    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot $script:UninstallRunnerName)) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Fresh quiet-uninstall runner differs from its input."
+    $installedUninstallRunner = Join-Path $installRoot $script:UninstallRunnerName
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Fresh quiet-uninstall runner differs from its input."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
@@ -567,6 +568,42 @@ try {
         Set-HerdrPendingLauncher -InstallRoot $installRoot -LauncherPath $wrongLauncher -BuildId $id2
     } "does not match runtime" "Pending launcher accepted a mismatched embedded build ID."
     Assert-True ($null -eq (Get-HerdrPendingLauncher -StateDir (Join-Path $installRoot "state"))) "Rejected launcher left pending state."
+
+    # The current managed layout owns the new runner filename. Missing or changed
+    # regular bytes are repaired, while a type collision at that reserved path is
+    # preserved and rejected.
+    Remove-Item -LiteralPath $installedUninstallRunner -Force
+    $missingRunnerRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    Assert-Equal $missingRunnerRepair.Status "AlreadyActive" "Missing current-format uninstall runner was not repaired."
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Missing runner repair published the wrong bytes."
+    Write-TestFile -Path $installedUninstallRunner -Text "patched development runner"
+    $changedRunnerRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    Assert-Equal $changedRunnerRepair.Status "AlreadyActive" "Changed regular current-format uninstall runner was not repaired."
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Changed runner repair published the wrong bytes."
+    Remove-Item -LiteralPath $installedUninstallRunner -Force
+    New-Item -ItemType Directory -Path $installedUninstallRunner | Out-Null
+    Assert-Throws {
+        Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    } "not compatible.*Uninstall the existing Herdr or Herdr Win entry" "Reserved runner type collision was accepted."
+    Assert-True (Test-Path -LiteralPath $installedUninstallRunner -PathType Container) "Rejected runner type collision was changed."
+    Remove-Item -LiteralPath $installedUninstallRunner -Force
+    [void](Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1)
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstallRunner) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Runner repair after collision cleanup published the wrong bytes."
+
+    $installedHelper = Join-Path $installRoot "state\installer-helper.ps1"
+    $installedUninstaller = Join-Path $installRoot "uninstall.exe"
+    Remove-Item -LiteralPath $installedHelper -Force
+    Remove-Item -LiteralPath $installedUninstaller -Force
+    $missingControlRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    Assert-Equal $missingControlRepair.Status "AlreadyActive" "Missing current-format installer control files were not repaired."
+    Assert-Equal (Get-HerdrSha256 -Path $installedHelper) (Get-HerdrSha256 -Path $helperPath) "Missing helper repair published the wrong bytes."
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstaller) (Get-HerdrSha256 -Path $uninstaller) "Missing uninstaller repair published the wrong bytes."
+    Write-TestFile -Path $installedHelper -Text "patched development helper"
+    Write-TestFile -Path $installedUninstaller -Text "patched development uninstaller"
+    $changedControlRepair = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+    Assert-Equal $changedControlRepair.Status "AlreadyActive" "Changed regular current-format installer control files were not repaired."
+    Assert-Equal (Get-HerdrSha256 -Path $installedHelper) (Get-HerdrSha256 -Path $helperPath) "Changed helper repair did not restore current bytes."
+    Assert-Equal (Get-HerdrSha256 -Path $installedUninstaller) (Get-HerdrSha256 -Path $uninstaller) "Changed uninstaller repair did not restore current bytes."
 
     # The previous two-hop runtime layout is incompatible and must be rejected
     # before setup mutates the managed root or creates the new package identity.

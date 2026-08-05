@@ -93,6 +93,32 @@ function Restore-TestUserPath {
     }
 }
 
+function Assert-TestUserPathRestored {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+    if ($null -eq $key) {
+        throw "HKCU\Environment is unavailable while verifying PATH restoration."
+    }
+    try {
+        $actualExists = @($key.GetValueNames()) -contains "Path"
+        if ($actualExists -ne $originalUserPathExists) {
+            throw "Uninstall did not restore whether the user PATH value exists."
+        }
+        if ($actualExists) {
+            $actualValue = $key.GetValue(
+                "Path",
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+            $actualKind = $key.GetValueKind("Path")
+            if ([string]$actualValue -cne [string]$originalUserPath -or $actualKind -ne $originalUserPathKind) {
+                throw "Uninstall did not restore the exact user PATH value and registry kind."
+            }
+        }
+    } finally {
+        $key.Dispose()
+    }
+}
+
 $ownsAgentUserProfile = [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)
 function Remove-TestOwnedUserProfile {
     if (-not $ownsAgentUserProfile -or [string]::IsNullOrWhiteSpace($AgentUserProfileRoot)) {
@@ -476,6 +502,101 @@ try {
         throw "Uninstall ignored /REMOVE_SETTINGS."
     }
     Write-Host "Sibling-preserving skill uninstall passed."
+
+    # Explicit settings cleanup is best effort after application/integration
+    # removal. A real running image under .herdr keeps only that residual while
+    # setup files, ARP registration, and the installer-owned PATH entry disappear.
+    $lockedStateInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
+    if ($lockedStateInstallExit -ne 0) {
+        throw "Locked-state test install exited with $lockedStateInstallExit."
+    }
+    Wait-TestCondition -Description "locked-state test install" -Condition {
+        (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and (Test-Path -LiteralPath $arpKey)
+    }
+    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-locked-residual")
+    $lockedStateExecutable = Join-Path $settingsRoot "locked-state.exe"
+    $systemPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    [IO.File]::Copy($systemPowerShell, $lockedStateExecutable, $false)
+    $lockedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Start-Sleep -Seconds 30"))
+    $lockedStateProcess = Start-Process -FilePath $lockedStateExecutable -ArgumentList @(
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $lockedCommand
+    ) -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Milliseconds 250
+        if ($lockedStateProcess.HasExited) {
+            throw "Locked-state process exited before uninstall."
+        }
+        $lockedStateUninstaller = Join-Path $installRoot "uninstall.exe"
+        $lockedStateUninstallExit = Start-TestProcess -FilePath $lockedStateUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
+        if ($lockedStateUninstallExit -ne 0) {
+            throw "Locked-state uninstall exited with $lockedStateUninstallExit."
+        }
+        Wait-TestCondition -Description "locked-state uninstall" -Condition {
+            -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+        }
+        Wait-TestUninstallerIdle
+        if ($lockedStateProcess.HasExited) {
+            throw "Locked-state process did not remain active through uninstall."
+        }
+        if (-not (Test-Path -LiteralPath $settingsRoot -PathType Container) -or
+            -not (Test-Path -LiteralPath $lockedStateExecutable -PathType Leaf)) {
+            throw "Locked-state uninstall did not preserve its undeletable settings residual."
+        }
+        Assert-TestUserPathRestored
+        Write-Host "Locked settings residual remained nonblocking."
+    } finally {
+        if (-not $lockedStateProcess.HasExited) {
+            $lockedStateProcess.Kill()
+            [void]$lockedStateProcess.WaitForExit(5000)
+        }
+        $lockedStateProcess.Dispose()
+        if (Test-Path -LiteralPath $settingsRoot) {
+            Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $reparseStateInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
+    if ($reparseStateInstallExit -ne 0) {
+        throw "Reparse-state test install exited with $reparseStateInstallExit."
+    }
+    Wait-TestCondition -Description "reparse-state test install" -Condition {
+        (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and (Test-Path -LiteralPath $arpKey)
+    }
+    New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-reparse-residual")
+    $reparseStateTarget = Join-Path $env:USERPROFILE "settings-reparse-target"
+    New-Item -ItemType Directory -Path $reparseStateTarget | Out-Null
+    [IO.File]::WriteAllText((Join-Path $reparseStateTarget "outside.txt"), "preserve-external")
+    $reparseStateLink = Join-Path $settingsRoot "external"
+    New-Item -ItemType Junction -Path $reparseStateLink -Target $reparseStateTarget | Out-Null
+    try {
+        $reparseStateUninstaller = Join-Path $installRoot "uninstall.exe"
+        $reparseStateUninstallExit = Start-TestProcess -FilePath $reparseStateUninstaller -Arguments @("/S", "/REMOVE_SETTINGS")
+        if ($reparseStateUninstallExit -ne 0) {
+            throw "Reparse-state uninstall exited with $reparseStateUninstallExit."
+        }
+        Wait-TestCondition -Description "reparse-state uninstall" -Condition {
+            -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+        }
+        Wait-TestUninstallerIdle
+        if ([IO.File]::ReadAllText((Join-Path $settingsRoot "settings.toml")) -cne "preserve-reparse-residual" -or
+            [IO.File]::ReadAllText((Join-Path $reparseStateTarget "outside.txt")) -cne "preserve-external") {
+            throw "Reparse-state uninstall changed preserved settings or junction-target content."
+        }
+        Assert-TestUserPathRestored
+        Write-Host "Reparse settings residual remained nonblocking."
+    } finally {
+        if (Test-Path -LiteralPath $reparseStateLink) {
+            [IO.Directory]::Delete($reparseStateLink)
+        }
+        if (Test-Path -LiteralPath $settingsRoot) {
+            Remove-Item -LiteralPath $settingsRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $reparseStateTarget) {
+            Remove-Item -LiteralPath $reparseStateTarget -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 } finally {
     Remove-TestInstallIfPresent
     if (Test-Path -LiteralPath $skillRoot) {

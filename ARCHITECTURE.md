@@ -126,6 +126,11 @@ behavior; code and tests remain the detailed implementation truth.
   normal update path; an exact partial root is removed and setup publishes a fresh
   root. Unknown content, reparse points, active leases, and active process images
   remain fail-closed and preserved.
+- Payload launch independently acquires `state/launcher.lock`, validates the stable
+  launcher, and rejects any present `state/uninstall.pending` marker before runtime
+  selection or `CreateProcess`. Thus a killed uninstaller cannot admit a new session
+  between releasing its process-owned lock and a later recovery pass; the existing
+  launcher is reused and no service or second launch path is added.
 - The packager owns installer-facing product identity inputs. It passes one runtime
   product name into NSIS and the helper, plus one title-cased human distribution
   display name, a derived short UI version, and the fork and official-upstream URLs
@@ -150,7 +155,11 @@ behavior; code and tests remain the detailed implementation truth.
 - Interactive and silent uninstall both preserve `%USERPROFILE%\.herdr` by
   default; the interactive checkbox or `/REMOVE_SETTINGS` explicitly authorizes
   deletion. Settings cleanup stays in the helper's validated filesystem boundary
-  and fails closed on ambiguous/reparse-point content rather than following it.
+  and never follows ambiguous/reparse-point content. It runs after managed skill,
+  application, PATH, and Installed Apps cleanup; an unsafe or locked settings
+  residual is preserved and reported without changing successful application
+  removal into failure. The managed install/runtime tree is not best-effort state:
+  its active process and lease checks remain required uninstall gates.
 - `src/distribution.rs` is the single fork channel/source configuration. New
   Windows clients consume the separately hashed immutable NSIS asset from the fork
   release; there is no upstream-source fallback. The portable ZIP remains only as
@@ -162,6 +171,13 @@ behavior; code and tests remain the detailed implementation truth.
   before repair, PATH, or ARP mutation. The user removes its existing **Herdr** entry
   before a fresh **Herdr Win** install, so setup never co-owns duplicate package
   registrations.
+- Exact ARP ownership plus the current bin sentinel and install manifest permit
+  repair of the installer control filenames only: missing runner, helper, or
+  uninstaller files are recreated, and changed regular files are atomically
+  replaced using `File.Replace` backups of their actual current bytes. Directory,
+  reparse, unknown-sibling, launcher-hash, and immutable-runtime collisions remain
+  fail-closed; this is current-format repair, not legacy adoption or a published-
+  hash bypass.
 - `packaging/windows/managed-skill-hashes.txt` is the one append-only ownership
   manifest for the current and every historically installer-delivered
   `skills/herdr/SKILL.md` byte hash. The packager validates that the current payload

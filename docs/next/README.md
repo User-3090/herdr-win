@@ -89,7 +89,7 @@ winget upgrade --id hdosys.herdr-win --exact --source winget
 
 GitHub may publish a snapshot before the WinGet catalog finishes accepting it. A WinGet-owned copy shows an update only after the official `winget` source contains that exact release version, so its update action always points to installable bytes.
 
-Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them.
+Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them. Locked or unsafe settings residue is preserved and reported without blocking removal of the program, registration, or its installer-owned `PATH` entry.
 
 ### Verify the download
 

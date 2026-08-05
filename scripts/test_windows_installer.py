@@ -17,6 +17,7 @@ PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
 POWERSHELL_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
 FAULT_TEST = PROJECT_ROOT / "scripts/windows_installer_fault_test.ps1"
 MANAGED_INSTALL = PROJECT_ROOT / "src/managed_install.rs"
+WINDOWS_LAUNCHER = PROJECT_ROOT / "src/platform/windows/launcher.rs"
 WINDOWS_PLATFORM = PROJECT_ROOT / "src/platform/windows.rs"
 UPDATE = PROJECT_ROOT / "src/update.rs"
 SKILL = PROJECT_ROOT / "skills" / "herdr" / "SKILL.md"
@@ -315,6 +316,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
     def test_helper_matches_the_launcher_lock_and_lease_contract(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
         launcher_contract = MANAGED_INSTALL.read_text(encoding="utf-8")
+        launcher = WINDOWS_LAUNCHER.read_text(encoding="utf-8")
         self.assertIn('join(format!("{}.lease", build_id.as_str()))', launcher_contract)
         self.assertIn('join("launcher.lock")', launcher_contract)
         self.assertIn("\\.lease$'", helper)
@@ -322,7 +324,21 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn('Join-Path $stateDir "launcher.lock"', helper)
         self.assertIn("[IO.FileShare]::None", helper)
         self.assertIn("LockTimeoutMilliseconds", helper)
-        self.assertIn("spawn_payload", (PROJECT_ROOT / "src/platform/windows/launcher.rs").read_text(encoding="utf-8"))
+        self.assertIn("spawn_payload", launcher)
+        spawn = launcher[
+            launcher.index("fn spawn_payload(") : launcher.index("fn payload_command(")
+        ]
+        self.assertLess(
+            spawn.index("CoordinationGate::acquire"),
+            spawn.index("reject_pending_uninstall"),
+        )
+        self.assertLess(
+            spawn.index("reject_pending_uninstall"),
+            spawn.index("select_runtime_locked"),
+        )
+        self.assertIn(
+            "pending_uninstall_blocks_payload_launch_before_runtime_spawn", launcher
+        )
         self.assertNotIn(
             "runtime_launcher_path",
             MANAGED_INSTALL.read_text(encoding="utf-8"),
@@ -630,6 +646,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
 
     def test_helper_owns_fail_closed_optional_settings_removal(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
+        fault_test = FAULT_TEST.read_text(encoding="utf-8")
         cleanup = helper[
             helper.index("function Remove-HerdrUserSettings {") : helper.index(
                 "function Install-HerdrSkillFile {"
@@ -643,6 +660,30 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "Remove-HerdrReplaceableAgentSkillPath -Path $settingsRoot", cleanup
         )
         self.assertNotIn("Remove-Item -LiteralPath $settingsRoot -Recurse", cleanup)
+        uninstall = helper[
+            helper.index("function Invoke-HerdrUninstall {") : helper.index(
+                "if ($MyInvocation.InvocationName -ne '.')"
+            )
+        ]
+        self.assertLess(
+            uninstall.index("Remove-HerdrArpRegistration"),
+            uninstall.index("Remove-HerdrUserSettings"),
+        )
+        self.assertIn(
+            "Warning: Selected Herdr settings cleanup was incomplete", uninstall
+        )
+        self.assertIn("locked-state.exe", fault_test)
+        self.assertIn("Assert-TestUserPathRestored", fault_test)
+        self.assertIn("Reparse settings residual remained nonblocking", fault_test)
+        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
+        self.assertIn("Missing current-format uninstall runner was not repaired", lifecycle)
+        self.assertIn("Changed regular current-format uninstall runner was not repaired", lifecycle)
+        self.assertIn("Reserved runner type collision was accepted", lifecycle)
+        self.assertIn("Missing current-format installer control files were not repaired", lifecycle)
+        self.assertIn(
+            "Changed regular current-format installer control files were not repaired",
+            lifecycle,
+        )
         self.assertIn("DisplayName = $script:ProductName", helper)
 
     def test_helper_residual_cleanup_is_exact_locked_and_fault_injected(self) -> None:
