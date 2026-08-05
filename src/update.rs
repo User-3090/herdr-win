@@ -327,9 +327,8 @@ fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
 {
-    let output = crate::noninteractive_process::curl_command()
+    let output = crate::noninteractive_process::curl_command(url)
         .args([
-            "-sfL",
             "-H",
             "Cache-Control: no-cache",
             "--retry",
@@ -338,7 +337,6 @@ where
             "10",
             "--max-time",
             "20",
-            url,
         ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
@@ -710,17 +708,8 @@ fn homebrew_update_from_formula_json(
 fn check_homebrew_latest() -> Result<Option<Version>, String> {
     let current = Version::current();
 
-    let output = crate::noninteractive_process::curl_command()
-        .args([
-            "-sfL",
-            "--retry",
-            "2",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            "10",
-            HOMEBREW_FORMULA_API_URL,
-        ])
+    let output = crate::noninteractive_process::curl_command(HOMEBREW_FORMULA_API_URL)
+        .args(["--retry", "2", "--connect-timeout", "5", "--max-time", "10"])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
 
@@ -860,10 +849,9 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     let tmp_path = parent.join(format!(".herdr-update-{}.tmp", std::process::id()));
 
     // Download the exact asset URL (pinned to the release we checked)
-    let status = crate::noninteractive_process::curl_command()
-        .args(["-sfL", "--max-time", "120", "-o"])
+    let status = crate::noninteractive_process::curl_command(&release.download_url)
+        .args(["--max-time", "120", "-o"])
         .arg(&tmp_path)
-        .arg(&release.download_url)
         .status()
         .map_err(|e| format!("download failed: {e}"))?;
 
@@ -973,10 +961,9 @@ fn download_windows_installer(release: &ReleaseInfo) -> Result<DownloadedWindows
     let path = root.join(asset_name);
     let download = DownloadedWindowsInstaller { root, path };
 
-    let status = crate::noninteractive_process::curl_command()
-        .args(["-sfL", "--max-time", "120", "-o"])
+    let status = crate::noninteractive_process::curl_command(&release.download_url)
+        .args(["--max-time", "120", "-o"])
         .arg(&download.path)
-        .arg(&release.download_url)
         .status()
         .map_err(|err| format!("failed to download Windows installer: {err}"))?;
     if !status.success() {

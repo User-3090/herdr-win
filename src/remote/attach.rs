@@ -1483,10 +1483,9 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 
     let dir = private_download_dir(&asset_key)?;
     let path = dir.join("herdr.tmp");
-    let status = crate::noninteractive_process::curl_command()
-        .args(["-sfL", "--max-time", "120", "-o"])
+    let status = crate::noninteractive_process::curl_command(&asset.url)
+        .args(["--max-time", "120", "-o"])
         .arg(&path)
-        .arg(&asset.url)
         .status()
         .map_err(|err| io::Error::new(err.kind(), format!("download failed: {err}")))?;
     if !status.success() {
@@ -1507,9 +1506,8 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 }
 
 fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
-    let output = crate::noninteractive_process::curl_command()
+    let output = crate::noninteractive_process::curl_command(url)
         .args([
-            "-sfL",
             "-H",
             "Cache-Control: no-cache",
             "--retry",
@@ -1518,7 +1516,6 @@ fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
             "10",
             "--max-time",
             "20",
-            url,
         ])
         .output()
         .map_err(|err| io::Error::new(err.kind(), format!("curl failed: {err}")))?;

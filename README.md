@@ -33,6 +33,7 @@ The table is intentionally capability-level. The patch files contain the exact i
 | Windows remote attach and image bridge | **Maintained here** · [`0003`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | Windows SSH and named-pipe attachment, shared remote orchestration, and bounded clipboard/drop image transport. |
 | Managed Windows snapshots | **Maintained here** · [`0004`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | Verified Windows packages, per-user setup, portable archives, package-manager update ownership, and safe runtime handoff. |
 | OpenCode lifecycle reporting | **Maintained here** · [`0005`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | Retry-aware status correlation so active retries stay quiet and terminal failures remain visible. |
+| Runtime downloads | **Maintained here** · [`0006`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0006-harden-curl-transfers.patch) | Cross-platform `curl` transfers ignore user configuration and permit only bounded TLS 1.2+ HTTPS requests and redirects. |
 
 The Windows remote/image bridge builds on [nsxdavid's `feat/windows-remote-attach` work](https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach). The maintained mailbox adapts and extends that foundation within this queue.
 
@@ -51,10 +52,11 @@ flowchart LR
         P1["0001<br/>Terminal fidelity"] --> P3["0003<br/>Remote attach"]
         P3 --> P4["0004<br/>Windows distribution"]
         P4 --> P5["0005<br/>OpenCode lifecycle"]
+        P5 --> P6["0006<br/>Hardened downloads"]
     end
 
     B --> P1
-    P5 --> R["Fresh replay"]
+    P6 --> R["Fresh replay"]
     R --> G["Native + cross-platform gates"]
     G --> A["Setup · ZIP · digests"]
 ```
@@ -110,7 +112,7 @@ For general commands, configuration, and agent integrations, use the [official H
 
 ## For upstream maintainers
 
-The four files in `patches/delta/series` are the complete maintained product delta. You do not need to infer behavior from this fork's development history.
+The five files in `patches/delta/series` are the complete maintained product delta. You do not need to infer behavior from this fork's development history.
 
 1. Start at the exact commit in [`BASE`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/BASE).
 2. Apply [`series`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/series) in order with `git am --3way`.

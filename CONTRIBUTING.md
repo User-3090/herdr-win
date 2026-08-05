@@ -46,7 +46,7 @@ product changes must be represented by the canonical queue.
 2. Apply every entry in `patches/delta/series` with `git am --3way`.
 3. Make and focused-test the change in that replayed tree until its logical
    behavior is frozen.
-4. Fold it into the patch that already owns the behavior. Add a fifth patch only
+4. Fold it into the patch that already owns the behavior. Add another patch only
    for a genuinely independent responsibility.
 5. Regenerate the mailbox with `git format-patch --full-index --binary`, keeping
    its stable filename and logical position.

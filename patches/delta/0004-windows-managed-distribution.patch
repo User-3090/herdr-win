@@ -1,7 +1,7 @@
 From 6fe863dcf7012d2fea2884f7e57e70b2d2b8f962 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
-Subject: [PATCH 3/4] fix(windows): install the cross-agent Herdr skill
+Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
 
 Refs ogulcancelik/herdr#1947
 ---
@@ -62874,4 +62874,3 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..6cb62f46daafa763deab9fc83aa0d3ed
      }
 -- 
 2.55.0.windows.3
-

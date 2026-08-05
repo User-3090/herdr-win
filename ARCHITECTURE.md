@@ -49,6 +49,10 @@ behavior; code and tests remain the detailed implementation truth.
 - Mailbox 0005 owns OpenCode retry/error lifecycle correlation. It must preserve
   actionable terminal failures without surfacing transient errors during an active
   retry.
+- Mailbox 0006 owns the shared runtime `curl` transfer policy. Runtime fetches ignore
+  user `curl` configuration, pass URLs as option values, require TLS 1.2 or newer
+  HTTPS for initial requests and redirects, disable URL globbing, and allow at most
+  five redirects; callers retain any narrower timeout, size, and digest checks.
 
 ## Managed Windows Distribution
 

@@ -2,3 +2,4 @@
 0003-windows-remote-attach.patch
 0004-windows-managed-distribution.patch
 0005-opencode-retry-notifications.patch
+0006-harden-curl-transfers.patch

@@ -1,7 +1,7 @@
 From 694ba6e57f93993309df79d1d37b81f12ac5ef95 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 19:41:54 +0200
-Subject: [PATCH 4/4] fix(opencode): preserve truthful lifecycle state
+Subject: [PATCH 4/5] fix(opencode): preserve truthful lifecycle state
 
 Defer root-session errors until idle or a bounded fallback, cancel them when explicit continuing status follows, and prevent terminal blocked state from being overwritten by legacy idle events. Keep outstanding root and child prompts blocked until their exact replies arrive so unrelated busy or idle events cannot erase user-waiting state.
 ---
@@ -1315,4 +1315,3 @@ index 8be54c8406e8bad4310141b25f0d77d3ec652916..b24ff95a8915a20020630f043f517bd7
  const KILO_INTEGRATION_VERSION: u32 = 4;
 -- 
 2.55.0.windows.3
-
