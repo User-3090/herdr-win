@@ -15,10 +15,6 @@ product rules belong in `PRODUCT.md`; stable technical design belongs in
 
 ## Items
 
-- Submit a validated generated WinGet package `hdosys.herdr-win` to
-  `microsoft/winget-pkgs` only after an explicit follow-up request. The submission
-  must retain its promoted immutable installer URL, digest, and `/WINGET` ownership
-  switch; do not rebuild or repoint it during review.
 - Measure and reduce warm `herdr --remote` attach latency, especially on Windows
   clients where managed SSH multiplexing is unavailable. Consolidate serial
   platform, binary, and server probes plus avoidable launcher boundaries without
