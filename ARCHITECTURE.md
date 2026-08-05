@@ -70,11 +70,11 @@ behavior; code and tests remain the detailed implementation truth.
   launcher atomically or writes one hash-addressed `launcher.pending-<sha256>.exe`
   plus a strict pending record while the launcher is in use. The post-exit helper
   waits for its launcher parent, validates the pending hash and private build ID,
-  then publishes through the existing transaction/backup boundary without first
+  then publishes through the existing staging/backup boundary without first
   deleting the working launcher. Setup and later safe exits repair a hard-kill
   interruption from the same pending state.
 - Active plus optional Pending are the only retained runtime identities. Under the
-  existing coordination lock, post-exit/setup maintenance transactionally removes
+  existing coordination lock, post-exit/setup maintenance removes
   every other exact runtime whose lease can be acquired exclusively. Busy,
   malformed, reparse-point, or otherwise ambiguous content is preserved and causes
   the maintenance attempt to report failure rather than broadening deletion.
@@ -119,13 +119,15 @@ behavior; code and tests remain the detailed implementation truth.
   an update event; package/version absence is pending, while launch, source, timeout,
   containment, and other failures suppress the action and are logged. No polling,
   second availability feed, or package-manager state is added.
-- The persistent sibling lifecycle lock distinguishes a live operation from a dead
-  transaction. Once that exclusive lock is acquired, setup and uninstall validate
-  every matching transaction marker, root manifest, remaining managed tree, lease,
-  and process path before resuming deletion. A complete current root keeps the
-  normal update path; an exact partial root is removed and setup publishes a fresh
-  root. Unknown content, reparse points, active leases, and active process images
-  remain fail-closed and preserved.
+- The persistent sibling lifecycle lock serializes every installer generation.
+  Fresh and update work uses uniquely named same-parent staging only; once the lock
+  is acquired, any stale regular staging tree is disposable and its grammar never
+  decides whether the user's requested operation may continue. Cleanup failure
+  preserves that private staging with a warning. Uninstall has no sibling
+  transaction, cleanup manifest, or rollback parser: under the launcher gate it
+  validates active processes and leases, publishes `state/uninstall.pending`, and
+  removes `bin` plus immutable runtimes directly. The remaining exact residual owns
+  idempotent metadata and self-cleanup.
 - Payload launch independently acquires `state/launcher.lock`, validates the stable
   launcher, and rejects any present `state/uninstall.pending` marker before runtime
   selection or `CreateProcess`. Thus a killed uninstaller cannot admit a new session
@@ -174,10 +176,13 @@ behavior; code and tests remain the detailed implementation truth.
 - Exact ARP ownership plus the current bin sentinel and install manifest permit
   repair of the installer control filenames only: missing runner, helper, or
   uninstaller files are recreated, and changed regular files are atomically
-  replaced using `File.Replace` backups of their actual current bytes. Directory,
-  reparse, unknown-sibling, launcher-hash, and immutable-runtime collisions remain
-  fail-closed; this is current-format repair, not legacy adoption or a published-
-  hash bypass.
+  replaced using `File.Replace` backups of their actual current bytes. When this
+  normal path cannot classify a root already bound by exact current registration,
+  the same helper treats the dedicated managed root as a complete convergence root:
+  it holds available launcher coordination, rejects active processes, leases, and
+  reparse points, removes the old root, and either publishes the requested current
+  build or completes removal. This is current-format convergence, not legacy
+  adoption or a published-hash bypass.
 - `packaging/windows/managed-skill-hashes.txt` is the one append-only ownership
   manifest for the current and every historically installer-delivered
   `skills/herdr/SKILL.md` byte hash. The packager validates that the current payload
@@ -194,8 +199,11 @@ behavior; code and tests remain the detailed implementation truth.
   recursively deleted, and reparse points or ambiguous collisions remain preserved
   without per-install skill markers, transactions, or locks.
 - Future installer work uses the global ordinary-local-application threat model
-  unless the user explicitly chooses stronger guarantees. Prefer failing closed
-  and preserving benign residue over adding custom recovery/deletion state.
+  unless the user explicitly chooses stronger guarantees. Measure success by the
+  requested installed/current or absent terminal state. Private staging and
+  malformed recovery metadata are never product-level blockers; preserve only true
+  unsafe boundaries such as reparse escapes, active installed processes, and live
+  runtime leases.
 
 ## Windows and Rust Boundaries
 

@@ -89,7 +89,7 @@ winget upgrade --id hdosys.herdr-win --exact --source winget
 
 GitHub may publish a snapshot before the WinGet catalog finishes accepting it. A WinGet-owned copy shows an update only after the official `winget` source contains that exact release version, so its update action always points to installable bytes.
 
-Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them. Locked or unsafe settings residue is preserved and reported without blocking removal of the program, registration, or its installer-owned `PATH` entry.
+Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them. Locked or unsafe settings and skill residue is preserved and reported without blocking removal of the program, registration, or its installer-owned `PATH` entry. Stale private installer staging is never a reason to strand install, update, or uninstall. Uninstall stops safely if the install root is unowned or uses an unsupported legacy layout, a type or reparse-point boundary is unsafe, a managed process is active, a runtime lease is active or ambiguous, or another setup, uninstall, or launcher owns the relevant lock.
 
 ### Verify the download
 

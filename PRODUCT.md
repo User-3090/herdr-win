@@ -61,17 +61,22 @@ tests remain the detailed implementation truth.
   install layout, including the former runtime-local launcher design, is preserved
   and rejected with instructions to uninstall the existing **Herdr** or **Herdr Win**
   entry from Windows Installed Apps before running setup again; setup never
-  migrates, backs up, or removes an incompatible layout. Within the recognized
-  current layout, setup recreates missing installer control files and replaces
-  changed regular control-file bytes; reparse/type collisions remain preserved and
-  rejected, while launcher and immutable-runtime integrity checks stay strict.
-- Within the current managed layout, setup and uninstall automatically recover a
-  dead validated install/uninstall transaction after the prior lifecycle lock is
-  released and no managed process or lease remains. Exact installer-owned remnants
-  are removed and setup continues with a fresh install when necessary; unknown or
-  ambiguous content is preserved rather than deleted. While a current-format
-  uninstall marker is pending, the stable launcher refuses to start a new managed
-  session until uninstall recovery completes.
+  migrates, backs up, or removes an incompatible layout. Within a registered current
+  installation, setup normally recreates missing installer control files and
+  replaces changed regular control-file bytes. If current-format drift cannot use
+  that narrow repair, setup directly rebuilds the dedicated managed root from its
+  validated embedded payload after proving that no managed process or lease is
+  active. Reparse points and active installed files remain preserved blockers;
+  user configuration and projects remain outside this root.
+- Installed/current after setup and absent after uninstall are the terminal product
+  outcomes. Fresh/update sibling directories are private disposable staging, not a
+  second ownership or recovery authority; stale or malformed staging is removed
+  when safe and otherwise preserved with a warning without blocking the requested
+  operation. Uninstall uses the existing lifecycle and launcher locks plus one
+  `uninstall.pending` launch gate, then removes `bin` and immutable runtimes directly
+  before final metadata/self-cleanup. A retry resumes from the remaining root rather
+  than parsing a separate uninstall journal. While the marker is present, the stable
+  launcher refuses to start a new managed session.
 - Direct setup and portable installs update through only the fork-owned immutable
   setup asset and verified digest through the fork-owned update feed. Existing
   managed sessions continue on their current runtime; a newer runtime may remain
@@ -104,9 +109,9 @@ tests remain the detailed implementation truth.
   settings checkbox preserves configuration and session data under
   `%USERPROFILE%\.herdr` by default; silent uninstall accepts `/REMOVE_SETTINGS` as
   the explicit settings-deletion choice. If locked or unsafe content prevents that
-  selected cleanup from finishing, uninstall preserves and reports the residual
-  while still removing the managed program, Installed Apps registration, and its
-  installer-owned `PATH` entry.
+  selected cleanup or a selected installer-managed skill removal from finishing,
+  uninstall preserves and reports the residual while still removing the managed
+  program, Installed Apps registration, and its installer-owned `PATH` entry.
 - The executable and setup are currently unsigned. Documentation must keep the
   SmartScreen warning and digest-verification path clear until signing becomes an
   explicit release capability.

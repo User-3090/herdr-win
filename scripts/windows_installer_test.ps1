@@ -118,7 +118,9 @@ function Invoke-TestInstall {
         [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
         [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
         [string]$ClaudeSkillsRoot,
-        [int]$LockTimeoutMilliseconds = 3000
+        [int]$LockTimeoutMilliseconds = 3000,
+        [bool]$AllowCurrentRootConvergence = $false,
+        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
     )
     return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
         Install-HerdrLayout `
@@ -136,7 +138,9 @@ function Invoke-TestInstall {
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
             -InstallManager $InstallManager `
-            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
+            -AllowCurrentRootConvergence $AllowCurrentRootConvergence `
+            -ProcessProvider $ProcessProvider
     }
 }
 
@@ -148,7 +152,8 @@ function Invoke-TestUninstall {
         [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
         [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
         [scriptblock]$ProcessProvider = { @() },
-        [int]$LockTimeoutMilliseconds = 3000
+        [int]$LockTimeoutMilliseconds = 3000,
+        [bool]$AllowCurrentRootConvergence = $false
     )
     $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
     Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
@@ -159,7 +164,8 @@ function Invoke-TestUninstall {
             -KnownSkillHashes $knownSkillHashes `
             -SkillDisposition $SkillDisposition `
             -ProcessProvider $ProcessProvider `
-            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
+            -AllowCurrentRootConvergence $AllowCurrentRootConvergence
     }
 }
 
@@ -188,7 +194,7 @@ try { Start-Sleep -Seconds $Seconds } finally { `$file.Dispose() }
     return Start-Process powershell.exe -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
 }
 
-function Start-TestLifecycleTransactionOwner {
+function Start-TestLifecycleStagingOwner {
     param([string]$HelperPath, [string]$InstallRoot, [string]$ReadyPath, [int]$Seconds = 3)
     $escapedHelper = $HelperPath.Replace("'", "''")
     $escapedRoot = $InstallRoot.Replace("'", "''")
@@ -197,10 +203,10 @@ function Start-TestLifecycleTransactionOwner {
 `$ErrorActionPreference = 'Stop'
 . '$escapedHelper'
 Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -TimeoutMilliseconds 3000 -Operation {
-    `$transaction = New-HerdrTransaction -Kind 'fresh' -InstallRoot '$escapedRoot'
-    New-Item -ItemType Directory -Path (Join-Path `$transaction.Path 'root') | Out-Null
-    Write-HerdrDurableText -Path (Join-Path `$transaction.Path 'root\live.txt') -Text 'live'
-    [IO.File]::WriteAllText('$escapedReady', `$transaction.Path)
+    `$staging = New-HerdrStagingDirectory -Kind 'fresh' -InstallRoot '$escapedRoot'
+    New-Item -ItemType Directory -Path (Join-Path `$staging.Path 'root') | Out-Null
+    Write-HerdrDurableText -Path (Join-Path `$staging.Path 'root\live.txt') -Text 'live'
+    [IO.File]::WriteAllText('$escapedReady', `$staging.Path)
     Start-Sleep -Seconds $Seconds
 }
 "@
@@ -273,27 +279,27 @@ try {
     Assert-Throws {
         Read-HerdrManagedSkillHashes -Path $missingCurrentSkillHashManifest -CurrentSkillPath $script:TestSkillSource
     } "current Herdr agent skill hash is absent" "A manifest without the current skill payload was accepted."
-    # A persistent sibling lifecycle lock protects a live transaction from a
+    # A persistent sibling lifecycle lock protects live staging from a
     # second real PowerShell process before any recovery/classification runs.
     $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
     $concurrencyReady = Join-Path $tempRoot "concurrency-ready"
-    $transactionOwner = Start-TestLifecycleTransactionOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -ReadyPath $concurrencyReady -Seconds 3
-    $childProcesses.Add($transactionOwner)
+    $stagingOwner = Start-TestLifecycleStagingOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -ReadyPath $concurrencyReady -Seconds 3
+    $childProcesses.Add($stagingOwner)
     Wait-TestPath -Path $concurrencyReady -TimeoutMilliseconds 15000
-    $liveTransaction = [IO.File]::ReadAllText($concurrencyReady)
-    Assert-HerdrTransaction -Path $liveTransaction -Kind "fresh" -InstallRoot $concurrencyRoot
+    $liveStaging = [IO.File]::ReadAllText($concurrencyReady)
+    Assert-HerdrStagingDirectory -Path $liveStaging -Kind "fresh" -InstallRoot $concurrencyRoot
     Assert-Throws {
         Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 250 -Operation {
-            Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
+            Remove-HerdrStaleStagingDirectories -InstallRoot $concurrencyRoot
         }
-    } "Timed out after 250 ms" "A second lifecycle invocation entered while the first owned a live transaction."
-    Assert-True (Test-Path -LiteralPath (Join-Path $liveTransaction "root\live.txt")) "Contending lifecycle invocation deleted a live transaction."
-    if (-not $transactionOwner.WaitForExit(10000)) { throw "Lifecycle transaction owner did not exit within 10 seconds." }
-    if ($transactionOwner.ExitCode -ne 0) { throw "Lifecycle transaction owner exited with $($transactionOwner.ExitCode)." }
+    } "Timed out after 250 ms" "A second lifecycle invocation entered while the first owned live staging."
+    Assert-True (Test-Path -LiteralPath (Join-Path $liveStaging "root\live.txt")) "Contending lifecycle invocation deleted live staging."
+    if (-not $stagingOwner.WaitForExit(10000)) { throw "Lifecycle staging owner did not exit within 10 seconds." }
+    if ($stagingOwner.ExitCode -ne 0) { throw "Lifecycle staging owner exited with $($stagingOwner.ExitCode)." }
     Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 3000 -Operation {
-        Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
+        Remove-HerdrStaleStagingDirectories -InstallRoot $concurrencyRoot
     }
-    Assert-True (-not (Test-Path -LiteralPath $liveTransaction)) "Completed lifecycle transaction was not recovered after lock release."
+    Assert-True (-not (Test-Path -LiteralPath $liveStaging)) "Completed lifecycle staging was not removed after lock release."
     $persistentLifecycleLock = Get-HerdrLifecycleLockPath -InstallRoot $concurrencyRoot
     Assert-HerdrRegularFile -Path $persistentLifecycleLock
     Assert-Equal (Get-Item -LiteralPath $persistentLifecycleLock).Length ([long]0) "Persistent lifecycle lock is not an empty regular file."
@@ -531,12 +537,12 @@ try {
         [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($pathRegistrySubKey, $false)
     }
 
-    # A complete fresh tree is built in a sibling transaction and retries clean
-    # both complete and partial pre-publication artifacts.
+    # A complete fresh tree is built in disposable sibling staging. Stale regular
+    # content is discarded under the lifecycle lock instead of becoming a gate.
     $installRoot = Join-Path $tempRoot "managed-install"
     $emptyFreshCrash = "$installRoot.installer-fresh.$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $emptyFreshCrash | Out-Null
-    $crashFresh = New-HerdrTransaction -Kind "fresh" -InstallRoot $installRoot
+    $crashFresh = New-HerdrStagingDirectory -Kind "fresh" -InstallRoot $installRoot
     New-HerdrManagedRootTree `
         -Destination (Join-Path $crashFresh.Path "root") `
         -StageDir $stage1 `
@@ -548,12 +554,13 @@ try {
         -DisplayVersion $display1 `
         -NumericVersion $numeric1
     Remove-Item -LiteralPath (Join-Path $crashFresh.Path "root\runtime\$id1\herdr.exe") -Force
+    Write-TestFile -Path (Join-Path $crashFresh.Path "stale-private-data.txt") -Text "discard"
     Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
     $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
     Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\package-manager"))) "Direct setup published package-manager ownership."
-    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
-    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
+    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty stale staging was not removed."
+    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Malformed fresh staging blocked installation."
     Assert-HerdrManagedRoot -InstallRoot $installRoot
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
@@ -623,54 +630,48 @@ try {
     [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
     Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 
-    # A dead uninstall transaction is recovery evidence, not a permanent setup
-    # blocker. This reproduces the observed field state: only the exact managed
-    # bin survives while the sibling transaction retains root.manifest.
-    $deadUninstallRoot = Join-Path $tempRoot "dead-uninstall-install"
-    $deadUninstallSkillsRoot = Join-Path $tempRoot "dead-uninstall-agent-skills"
-    [void](Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallSkillsRoot)
-    $deadUninstallTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
-    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $deadUninstallTransaction.Path "root.manifest")
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "runtime") -Recurse -Force
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "state") -Recurse -Force
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "uninstall.exe") -Force
-    $recoveredDeadUninstall = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
-    Assert-Equal $recoveredDeadUninstall.Status "Activated" "Dead uninstall transaction did not recover into a fresh install."
-    Assert-True (-not (Test-Path -LiteralPath $deadUninstallTransaction.Path)) "Dead uninstall transaction survived setup recovery."
-    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
-    Assert-Equal (Read-HerdrPointer -Path (Join-Path $deadUninstallRoot "state\active")) $id2 "Dead uninstall recovery selected the wrong build."
+    # A registered current root that normal layout repair cannot classify converges
+    # directly to the requested complete installation. Private stale staging is
+    # disposable evidence and never becomes the recovery authority.
+    $directRepairRoot = Join-Path $tempRoot "direct-repair-install"
+    $directRepairSkillsRoot = Join-Path $tempRoot "direct-repair-agent-skills"
+    [void](Invoke-TestInstall -Root $directRepairRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $directRepairSkillsRoot -InstallManager WinGet)
+    $staleUninstallStaging = "$directRepairRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
+    Write-TestFile -Path (Join-Path $staleUninstallStaging "malformed-private-state.txt") -Text "discard"
+    Remove-Item -LiteralPath (Join-Path $directRepairRoot "runtime") -Recurse -Force
+    Remove-Item -LiteralPath (Join-Path $directRepairRoot "uninstall.exe") -Force
+    $directlyRepaired = Invoke-TestInstall -Root $directRepairRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $directRepairSkillsRoot -AllowCurrentRootConvergence $true -ProcessProvider { @() }
+    Assert-Equal $directlyRepaired.Status "Activated" "Direct current-root convergence did not install the requested build."
+    Assert-True (-not (Test-Path -LiteralPath $staleUninstallStaging)) "Malformed private staging blocked direct installation."
+    Assert-HerdrManagedRoot -InstallRoot $directRepairRoot
+    Assert-Equal (Read-HerdrPointer -Path (Join-Path $directRepairRoot "state\active")) $id2 "Direct convergence selected the wrong build."
+    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $directRepairRoot "state\package-manager")) $script:PackageManagerMarkerText "Direct setup over a WinGet root lost package-manager ownership."
 
-    # Recovery holds the launcher's coordination gate from its final process and
-    # lease checks until bin is moved out of the install root. A concurrent
-    # launcher owner therefore blocks recovery without losing transaction state.
-    $gatedRecoveryRoot = Join-Path $tempRoot "gated-dead-uninstall"
-    $gatedRecoverySkillsRoot = Join-Path $tempRoot "gated-dead-uninstall-agent-skills"
+    # Direct convergence still holds the existing launcher gate while checking
+    # processes and removing launchable files.
+    $gatedRecoveryRoot = Join-Path $tempRoot "gated-direct-repair"
+    $gatedRecoverySkillsRoot = Join-Path $tempRoot "gated-direct-repair-agent-skills"
     [void](Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $gatedRecoverySkillsRoot)
-    $gatedRecoveryTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $gatedRecoveryRoot
-    Copy-HerdrDurableFile -Source (Join-Path $gatedRecoveryRoot "state\install.manifest") -Destination (Join-Path $gatedRecoveryTransaction.Path "root.manifest")
     Remove-Item -LiteralPath (Join-Path $gatedRecoveryRoot "runtime") -Recurse -Force
-    $gatedRecoveryReady = Join-Path $tempRoot "gated-dead-uninstall-ready"
+    $gatedRecoveryReady = Join-Path $tempRoot "gated-direct-repair-ready"
     $gatedRecoveryOwner = Start-TestSharedFileHolder -Path (Join-Path $gatedRecoveryRoot "state\launcher.lock") -ReadyPath $gatedRecoveryReady -Seconds 2 -ShareMode None
     $childProcesses.Add($gatedRecoveryOwner)
     Wait-TestPath -Path $gatedRecoveryReady
     Assert-Throws {
-        Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -LockTimeoutMilliseconds 250
-    } "Timed out after 250 ms.*launcher.lock" "Dead uninstall recovery entered while a launcher owned its coordination gate."
-    Assert-True (Test-Path -LiteralPath $gatedRecoveryTransaction.Path) "Blocked recovery deleted its transaction."
-    Assert-True (Test-Path -LiteralPath (Join-Path $gatedRecoveryRoot "bin\herdr.exe")) "Blocked recovery removed its launcher."
-    if (-not $gatedRecoveryOwner.WaitForExit(10000)) { throw "Gated recovery owner did not exit within 10 seconds." }
-    $recoveredGatedUninstall = Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot
-    Assert-Equal $recoveredGatedUninstall.Status "Activated" "Gated dead uninstall did not recover after launcher coordination released."
+        Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -LockTimeoutMilliseconds 250 -AllowCurrentRootConvergence $true -ProcessProvider { @() }
+    } "Timed out after 250 ms.*launcher.lock" "Direct convergence bypassed the launcher coordination gate."
+    Assert-True (Test-Path -LiteralPath (Join-Path $gatedRecoveryRoot "bin\herdr.exe")) "Blocked convergence removed its launcher."
+    if (-not $gatedRecoveryOwner.WaitForExit(10000)) { throw "Gated convergence owner did not exit within 10 seconds." }
+    $recoveredGatedUninstall = Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -AllowCurrentRootConvergence $true -ProcessProvider { @() }
+    Assert-Equal $recoveredGatedUninstall.Status "Activated" "Direct convergence did not continue after launcher coordination released."
     Assert-HerdrManagedRoot -InstallRoot $gatedRecoveryRoot
 
-    # A transaction that died before changing a complete managed root is simply
-    # discarded; setup must preserve the installation and follow normal update.
-    $preMutationTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
-    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $preMutationTransaction.Path "root.manifest")
-    $recoveredPreMutation = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
-    Assert-Equal $recoveredPreMutation.Status "AlreadyActive" "Pre-mutation uninstall transaction changed normal setup behavior."
-    Assert-True (-not (Test-Path -LiteralPath $preMutationTransaction.Path)) "Pre-mutation uninstall transaction survived setup recovery."
-    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
+    $preMutationStaging = "$directRepairRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
+    Write-TestFile -Path (Join-Path $preMutationStaging "unknown.txt") -Text "discard"
+    $recoveredPreMutation = Invoke-TestInstall -Root $directRepairRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $directRepairSkillsRoot
+    Assert-Equal $recoveredPreMutation.Status "AlreadyActive" "Stale private staging changed normal setup behavior."
+    Assert-True (-not (Test-Path -LiteralPath $preMutationStaging)) "Stale private staging survived normal setup."
+    Assert-HerdrManagedRoot -InstallRoot $directRepairRoot
 
     # An exact residual left by an older interrupted uninstaller remains
     # resumable by setup even though current helpers finalize it under the lock.
@@ -717,20 +718,54 @@ try {
         Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
     }
 
-    # The same dead-transaction recovery is shared by uninstall. With no running
-    # managed process, a partial current install is removed instead of wedging the
-    # uninstaller on its own abandoned transaction.
-    $deadUninstallRemovalRoot = Join-Path $tempRoot "dead-uninstall-removal"
-    $deadUninstallRemovalSkillsRoot = Join-Path $tempRoot "dead-uninstall-removal-agent-skills"
-    [void](Invoke-TestInstall -Root $deadUninstallRemovalRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallRemovalSkillsRoot)
-    $deadUninstallRemovalTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRemovalRoot
-    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRemovalRoot "state\install.manifest") -Destination (Join-Path $deadUninstallRemovalTransaction.Path "root.manifest")
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "runtime") -Recurse -Force
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "state") -Recurse -Force
-    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "uninstall.exe") -Force
-    Invoke-TestUninstall -Root $deadUninstallRemovalRoot -AgentSkillsRoot $deadUninstallRemovalSkillsRoot -ProcessProvider { @() }
-    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalRoot)) "Uninstall did not remove its dead-transaction partial root."
-    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalTransaction.Path)) "Uninstall retained its dead transaction."
+    # Direct uninstall does not mutate external skill state until every true
+    # launcher, lease, and process blocker has cleared.
+    $directUninstallRoot = Join-Path $tempRoot "direct-uninstall-removal"
+    $directUninstallSkillsRoot = Join-Path $tempRoot "direct-uninstall-removal-agent-skills"
+    [void](Invoke-TestInstall -Root $directUninstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $directUninstallSkillsRoot)
+    $directUninstallSkill = Join-Path $directUninstallSkillsRoot "herdr\SKILL.md"
+    Write-TestFile -Path (Join-Path $directUninstallRoot "stale.private") -Text "reclaim-current-root"
+    $directUninstallStaging = "$directUninstallRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
+    Write-TestFile -Path (Join-Path $directUninstallStaging "malformed.txt") -Text "discard"
+
+    $directLockReady = Join-Path $tempRoot "direct-uninstall-lock-ready"
+    $directLockOwner = Start-TestSharedFileHolder -Path (Join-Path $directUninstallRoot "state\launcher.lock") -ReadyPath $directLockReady -Seconds 2 -ShareMode None
+    $childProcesses.Add($directLockOwner)
+    Wait-TestPath -Path $directLockReady
+    Assert-Throws {
+        Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 250 -AllowCurrentRootConvergence $true
+    } "Timed out after 250 ms.*launcher.lock" "Direct uninstall bypassed launcher-lock contention."
+    Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Launcher-lock refusal removed the managed skill before application convergence."
+    if (-not $directLockOwner.WaitForExit(10000)) { throw "Direct uninstall launcher-lock owner did not exit within 10 seconds." }
+
+    $directLease = [IO.File]::Open(
+        (Join-Path $directUninstallRoot "state\leases\$id1.lease"),
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::ReadWrite
+    )
+    try {
+        Assert-Throws {
+            Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -AllowCurrentRootConvergence $true
+        } "still active" "Direct uninstall bypassed an active runtime lease."
+        Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Lease refusal removed the managed skill before application convergence."
+    } finally {
+        $directLease.Dispose()
+    }
+
+    $directProcess = Start-Process -FilePath (Join-Path $directUninstallRoot "bin\herdr.exe") -ArgumentList @("--wait") -PassThru -WindowStyle Hidden
+    $childProcesses.Add($directProcess)
+    Start-Sleep -Milliseconds 200
+    Assert-Throws {
+        Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { Get-HerdrProcessSnapshot } -AllowCurrentRootConvergence $true
+    } "process from the managed Herdr install tree" "Direct uninstall bypassed an active managed process."
+    Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Process refusal removed the managed skill before application convergence."
+    if (-not $directProcess.WaitForExit(10000)) { throw "Direct uninstall managed process did not exit within 10 seconds." }
+
+    Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -AllowCurrentRootConvergence $true
+    Assert-True (-not (Test-Path -LiteralPath $directUninstallRoot)) "Direct uninstall convergence retained the partial current root."
+    Assert-True (-not (Test-Path -LiteralPath $directUninstallStaging)) "Direct uninstall convergence retained stale private staging."
+    Assert-True (-not (Test-Path -LiteralPath $directUninstallSkill)) "Direct uninstall convergence retained its known managed skill."
 
     # Filesystem finalization occurs inside the outer lifecycle operation. Even
     # after the root is gone, another setup cannot publish a new generation until
@@ -764,12 +799,12 @@ try {
     Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt") -Text "old-resource"
     $script:TestSkillSource = $skillSource2
 
-    # Runtime and pointer crash artifacts are external and recoverable. A real
+    # Runtime and pointer staging artifacts are external and disposable. A real
     # second PowerShell process holds the old build lease across the upgrade.
-    $runtimeCrash = New-HerdrTransaction -Kind "update" -InstallRoot $installRoot
+    $runtimeCrash = New-HerdrStagingDirectory -Kind "update" -InstallRoot $installRoot
     New-Item -ItemType Directory -Path (Join-Path $runtimeCrash.Path "runtime") | Out-Null
     Write-TestFile -Path (Join-Path $runtimeCrash.Path "runtime\partial") -Text "partial"
-    $pointerCrash = New-HerdrTransaction -Kind "update" -InstallRoot $installRoot
+    $pointerCrash = New-HerdrStagingDirectory -Kind "update" -InstallRoot $installRoot
     New-Item -ItemType Directory -Path (Join-Path $pointerCrash.Path "metadata") | Out-Null
     Write-TestFile -Path (Join-Path $pointerCrash.Path "metadata\pending") -Text "partial pointer"
     $leasePath = Join-Path $installRoot "state\leases\$id1.lease"
@@ -779,8 +814,8 @@ try {
     Wait-TestPath -Path $leaseReady
     $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
     Assert-Equal $pending.Status "Pending" "Second-process lease did not produce pending success."
-    Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Runtime crash transaction was not recovered."
-    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
+    Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Stale runtime staging was not removed."
+    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Stale pointer staging was not removed."
     Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Busy upgrade changed active."
     Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\pending")) $id2 "Busy upgrade did not publish pending."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Busy upgrade replaced the active launcher."
@@ -871,7 +906,7 @@ try {
     } "not compatible with this setup.*Uninstall the existing Herdr or Herdr Win entry" "An incompatible install root was accepted."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 
-    # A junction at the fixed install root is rejected before transaction repair,
+    # A junction at the fixed install root is rejected before staging cleanup,
     # setup publication, or uninstall cleanup can mutate its target.
     $reparseInstallTarget = Join-Path $tempRoot "reparse-install-target"
     New-Item -ItemType Directory -Path $reparseInstallTarget | Out-Null
@@ -957,47 +992,31 @@ try {
     Remove-Item -LiteralPath $processSkillSibling -Force
     Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes
 
-    # An unchanged but temporarily locked owned skill keeps uninstall retryable
-    # and preserves the install manifest until cleanup can succeed.
+    # A temporarily locked external skill residual no longer blocks application
+    # removal. The exact skill is preserved and reported through the helper warning.
     $lockedSkill = $processSkill
     $lockedSkillReady = Join-Path $tempRoot "locked-skill-ready"
     $lockedSkillProcess = Start-TestSharedFileHolder -Path $lockedSkill -ReadyPath $lockedSkillReady -Seconds 2 -ShareMode None
     $childProcesses.Add($lockedSkillProcess)
     Wait-TestPath -Path $lockedSkillReady
-    Assert-Throws {
-        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-    } "being used|cannot access|access to the path" "Locked owned skill did not keep uninstall retryable."
-    Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\install.manifest")) "Failed skill cleanup removed uninstall ownership state."
+    Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
+    Assert-True (-not (Test-Path -LiteralPath $processRoot)) "Locked skill residual blocked application uninstall."
+    Assert-True (Test-Path -LiteralPath $lockedSkill -PathType Leaf) "Locked skill residual was not preserved."
     if (-not $lockedSkillProcess.WaitForExit(10000)) { throw "Locked skill holder did not exit within 10 seconds." }
 
-    # Crash after uninstall marker/bin move is retryable; exact transaction
-    # ownership is validated before deletion and helper remains for NSIS last.
-    $stagedMarkerTx = New-HerdrTransaction -Kind "uninstall" -InstallRoot $processRoot
-    Copy-HerdrDurableFile -Source (Join-Path $processRoot "state\install.manifest") -Destination (Join-Path $stagedMarkerTx.Path "root.manifest")
-    Write-HerdrDurableText -Path (Join-Path $stagedMarkerTx.Path "uninstall.pending") -Text $script:UninstallMarkerText
-    $uninstallTx = New-HerdrTransaction -Kind "uninstall" -InstallRoot $processRoot
-    Copy-HerdrDurableFile -Source (Join-Path $processRoot "state\install.manifest") -Destination (Join-Path $uninstallTx.Path "root.manifest")
-    Write-HerdrDurableText -Path (Join-Path $processRoot "state\uninstall.pending") -Text $script:UninstallMarkerText
-    [IO.Directory]::Move((Join-Path $processRoot "bin"), (Join-Path $uninstallTx.Path "bin"))
-    Write-HerdrUninstallCleanupManifest -Path $uninstallTx.Path
-    Remove-Item -LiteralPath (Join-Path $uninstallTx.Path "bin\herdr.exe") -Force
-    $unownedUninstallFile = Join-Path $uninstallTx.Path "unowned.txt"
-    Write-TestFile -Path $unownedUninstallFile -Text "preserve"
-    Assert-Throws {
-        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-    } "unowned file" "Partial uninstall cleanup accepted an unowned survivor."
-    Assert-True (Test-Path -LiteralPath $unownedUninstallFile) "Rejected partial-uninstall content was deleted."
-    Remove-Item -LiteralPath $unownedUninstallFile -Force
-    $unownedUninstallDirectory = Join-Path $uninstallTx.Path "bin\unexpected-empty"
-    New-Item -ItemType Directory -Path $unownedUninstallDirectory | Out-Null
-    Assert-Throws {
-        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-    } "unowned directory" "Partial uninstall cleanup accepted an unowned empty directory."
-    Assert-True (Test-Path -LiteralPath $unownedUninstallDirectory) "Rejected partial-uninstall directory was deleted."
-    Remove-Item -LiteralPath $unownedUninstallDirectory -Force
-    Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-    Assert-True (-not (Test-Path -LiteralPath $processRoot)) "Dead uninstall recovery retained its partial managed root."
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $processAgentSkillsRoot "herdr"))) "Uninstall retained its unchanged owned Herdr skill."
+    # The pending marker is a launch gate, not a journal grammar. A malformed
+    # regular marker and arbitrary regular stale private staging still converge to
+    # complete removal.
+    $retryRoot = Join-Path $tempRoot "marker-retry-install"
+    $retrySkillsRoot = Join-Path $tempRoot "marker-retry-agent-skills"
+    [void](Invoke-TestInstall -Root $retryRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $retrySkillsRoot)
+    Write-TestFile -Path (Join-Path $retryRoot "state\uninstall.pending") -Text "stale-private-marker"
+    $retryStaging = "$retryRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
+    Write-TestFile -Path (Join-Path $retryStaging "unknown\stale.bin") -Text "discard"
+    Invoke-TestUninstall -Root $retryRoot -AgentSkillsRoot $retrySkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
+    Assert-True (-not (Test-Path -LiteralPath $retryRoot)) "Pending-marker retry did not remove the application."
+    Assert-True (-not (Test-Path -LiteralPath $retryStaging)) "Pending-marker retry retained stale private staging."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $retrySkillsRoot "herdr"))) "Pending-marker retry retained its unchanged owned Herdr skill."
 
     # Explicit removal deletes an unknown SKILL.md while preserving extra files
     # and nested directories.

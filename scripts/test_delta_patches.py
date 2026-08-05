@@ -217,6 +217,8 @@ class DeltaPatchTests(unittest.TestCase):
             "https://github.com/hdosys/herdr-sandbox",
             "https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach",
             "https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png",
+            "install root is unowned",
+            "runtime lease is active or ambiguous",
             "Upstreamed in Herdr v0.8.0",
             "wire protocol 20",
             "linux_amd64",

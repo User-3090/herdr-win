@@ -1,4 +1,4 @@
-From 5bf3f2f84e6a04da99641cb236e68cb68e619456 Mon Sep 17 00:00:00 2001
+From 57cf373b287e978450ff3b03c2919b44ba554987 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,7 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |    7 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/herdr-installer-helper.ps1  | 3391 +++++++++++++++++
+ packaging/windows/herdr-installer-helper.ps1  | 3036 +++++++++++++++++
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -26,10 +26,10 @@ Refs ogulcancelik/herdr#1947
  scripts/test_preview.py                       |  203 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  868 +++++
+ scripts/test_windows_installer.py             |  888 +++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
- scripts/windows_installer_fault_test.ps1      |  633 +++
- scripts/windows_installer_test.ps1            | 1059 +++++
+ scripts/windows_installer_fault_test.ps1      |  633 ++++
+ scripts/windows_installer_test.ps1            | 1078 ++++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -50,7 +50,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  878 ++++-
- 45 files changed, 10603 insertions(+), 392 deletions(-)
+ 45 files changed, 10287 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -153,10 +153,10 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
 diff --git a/packaging/windows/herdr-installer-helper.ps1 b/packaging/windows/herdr-installer-helper.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46cbd86d4b
+index 0000000000000000000000000000000000000000..64bd9c2670fd33a4f3c63b12be164fa9b6ec8601
 --- /dev/null
 +++ b/packaging/windows/herdr-installer-helper.ps1
-@@ -0,0 +1,3391 @@
+@@ -0,0 +1,3036 @@
 +[CmdletBinding()]
 +param(
 +    [ValidateSet("Install", "Uninstall", "GetSkillRemovalDefault", "CompleteMaintenance")]
@@ -222,7 +222,6 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +$script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 +$script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"
 +$script:UninstallMarkerText = "herdr-uninstall-v1`n"
-+$script:TransactionMarkerName = ".herdr-installer-transaction"
 +$script:UninstallRunnerName = "uninstall-runner.ps1"
 +$script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
 +$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
@@ -843,6 +842,30 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    return $preserved.ToArray()
 +}
 +
++function Remove-HerdrSkillCopiesBestEffort {
++    param(
++        [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
++        [string[]]$ClaudeSkillsRoots = @(),
++        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
++        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$Disposition
++    )
++
++    try {
++        return @(
++            Remove-HerdrSkillCopies `
++                -AgentSkillsRoot $AgentSkillsRoot `
++                -ClaudeSkillsRoots $ClaudeSkillsRoots `
++                -KnownHashes $KnownHashes `
++                -Disposition $Disposition
++        )
++    } catch {
++        [Console]::Out.WriteLine(
++            "Warning: Herdr skill cleanup was incomplete and the residual was preserved. $($_.Exception.Message)"
++        )
++        return @()
++    }
++}
++
 +function Get-HerdrSkillRemovalDefault {
 +    param(
 +        [Parameter(Mandatory = $true)][string[]]$KnownHashes,
@@ -1248,9 +1271,9 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +
 +    $stateDir = Join-Path $InstallRoot "state"
 +    $current = Read-HerdrInstallManifest -StateDir $stateDir
-+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    $staging = New-HerdrStagingDirectory -Kind "update" -InstallRoot $InstallRoot
 +    try {
-+        $metadata = Join-Path $transaction.Path "metadata"
++        $metadata = Join-Path $staging.Path "metadata"
 +        New-Item -ItemType Directory -Path $metadata | Out-Null
 +        Write-HerdrDurableText -Path (Join-Path $metadata "install.manifest") -Text (
 +            Get-HerdrInstallManifestTextForHash `
@@ -1261,10 +1284,10 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        Publish-HerdrStagedFile `
 +            -Source (Join-Path $metadata "install.manifest") `
 +            -Destination (Join-Path $stateDir "install.manifest") `
-+            -BackupDir $transaction.Path
++            -BackupDir $staging.Path
 +    } finally {
-+        if (Test-Path -LiteralPath $transaction.Path) {
-+            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        if (Test-Path -LiteralPath $staging.Path) {
++            Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +        }
 +    }
 +}
@@ -1471,9 +1494,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    foreach ($required in @("installer-helper.ps1", "launcher.lock", "uninstall.pending")) {
 +        Assert-HerdrRegularFile -Path (Join-Path $stateDir $required)
 +    }
-+    if ((Read-HerdrStrictUtf8 -Path (Join-Path $stateDir "uninstall.pending")) -cne $script:UninstallMarkerText) {
-+        throw "Invalid Herdr uninstall retry marker."
-+    }
++    Assert-HerdrRegularFile -Path (Join-Path $stateDir "uninstall.pending")
 +    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
 +    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
 +        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
@@ -1539,9 +1560,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    }
 +    Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
 +    Assert-HerdrRegularFile -Path (Join-Path $stateDir "launcher.lock")
-+    if ((Read-HerdrStrictUtf8 -Path (Join-Path $stateDir "uninstall.pending")) -cne $script:UninstallMarkerText) {
-+        throw "Uninstall residual marker is invalid."
-+    }
++    Assert-HerdrRegularFile -Path (Join-Path $stateDir "uninstall.pending")
 +}
 +
 +function Assert-HerdrUninstallCleanupRoot {
@@ -1580,9 +1599,8 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        Assert-HerdrRegularFile -Path $entry.FullName
 +    }
 +    $pending = Join-Path $stateDir "uninstall.pending"
-+    if ((Test-Path -LiteralPath $pending) -and
-+        (Read-HerdrStrictUtf8 -Path $pending) -cne $script:UninstallMarkerText) {
-+        throw "Uninstall cleanup marker is invalid."
++    if (Test-Path -LiteralPath $pending) {
++        Assert-HerdrRegularFile -Path $pending
 +    }
 +}
 +
@@ -1721,105 +1739,9 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        -UninstallFaultMarkerPrefix $UninstallFaultMarkerPrefix
 +}
 +
-+function Assert-HerdrInterruptedUninstallRoot {
++function New-HerdrStagingDirectory {
 +    param(
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [Parameter(Mandatory = $true)][string]$InstallManifestText,
-+        [Parameter(Mandatory = $true)][object]$InstallManifest
-+    )
-+
-+    Assert-HerdrRegularDirectory -Path $InstallRoot
-+    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe", $script:UninstallRunnerName)
-+    foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
-+        if ($allowedRoot -cnotcontains $entry.Name -or
-+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-+            throw "Interrupted uninstall root contains unexpected content: $($entry.FullName)"
-+        }
-+        if (($entry.Name -in @("bin", "runtime", "state")) -ne $entry.PSIsContainer) {
-+            throw "Interrupted uninstall root entry has the wrong type: $($entry.FullName)"
-+        }
-+    }
-+
-+    $binDir = Join-Path $InstallRoot "bin"
-+    if (Test-Path -LiteralPath $binDir) {
-+        Assert-HerdrManagedBin -BinDir $binDir -ExpectedBootstrapSha256 $InstallManifest.BootstrapSha256
-+    }
-+    $runtimeRoot = Join-Path $InstallRoot "runtime"
-+    if (Test-Path -LiteralPath $runtimeRoot) {
-+        Assert-HerdrRegularDirectory -Path $runtimeRoot
-+        foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeRoot -Force)) {
-+            if (-not $runtime.PSIsContainer -or
-+                $runtime.Name -cnotmatch $script:BuildIdPattern -or
-+                ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-+                throw "Interrupted uninstall contains an unrecognized runtime: $($runtime.FullName)"
-+            }
-+            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
-+        }
-+    }
-+    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
-+    if (Test-Path -LiteralPath $uninstaller) {
-+        Assert-HerdrRegularFile -Path $uninstaller
-+    }
-+
-+    $stateDir = Join-Path $InstallRoot "state"
-+    if (-not (Test-Path -LiteralPath $stateDir)) {
-+        return
-+    }
-+    Assert-HerdrRegularDirectory -Path $stateDir
-+    $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager", "uninstall.pending")
-+    foreach ($entry in @(Get-ChildItem -LiteralPath $stateDir -Force)) {
-+        $pendingLauncher = [regex]::IsMatch($entry.Name, $script:PendingLauncherPattern)
-+        if (($allowedState -cnotcontains $entry.Name -and -not $pendingLauncher) -or
-+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-+            throw "Interrupted uninstall state contains unexpected content: $($entry.FullName)"
-+        }
-+        if (($entry.Name -ceq "leases") -ne $entry.PSIsContainer) {
-+            throw "Interrupted uninstall state entry has the wrong type: $($entry.FullName)"
-+        }
-+    }
-+    $stateManifest = Join-Path $stateDir "install.manifest"
-+    if ((Test-Path -LiteralPath $stateManifest) -and
-+        (Read-HerdrStrictUtf8 -Path $stateManifest) -cne $InstallManifestText) {
-+        throw "Interrupted uninstall install.manifest differs from its transaction ownership record."
-+    }
-+    Assert-HerdrPackageManagerMarker -StateDir $stateDir
-+    foreach ($pointerName in @("active", "pending")) {
-+        $pointer = Join-Path $stateDir $pointerName
-+        if (Test-Path -LiteralPath $pointer) {
-+            [void](Read-HerdrPointer -Path $pointer)
-+        }
-+    }
-+    $leasesDir = Join-Path $stateDir "leases"
-+    if (Test-Path -LiteralPath $leasesDir) {
-+        Assert-HerdrLeasesDirectory -LeasesDir $leasesDir
-+    }
-+    foreach ($fileName in @("launcher.lock", "installer-helper.ps1")) {
-+        $file = Join-Path $stateDir $fileName
-+        if (Test-Path -LiteralPath $file) {
-+            Assert-HerdrRegularFile -Path $file
-+        }
-+    }
-+    $pending = Join-Path $stateDir "uninstall.pending"
-+    if ((Test-Path -LiteralPath $pending) -and
-+        (Read-HerdrStrictUtf8 -Path $pending) -cne $script:UninstallMarkerText) {
-+        throw "Interrupted uninstall marker is invalid."
-+    }
-+    [void](Get-HerdrPendingLauncher -StateDir $stateDir)
-+}
-+
-+function Get-HerdrTransactionMarkerText {
-+    param(
-+        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update", "uninstall")][string]$Kind,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    $rootHash = Get-HerdrTextSha256 -Text ((Get-HerdrFullPath -Path $InstallRoot).ToLowerInvariant())
-+    return "herdr-installer-transaction-v1`nkind=$Kind`ninstall_root_sha256=$rootHash`n"
-+}
-+
-+function New-HerdrTransaction {
-+    param(
-+        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update", "uninstall")][string]$Kind,
++        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update")][string]$Kind,
 +        [Parameter(Mandatory = $true)][string]$InstallRoot
 +    )
 +
@@ -1832,13 +1754,10 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    $leaf = Split-Path -Leaf $InstallRoot
 +    $path = Join-Path $parent ("$leaf.installer-$Kind." + [Guid]::NewGuid().ToString("N"))
 +    New-Item -ItemType Directory -Path $path | Out-Null
-+    Write-HerdrDurableText -Path (Join-Path $path $script:TransactionMarkerName) -Text (
-+        Get-HerdrTransactionMarkerText -Kind $Kind -InstallRoot $InstallRoot
-+    )
 +    return [PSCustomObject]@{ Kind = $Kind; Path = $path }
 +}
 +
-+function Assert-HerdrTransaction {
++function Assert-HerdrStagingDirectory {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Path,
 +        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update", "uninstall")][string]$Kind,
@@ -1851,16 +1770,13 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    $name = Split-Path -Leaf $Path
 +    if (-not ([IO.Path]::GetFullPath((Split-Path -Parent $Path)).Equals($expectedParent, [StringComparison]::OrdinalIgnoreCase)) -or
 +        $name -cnotmatch "^$leaf\.installer-$Kind\.[0-9a-f]{32}$") {
-+        throw "Refusing an unrecognized Herdr installer transaction path: $Path"
++        throw "Refusing an unrecognized Herdr installer staging path: $Path"
 +    }
++    Assert-HerdrRegularDirectory -Path $Path
 +    [void](Get-HerdrSafeTreeEntries -Root $Path)
-+    $marker = Join-Path $Path $script:TransactionMarkerName
-+    if ((Read-HerdrStrictUtf8 -Path $marker) -cne (Get-HerdrTransactionMarkerText -Kind $Kind -InstallRoot $InstallRoot)) {
-+        throw "Herdr installer transaction marker is invalid: $Path"
-+    }
 +}
 +
-+function Get-HerdrTransactions {
++function Get-HerdrStagingDirectories {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$InstallRoot,
 +        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update", "uninstall")][string]$Kind
@@ -1877,405 +1793,45 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    } | ForEach-Object { $_.FullName })
 +}
 +
-+function Remove-HerdrTransaction {
++function Remove-HerdrStagingDirectory {
 +    param(
 +        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update")][string]$Kind,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
++        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update", "uninstall")][string]$Kind,
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [switch]$BestEffort
 +    )
 +
-+    Assert-HerdrTransaction -Path $Path -Kind $Kind -InstallRoot $InstallRoot
-+    foreach ($entry in @(Get-ChildItem -LiteralPath $Path -Force)) {
-+        if ($entry.Name -ceq $script:TransactionMarkerName) {
-+            continue
++    try {
++        Assert-HerdrStagingDirectory -Path $Path -Kind $Kind -InstallRoot $InstallRoot
++        $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
++            -not $_.PSIsContainer
++        } | Sort-Object { $_.FullName.Length } -Descending)
++        foreach ($file in $files) {
++            Remove-Item -LiteralPath $file.FullName -Force
 +        }
-+        if ($Kind -eq "fresh") {
-+            if ($entry.Name -cne "root" -or -not $entry.PSIsContainer) {
-+                throw "Fresh installer transaction contains unexpected content: $($entry.FullName)"
-+            }
-+            continue
++        $directories = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)
++        foreach ($directory in $directories) {
++            Remove-Item -LiteralPath $directory.FullName -Force
 +        }
-+        if ($entry.Name -in @("runtime", "metadata")) {
-+            if (-not $entry.PSIsContainer) {
-+                throw "Update installer transaction path is not a directory: $($entry.FullName)"
-+            }
-+            continue
++        Remove-Item -LiteralPath $Path -Force
++    } catch {
++        if (-not $BestEffort) {
++            throw
 +        }
-+        if ($entry.PSIsContainer -or
-+            $entry.Name -cnotmatch '^(?:active|pending|launcher|installer-helper\.ps1|uninstall(?:-runner\.ps1|\.exe)|install\.manifest)\.backup\.[0-9a-f]{32}$') {
-+            throw "Update installer transaction contains unexpected content: $($entry.FullName)"
-+        }
++        [Console]::Out.WriteLine(
++            "Warning: Private installer staging was preserved and will not change the requested result: $Path. $($_.Exception.Message)"
++        )
 +    }
-+    $marker = Join-Path $Path $script:TransactionMarkerName
-+    Assert-HerdrRegularFile -Path $marker
-+    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-+        -not $_.PSIsContainer -and $_.FullName -ine $marker
-+    } | Sort-Object { $_.FullName.Length } -Descending)
-+    foreach ($file in $files) {
-+        Remove-Item -LiteralPath $file.FullName -Force
-+    }
-+    $directories = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)
-+    foreach ($directory in $directories) {
-+        Remove-Item -LiteralPath $directory.FullName -Force
-+    }
-+    Remove-Item -LiteralPath $marker -Force
-+    Remove-Item -LiteralPath $Path -Force
 +}
 +
-+function Remove-HerdrEmptyTransactionShell {
-+    param([string]$Path, [AllowEmptyCollection()][object[]]$Entries)
-+    if ($Entries.Count -ne 0 -and
-+        ($Entries.Count -ne 1 -or $Entries[0].Name -cne $script:TransactionMarkerName -or $Entries[0].PSIsContainer)) {
-+        return $false
-+    }
-+    if ($Entries.Count -eq 1) { Remove-Item -LiteralPath $Entries[0].FullName -Force }
-+    Remove-Item -LiteralPath $Path -Force
-+    return $true
-+}
-+
-+function Remove-HerdrRecoverableTransactionPath {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][ValidateSet("fresh", "update")][string]$Kind,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrRegularDirectory -Path $Path
-+    $entries = @(Get-ChildItem -LiteralPath $Path -Force)
-+    if (Remove-HerdrEmptyTransactionShell -Path $Path -Entries $entries) {
-+        return
-+    }
-+    Remove-HerdrTransaction -Path $Path -Kind $Kind -InstallRoot $InstallRoot
-+}
-+
-+function Remove-HerdrRecoverableInstallTransactions {
++function Remove-HerdrStaleStagingDirectories {
 +    param([Parameter(Mandatory = $true)][string]$InstallRoot)
 +
-+    foreach ($kind in @("fresh", "update")) {
-+        foreach ($path in @(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind $kind)) {
-+            Remove-HerdrRecoverableTransactionPath -Path $path -Kind $kind -InstallRoot $InstallRoot
++    foreach ($kind in @("fresh", "update", "uninstall")) {
++        foreach ($path in @(Get-HerdrStagingDirectories -InstallRoot $InstallRoot -Kind $kind)) {
++            Remove-HerdrStagingDirectory -Path $path -Kind $kind -InstallRoot $InstallRoot -BestEffort
 +        }
 +    }
-+}
-+
-+function Assert-HerdrUninstallTransaction {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrTransaction -Path $Path -Kind "uninstall" -InstallRoot $InstallRoot
-+    $allowed = @($script:TransactionMarkerName, "root.manifest", "uninstall.pending", "bin", "runtime")
-+    foreach ($entry in @(Get-ChildItem -LiteralPath $Path -Force)) {
-+        if ($allowed -cnotcontains $entry.Name) {
-+            throw "Uninstall transaction contains unexpected content: $($entry.FullName)"
-+        }
-+    }
-+    $manifestPath = Join-Path $Path "root.manifest"
-+    $manifest = $null
-+    if (Test-Path -LiteralPath $manifestPath) {
-+        $manifest = Read-HerdrInstallManifestFile -Path $manifestPath
-+    }
-+    $pendingPath = Join-Path $Path "uninstall.pending"
-+    if (Test-Path -LiteralPath $pendingPath) {
-+        if ((Read-HerdrStrictUtf8 -Path $pendingPath) -cne $script:UninstallMarkerText) {
-+            throw "Uninstall transaction contains an invalid staged retry marker."
-+        }
-+    }
-+    if (Test-Path -LiteralPath (Join-Path $Path "bin")) {
-+        if ($null -eq $manifest) {
-+            throw "Uninstall transaction cannot validate bin without root.manifest."
-+        }
-+        Assert-HerdrManagedBin -BinDir (Join-Path $Path "bin") -ExpectedBootstrapSha256 $manifest.BootstrapSha256
-+    }
-+    if (Test-Path -LiteralPath (Join-Path $Path "runtime")) {
-+        Assert-HerdrRegularDirectory -Path (Join-Path $Path "runtime")
-+        foreach ($runtime in @(Get-ChildItem -LiteralPath (Join-Path $Path "runtime") -Force)) {
-+            if (-not $runtime.PSIsContainer -or $runtime.Name -cnotmatch $script:BuildIdPattern) {
-+                throw "Uninstall transaction contains an unrecognized runtime."
-+            }
-+            Assert-HerdrRuntimeDirectory -Path $runtime.FullName -ExpectedBuildId $runtime.Name
-+        }
-+    }
-+}
-+
-+function Remove-HerdrUninstallTransaction {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrUninstallTransaction -Path $Path -InstallRoot $InstallRoot
-+    Write-HerdrUninstallCleanupManifest -Path $Path
-+    Remove-HerdrUninstallTransactionOwnedFiles -Path $Path -InstallRoot $InstallRoot
-+}
-+
-+function Write-HerdrUninstallCleanupManifest {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    $manifestPath = Join-Path $Path "cleanup.manifest"
-+    if (Test-Path -LiteralPath $manifestPath) {
-+        return
-+    }
-+    $temporary = Join-Path $Path "cleanup.manifest.new"
-+    if (Test-Path -LiteralPath $temporary) {
-+        Assert-HerdrRegularFile -Path $temporary
-+        Remove-Item -LiteralPath $temporary -Force
-+    }
-+    $relativePaths = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-+        -not $_.PSIsContainer -and $_.Name -notin @("cleanup.manifest", "cleanup.manifest.new")
-+    } | ForEach-Object { (Get-HerdrRelativePath -Root $Path -Path $_.FullName).Replace('\', '/') })
-+    [Array]::Sort($relativePaths, [StringComparer]::Ordinal)
-+    $builder = New-Object Text.StringBuilder
-+    [void]$builder.Append("herdr-uninstall-owned-v1`n")
-+    foreach ($relative in $relativePaths) {
-+        $hash = Get-HerdrSha256 -Path (Join-Path $Path $relative.Replace('/', '\'))
-+        [void]$builder.Append($hash).Append("  ").Append($relative).Append("`n")
-+    }
-+    Write-HerdrDurableText -Path $temporary -Text $builder.ToString()
-+    [IO.File]::Move($temporary, $manifestPath)
-+}
-+
-+function Read-HerdrUninstallCleanupManifest {
-+    param([Parameter(Mandatory = $true)][string]$Path)
-+
-+    $manifestPath = Join-Path $Path "cleanup.manifest"
-+    $text = Read-HerdrStrictUtf8 -Path $manifestPath
-+    if (-not $text.StartsWith("herdr-uninstall-owned-v1`n", [StringComparison]::Ordinal) -or
-+        -not $text.EndsWith("`n", [StringComparison]::Ordinal)) {
-+        throw "Invalid uninstall cleanup ownership manifest: $manifestPath"
-+    }
-+    $lines = $text.Substring(0, $text.Length - 1).Split("`n")
-+    $entries = [ordered]@{}
-+    $previous = $null
-+    if ($lines.Count -gt 1) {
-+        foreach ($line in $lines[1..($lines.Count - 1)]) {
-+            $match = [regex]::Match($line, '^([0-9a-f]{64})  ([0-9A-Za-z._/-]+)$')
-+            if (-not $match.Success) {
-+                throw "Invalid uninstall cleanup ownership entry: $manifestPath"
-+            }
-+            $relative = $match.Groups[2].Value
-+            if ($relative.Contains("../") -or $relative -in @("cleanup.manifest", "cleanup.manifest.new")) {
-+                throw "Unsafe uninstall cleanup ownership path: $relative"
-+            }
-+            if ($null -ne $previous -and [StringComparer]::Ordinal.Compare($previous, $relative) -ge 0) {
-+                throw "Uninstall cleanup ownership paths are not strictly sorted."
-+            }
-+            $entries[$relative] = $match.Groups[1].Value
-+            $previous = $relative
-+        }
-+    }
-+    return ,$entries
-+}
-+
-+function Assert-HerdrPartialUninstallTransaction {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrTransaction -Path $Path -Kind "uninstall" -InstallRoot $InstallRoot
-+    $ownership = Read-HerdrUninstallCleanupManifest -Path $Path
-+    foreach ($entry in @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { -not $_.PSIsContainer })) {
-+        $relative = (Get-HerdrRelativePath -Root $Path -Path $entry.FullName).Replace('\', '/')
-+        if ($relative -ceq "cleanup.manifest") {
-+            continue
-+        }
-+        if (-not $ownership.Contains($relative)) {
-+            throw "Partial uninstall transaction contains unowned file $relative."
-+        }
-+        if ((Get-HerdrSha256 -Path $entry.FullName) -cne [string]$ownership[$relative]) {
-+            throw "Partial uninstall transaction hash mismatch for $relative."
-+        }
-+    }
-+    $ownedDirectories = [Collections.Generic.Dictionary[string, bool]]::new([StringComparer]::Ordinal)
-+    foreach ($relative in $ownership.Keys) {
-+        $parent = [IO.Path]::GetDirectoryName($relative.Replace('/', '\'))
-+        while (-not [string]::IsNullOrEmpty($parent)) {
-+            $ownedDirectories[$parent.Replace('\', '/')] = $true
-+            $parent = [IO.Path]::GetDirectoryName($parent)
-+        }
-+    }
-+    foreach ($directory in @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { $_.PSIsContainer })) {
-+        $relative = (Get-HerdrRelativePath -Root $Path -Path $directory.FullName).Replace('\', '/')
-+        if (-not $ownedDirectories.ContainsKey($relative)) {
-+            throw "Partial uninstall transaction contains unowned directory $relative."
-+        }
-+    }
-+    $allowedTop = @($script:TransactionMarkerName, "root.manifest", "uninstall.pending", "cleanup.manifest", "bin", "runtime")
-+    foreach ($entry in @(Get-ChildItem -LiteralPath $Path -Force)) {
-+        if ($allowedTop -cnotcontains $entry.Name) {
-+            throw "Partial uninstall transaction contains unexpected path $($entry.FullName)."
-+        }
-+    }
-+}
-+
-+function Remove-HerdrUninstallTransactionOwnedFiles {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrPartialUninstallTransaction -Path $Path -InstallRoot $InstallRoot
-+    $markerPath = Join-Path $Path $script:TransactionMarkerName
-+    $manifestPath = Join-Path $Path "cleanup.manifest"
-+    $files = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object {
-+        -not $_.PSIsContainer -and $_.FullName -ine $markerPath -and $_.FullName -ine $manifestPath
-+    } | Sort-Object { $_.FullName.Length } -Descending)
-+    foreach ($file in $files) {
-+        Remove-Item -LiteralPath $file.FullName -Force
-+    }
-+    $directories = @(Get-HerdrSafeTreeEntries -Root $Path | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)
-+    foreach ($directory in $directories) {
-+        Remove-Item -LiteralPath $directory.FullName -Force
-+    }
-+    Remove-Item -LiteralPath $manifestPath -Force
-+    Remove-Item -LiteralPath $markerPath -Force
-+    Remove-Item -LiteralPath $Path -Force
-+}
-+
-+function Remove-HerdrRecoverableUninstallTransaction {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$Path,
-+        [Parameter(Mandatory = $true)][string]$InstallRoot
-+    )
-+
-+    Assert-HerdrRegularDirectory -Path $Path
-+    $entries = @(Get-ChildItem -LiteralPath $Path -Force)
-+    if (Remove-HerdrEmptyTransactionShell -Path $Path -Entries $entries) {
-+        return
-+    }
-+    $cleanupNew = Join-Path $Path "cleanup.manifest.new"
-+    if (Test-Path -LiteralPath $cleanupNew) {
-+        Assert-HerdrRegularFile -Path $cleanupNew
-+        Remove-Item -LiteralPath $cleanupNew -Force
-+    }
-+    if (Test-Path -LiteralPath (Join-Path $Path "cleanup.manifest")) {
-+        Remove-HerdrUninstallTransactionOwnedFiles -Path $Path -InstallRoot $InstallRoot
-+    } else {
-+        Remove-HerdrUninstallTransaction -Path $Path -InstallRoot $InstallRoot
-+    }
-+}
-+
-+function Complete-HerdrDeadUninstallTransactions {
-+    param(
-+        [Parameter(Mandatory = $true)][string]$InstallRoot,
-+        [int]$LockTimeoutMilliseconds = 30000
-+    )
-+
-+    $transactions = @(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall")
-+    if ($transactions.Count -eq 0) {
-+        return $false
-+    }
-+
-+    $managedRoot = $false
-+    if (Test-Path -LiteralPath $InstallRoot) {
-+        try {
-+            Assert-HerdrManagedRoot -InstallRoot $InstallRoot
-+            $managedRoot = $true
-+        } catch {
-+            $managedRoot = $false
-+        }
-+    }
-+    if ($managedRoot -or -not (Test-Path -LiteralPath $InstallRoot)) {
-+        $processRoots = if ($managedRoot) { $transactions } else { @($InstallRoot) + $transactions }
-+        $processes = @(Get-HerdrProcessSnapshot)
-+        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots $processRoots) {
-+            throw "A process from the interrupted Herdr uninstall is still active. Close it before running setup again."
-+        }
-+        foreach ($path in $transactions) {
-+            Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
-+        }
-+        return (-not $managedRoot)
-+    }
-+
-+    $installManifestText = $null
-+    $installManifest = $null
-+    foreach ($path in $transactions) {
-+        $candidatePath = Join-Path $path "root.manifest"
-+        if (-not (Test-Path -LiteralPath $candidatePath)) {
-+            continue
-+        }
-+        Assert-HerdrRegularFile -Path $candidatePath
-+        $candidateText = Read-HerdrStrictUtf8 -Path $candidatePath
-+        [void](Read-HerdrInstallManifestFile -Path $candidatePath)
-+        if ($null -eq $installManifestText) {
-+            $installManifestText = $candidateText
-+            $installManifest = Read-HerdrInstallManifestFile -Path $candidatePath
-+        } elseif ($candidateText -cne $installManifestText) {
-+            throw "Interrupted uninstall transactions disagree about managed-root ownership."
-+        }
-+    }
-+    if ($null -eq $installManifestText) {
-+        throw "Interrupted uninstall has no install manifest to validate the remaining managed files."
-+    }
-+
-+    Assert-HerdrInterruptedUninstallRoot -InstallRoot $InstallRoot -InstallManifestText $installManifestText -InstallManifest $installManifest
-+    $stateDir = Join-Path $InstallRoot "state"
-+    $coordination = $null
-+    if (Test-Path -LiteralPath $stateDir) {
-+        $coordination = Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock") -TimeoutMilliseconds $LockTimeoutMilliseconds
-+    }
-+    try {
-+        # Holding the launcher gate closes the check/delete race: no new launch
-+        # can start after process and lease inspection but before bin is moved.
-+        Assert-HerdrInterruptedUninstallRoot -InstallRoot $InstallRoot -InstallManifestText $installManifestText -InstallManifest $installManifest
-+        $processes = @(Get-HerdrProcessSnapshot)
-+        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots (@($InstallRoot) + $transactions)) {
-+            throw "A process from the interrupted Herdr uninstall is still active. Close it before running setup again."
-+        }
-+        $leasesDir = Join-Path $stateDir "leases"
-+        if (Test-Path -LiteralPath $leasesDir) {
-+            $leaseStatus = Get-HerdrLeaseStatus -LeasesDir $leasesDir
-+            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
-+                throw "Herdr is still active. Close all managed sessions before setup recovers the interrupted uninstall."
-+            }
-+        }
-+
-+        foreach ($path in $transactions) {
-+            $entries = @(Get-ChildItem -LiteralPath $path -Force)
-+            if ($entries.Count -eq 0 -or
-+                ($entries.Count -eq 1 -and $entries[0].Name -ceq $script:TransactionMarkerName -and -not $entries[0].PSIsContainer)) {
-+                continue
-+            }
-+            $cleanupNew = Join-Path $path "cleanup.manifest.new"
-+            if (Test-Path -LiteralPath $cleanupNew) {
-+                Assert-HerdrRegularFile -Path $cleanupNew
-+                Remove-Item -LiteralPath $cleanupNew -Force
-+            }
-+            if (Test-Path -LiteralPath (Join-Path $path "cleanup.manifest")) {
-+                Assert-HerdrPartialUninstallTransaction -Path $path -InstallRoot $InstallRoot
-+            } else {
-+                Assert-HerdrUninstallTransaction -Path $path -InstallRoot $InstallRoot
-+            }
-+        }
-+
-+        $recovery = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
-+        Write-HerdrDurableText -Path (Join-Path $recovery.Path "root.manifest") -Text $installManifestText
-+        foreach ($path in $transactions) {
-+            Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
-+        }
-+        Assert-HerdrInterruptedUninstallRoot -InstallRoot $InstallRoot -InstallManifestText $installManifestText -InstallManifest $installManifest
-+        foreach ($name in @("bin", "runtime")) {
-+            $source = Join-Path $InstallRoot $name
-+            if (Test-Path -LiteralPath $source) {
-+                [IO.Directory]::Move($source, (Join-Path $recovery.Path $name))
-+            }
-+        }
-+        Remove-HerdrUninstallTransaction -Path $recovery.Path -InstallRoot $InstallRoot
-+    } finally {
-+        if ($null -ne $coordination) {
-+            $coordination.Dispose()
-+        }
-+    }
-+
-+    # No launcher path remains after the gated move, so exact validated residual
-+    # metadata can now be removed without allowing a new managed launch.
-+    if (Test-Path -LiteralPath $stateDir) {
-+        Remove-HerdrValidatedDirectory -Path $stateDir
-+    }
-+    Remove-HerdrTerminalUninstallFiles -InstallRoot $InstallRoot
-+    return $true
 +}
 +
 +function Test-HerdrLegacyLauncherHop {
@@ -2454,6 +2010,56 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    }
 +}
 +
++function Remove-HerdrCurrentRootForConvergence {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallRoot,
++        [int]$LockTimeoutMilliseconds = 30000,
++        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
++    )
++
++    if (-not (Test-Path -LiteralPath $InstallRoot)) {
++        return
++    }
++    Assert-HerdrRegularDirectory -Path $InstallRoot
++    [void](Get-HerdrSafeTreeEntries -Root $InstallRoot)
++
++    $stateDir = Join-Path $InstallRoot "state"
++    $coordination = $null
++    if (Test-Path -LiteralPath $stateDir) {
++        Assert-HerdrRegularDirectory -Path $stateDir
++        $coordination = Open-HerdrShareModeLock `
++            -Path (Join-Path $stateDir "launcher.lock") `
++            -TimeoutMilliseconds $LockTimeoutMilliseconds
++    }
++    try {
++        [void](Get-HerdrSafeTreeEntries -Root $InstallRoot)
++        $leasesDir = Join-Path $stateDir "leases"
++        if (Test-Path -LiteralPath $leasesDir) {
++            $leaseStatus = Get-HerdrLeaseStatus -LeasesDir $leasesDir
++            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
++                throw "Herdr is still active. Close all managed sessions before continuing."
++            }
++        }
++        $processes = @(& $ProcessProvider)
++        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots @($InstallRoot)) {
++            throw "A process from the managed Herdr install tree is still active."
++        }
++        foreach ($name in @("bin", "runtime")) {
++            $path = Join-Path $InstallRoot $name
++            if (Test-Path -LiteralPath $path) {
++                Remove-HerdrValidatedDirectory -Path $path
++            }
++        }
++    } finally {
++        if ($null -ne $coordination) {
++            $coordination.Dispose()
++        }
++    }
++    if (Test-Path -LiteralPath $InstallRoot) {
++        Remove-HerdrValidatedDirectory -Path $InstallRoot
++    }
++}
++
 +function Remove-HerdrStaleLeases {
 +    param([Parameter(Mandatory = $true)][object]$LeaseStatus)
 +
@@ -2473,15 +2079,15 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    )
 +
 +    Assert-HerdrRuntimeDirectory -Path $Path -ExpectedBuildId $BuildId
-+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    $staging = New-HerdrStagingDirectory -Kind "update" -InstallRoot $InstallRoot
 +    $moved = $false
 +    try {
-+        [IO.Directory]::Move($Path, (Join-Path $transaction.Path "runtime"))
++        [IO.Directory]::Move($Path, (Join-Path $staging.Path "runtime"))
 +        $moved = $true
-+        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +    } finally {
-+        if (-not $moved -and (Test-Path -LiteralPath $transaction.Path)) {
-+            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        if (-not $moved -and (Test-Path -LiteralPath $staging.Path)) {
++            Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +        }
 +    }
 +}
@@ -2557,19 +2163,19 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        Remove-Item -LiteralPath $replacement -Force
 +    }
 +    Copy-HerdrDurableFile -Source $pending.Path -Destination $replacement
-+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
-+    $backup = Join-Path $transaction.Path ("launcher.backup." + [Guid]::NewGuid().ToString("N"))
++    $staging = New-HerdrStagingDirectory -Kind "update" -InstallRoot $InstallRoot
++    $backup = Join-Path $staging.Path ("launcher.backup." + [Guid]::NewGuid().ToString("N"))
 +    try {
 +        [IO.File]::Replace($replacement, $launcher, $backup)
 +    } catch [IO.IOException] {
 +        if (Test-Path -LiteralPath $replacement) {
 +            Remove-Item -LiteralPath $replacement -Force
 +        }
-+        Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +        return $false
 +    }
 +    Remove-Item -LiteralPath $backup -Force
-+    Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++    Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +    if ((Get-HerdrSha256 -Path $launcher) -cne $pending.Sha256) {
 +        throw "Published managed launcher does not match its staged SHA-256: $launcher"
 +    }
@@ -2626,7 +2232,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +            return [PSCustomObject]@{ Status = "Missing"; LauncherUpdated = $false }
 +        }
 +        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
-+        Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
++        Remove-HerdrStaleStagingDirectories -InstallRoot $InstallRoot
 +        if ((Get-HerdrRootKind -InstallRoot $InstallRoot) -ne "Managed") {
 +            return [PSCustomObject]@{ Status = "Deferred"; LauncherUpdated = $false }
 +        }
@@ -2675,13 +2281,13 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    Assert-HerdrManagedRoot -InstallRoot $Destination
 +}
 +
-+function Publish-HerdrFreshTransaction {
++function Publish-HerdrFreshStaging {
 +    param(
-+        [Parameter(Mandatory = $true)][object]$Transaction,
++        [Parameter(Mandatory = $true)][object]$Staging,
 +        [Parameter(Mandatory = $true)][string]$InstallRoot
 +    )
 +
-+    $stagedRoot = Join-Path $Transaction.Path "root"
++    $stagedRoot = Join-Path $Staging.Path "root"
 +    Assert-HerdrManagedRoot -InstallRoot $stagedRoot
 +    if (Test-Path -LiteralPath $InstallRoot) {
 +        throw "Herdr install root appeared before fresh publication."
@@ -2704,11 +2310,11 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        [int]$LockTimeoutMilliseconds = 30000
 +    )
 +
-+    $transaction = New-HerdrTransaction -Kind "update" -InstallRoot $InstallRoot
++    $staging = New-HerdrStagingDirectory -Kind "update" -InstallRoot $InstallRoot
 +    try {
-+        $stagedRuntime = Join-Path $transaction.Path "runtime"
++        $stagedRuntime = Join-Path $staging.Path "runtime"
 +        New-HerdrRuntimeTree -Destination $stagedRuntime -StageDir $StageDir -BuildId $BuildId
-+        $metadata = Join-Path $transaction.Path "metadata"
++        $metadata = Join-Path $staging.Path "metadata"
 +        New-Item -ItemType Directory -Path $metadata | Out-Null
 +        Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $metadata "installer-helper.ps1")
 +        Copy-HerdrDurableFile -Source $UninstallRunnerPath -Destination (Join-Path $metadata $script:UninstallRunnerName)
@@ -2733,9 +2339,9 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +                [IO.Directory]::Move($stagedRuntime, $runtimeDestination)
 +            }
 +
-+            Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
-+            Publish-HerdrStagedFile -Source (Join-Path $metadata $script:UninstallRunnerName) -Destination (Join-Path $InstallRoot $script:UninstallRunnerName) -BackupDir $transaction.Path
-+            Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
++            Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $staging.Path
++            Publish-HerdrStagedFile -Source (Join-Path $metadata $script:UninstallRunnerName) -Destination (Join-Path $InstallRoot $script:UninstallRunnerName) -BackupDir $staging.Path
++            Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $staging.Path
 +            [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath -BuildId $BuildId)
 +
 +            $activePath = Join-Path $stateDir "active"
@@ -2745,27 +2351,27 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +                if (Test-Path -LiteralPath $pendingPath) {
 +                    Remove-Item -LiteralPath $pendingPath -Force
 +                }
-+                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $staging.Path
 +                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +                return [PSCustomObject]@{ Status = "AlreadyActive"; BuildId = $BuildId }
 +            }
-+            Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $transaction.Path
++            Publish-HerdrStagedFile -Source (Join-Path $metadata "pending") -Destination $pendingPath -BackupDir $staging.Path
 +            $leaseStatus = Get-HerdrLeaseStatus -LeasesDir (Join-Path $stateDir "leases")
 +            if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
-+                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++                Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $staging.Path
 +                [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +                Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +                return [PSCustomObject]@{ Status = "Pending"; BuildId = $BuildId }
 +            }
 +            Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
-+            $activeBackup = Join-Path $transaction.Path ("active.backup." + [Guid]::NewGuid().ToString("N"))
++            $activeBackup = Join-Path $staging.Path ("active.backup." + [Guid]::NewGuid().ToString("N"))
 +            [IO.File]::Replace($pendingPath, $activePath, $activeBackup)
 +            Remove-Item -LiteralPath $activeBackup -Force
 +            if ((Read-HerdrPointer -Path $activePath) -cne $BuildId -or (Test-Path -LiteralPath $pendingPath)) {
 +                throw "Atomic pending activation did not publish the expected active pointer."
 +            }
-+            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $transaction.Path
++            Publish-HerdrStagedFile -Source (Join-Path $metadata "install.manifest") -Destination (Join-Path $stateDir "install.manifest") -BackupDir $staging.Path
 +            [void](Invoke-HerdrMaintenanceLocked -InstallRoot $InstallRoot)
 +            Set-HerdrPackageManagerMarker -StateDir $stateDir -InstallManager $InstallManager
 +            return [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
@@ -2773,8 +2379,8 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +            $coordination.Dispose()
 +        }
 +    } finally {
-+        if (Test-Path -LiteralPath $transaction.Path) {
-+            Remove-HerdrTransaction -Path $transaction.Path -Kind "update" -InstallRoot $InstallRoot
++        if (Test-Path -LiteralPath $staging.Path) {
++            Remove-HerdrStagingDirectory -Path $staging.Path -Kind "update" -InstallRoot $InstallRoot -BestEffort
 +        }
 +    }
 +}
@@ -2795,7 +2401,9 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        [Parameter(Mandatory = $true)][string]$DisplayVersion,
 +        [Parameter(Mandatory = $true)][string]$NumericVersion,
 +        [ValidateSet("Direct", "WinGet")][string]$InstallManager = "Direct",
-+        [int]$LockTimeoutMilliseconds = 30000
++        [int]$LockTimeoutMilliseconds = 30000,
++        [bool]$AllowCurrentRootConvergence = $false,
++        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
 +    )
 +
 +    Assert-HerdrVersionIdentity -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion -BuildId $BuildId
@@ -2820,18 +2428,44 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        Assert-HerdrSkillTarget -SkillsRoot $ClaudeSkillsRoot
 +    }
 +
-+    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-+    [void](Complete-HerdrDeadUninstallTransactions -InstallRoot $InstallRoot -LockTimeoutMilliseconds $LockTimeoutMilliseconds)
++    $effectiveInstallManager = $InstallManager
++    $packageManagerMarker = Join-Path $InstallRoot "state\package-manager"
++    if (Test-Path -LiteralPath $packageManagerMarker) {
++        try {
++            Assert-HerdrPackageManagerMarker -StateDir (Split-Path -Parent $packageManagerMarker)
++            $effectiveInstallManager = "WinGet"
++        } catch {
++            # Normal layout validation or direct convergence owns malformed
++            # current-root state. Preserve only positively validated WinGet
++            # ownership across a direct rebuild.
++        }
++    }
++
++    Remove-HerdrStaleStagingDirectories -InstallRoot $InstallRoot
 +
 +    if (Test-HerdrLegacyLauncherHop -InstallRoot $InstallRoot) {
 +        throw "The existing Herdr installation is not compatible with this setup. Uninstall the existing Herdr or Herdr Win entry from Windows Installed Apps, then run setup again. Setup preserved: $InstallRoot"
 +    }
 +
-+    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
-+        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
-+        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++    try {
++        if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
++            (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
++            Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++        }
++        $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
++    } catch {
++        if (-not $AllowCurrentRootConvergence) {
++            throw
++        }
++        [Console]::Out.WriteLine(
++            "Warning: The registered current Herdr root could not use normal repair and will be rebuilt directly. $($_.Exception.Message)"
++        )
++        Remove-HerdrCurrentRootForConvergence `
++            -InstallRoot $InstallRoot `
++            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
++            -ProcessProvider $ProcessProvider
++        $rootKind = "New"
 +    }
-+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
 +    if ($rootKind -eq "UninstallRetry") {
 +        $recoveryClaudeRoots = if ([string]::IsNullOrWhiteSpace($ClaudeSkillsRoot)) { @() } else { @($ClaudeSkillsRoot) }
 +        [void](Invoke-HerdrUninstallLayout `
@@ -2840,7 +2474,9 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +            -ClaudeSkillsRoots $recoveryClaudeRoots `
 +            -KnownSkillHashes $knownSkillHashes `
 +            -SkillDisposition Keep `
-+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds)
++            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
++            -AllowCurrentRootConvergence $true `
++            -ProcessProvider $ProcessProvider)
 +        $rootKind = "New"
 +    } elseif ($rootKind -eq "UninstallResidual") {
 +        Remove-HerdrUninstallResidual -InstallRoot $InstallRoot
@@ -2857,12 +2493,12 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
-+            -InstallManager $InstallManager `
++            -InstallManager $effectiveInstallManager `
 +            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
 +    } else {
-+        $transaction = New-HerdrTransaction -Kind "fresh" -InstallRoot $InstallRoot
++        $staging = New-HerdrStagingDirectory -Kind "fresh" -InstallRoot $InstallRoot
 +        try {
-+            $stagedRoot = Join-Path $transaction.Path "root"
++            $stagedRoot = Join-Path $staging.Path "root"
 +            New-HerdrManagedRootTree `
 +                -Destination $stagedRoot `
 +                -StageDir $StageDir `
@@ -2873,14 +2509,14 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +                -BuildId $BuildId `
 +                -DisplayVersion $DisplayVersion `
 +                -NumericVersion $NumericVersion `
-+                -InstallManager $InstallManager
-+            Publish-HerdrFreshTransaction `
-+                -Transaction $transaction `
++                -InstallManager $effectiveInstallManager
++            Publish-HerdrFreshStaging `
++                -Staging $staging `
 +                -InstallRoot $InstallRoot
 +            $result = [PSCustomObject]@{ Status = "Activated"; BuildId = $BuildId }
 +        } finally {
-+            if (Test-Path -LiteralPath $transaction.Path) {
-+                Remove-HerdrTransaction -Path $transaction.Path -Kind "fresh" -InstallRoot $InstallRoot
++            if (Test-Path -LiteralPath $staging.Path) {
++                Remove-HerdrStagingDirectory -Path $staging.Path -Kind "fresh" -InstallRoot $InstallRoot -BestEffort
 +            }
 +        }
 +    }
@@ -3265,6 +2901,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
++        $allowCurrentRootConvergence = Test-Path -LiteralPath $script:ArpKey
 +        $legacyQuietUninstall = Test-HerdrLegacyQuietUninstallRegistration -InstallRoot $InstallRoot
 +        $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
 +        $agentSkillsRoot = Get-HerdrAgentSkillsRoot
@@ -3283,7 +2920,8 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +            -BuildId $BuildId `
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
-+            -InstallManager $InstallManager
++            -InstallManager $InstallManager `
++            -AllowCurrentRootConvergence $allowCurrentRootConvergence
 +        if ($legacyQuietUninstall) {
 +            Set-HerdrArpRegistration `
 +                -InstallRoot $InstallRoot `
@@ -3310,6 +2948,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        [Parameter(Mandatory = $true)][string[]]$KnownSkillHashes,
 +        [Parameter(Mandatory = $true)][ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition,
 +        [int]$LockTimeoutMilliseconds = 30000,
++        [bool]$AllowCurrentRootConvergence = $false,
 +        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot },
 +        [string]$UninstallFault = "",
 +        [string]$UninstallFaultMarkerPrefix = "herdr"
@@ -3319,25 +2958,45 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    if (Test-Path -LiteralPath $InstallRoot) {
 +        Assert-HerdrRegularDirectory -Path $InstallRoot
 +    }
-+    if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
-+        (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
-+        Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
-+    }
-+    Remove-HerdrRecoverableInstallTransactions -InstallRoot $InstallRoot
-+    [void](Complete-HerdrDeadUninstallTransactions -InstallRoot $InstallRoot -LockTimeoutMilliseconds $LockTimeoutMilliseconds)
++    Remove-HerdrStaleStagingDirectories -InstallRoot $InstallRoot
 +    if (-not (Test-Path -LiteralPath $InstallRoot)) {
 +        return @(
-+            Remove-HerdrSkillCopies `
++            Remove-HerdrSkillCopiesBestEffort `
 +                -AgentSkillsRoot $AgentSkillsRoot `
 +                -ClaudeSkillsRoots $ClaudeSkillsRoots `
 +                -KnownHashes $KnownSkillHashes `
 +                -Disposition $SkillDisposition
 +        )
 +    }
-+    $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
++    try {
++        if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
++            (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
++            Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
++        }
++        $rootKind = Get-HerdrRootKind -InstallRoot $InstallRoot
++    } catch {
++        if (-not $AllowCurrentRootConvergence) {
++            throw
++        }
++        [Console]::Out.WriteLine(
++            "Warning: The registered current Herdr root could not use normal uninstall recovery and will be removed directly. $($_.Exception.Message)"
++        )
++        Remove-HerdrCurrentRootForConvergence `
++            -InstallRoot $InstallRoot `
++            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
++            -ProcessProvider $ProcessProvider
++        $preservedSkillPaths = @(
++            Remove-HerdrSkillCopiesBestEffort `
++                -AgentSkillsRoot $AgentSkillsRoot `
++                -ClaudeSkillsRoots $ClaudeSkillsRoots `
++                -KnownHashes $KnownSkillHashes `
++                -Disposition $SkillDisposition
++        )
++        return $preservedSkillPaths
++    }
 +    if ($rootKind -eq "UninstallResidual") {
 +        $preservedSkillPaths = @(
-+            Remove-HerdrSkillCopies `
++            Remove-HerdrSkillCopiesBestEffort `
 +                -AgentSkillsRoot $AgentSkillsRoot `
 +                -ClaudeSkillsRoots $ClaudeSkillsRoots `
 +                -KnownHashes $KnownSkillHashes `
@@ -3368,46 +3027,30 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        if (@($leaseStatus.Active).Count -gt 0 -or @($leaseStatus.Ambiguous).Count -gt 0) {
 +            throw "Herdr is still active. Close all managed sessions before uninstalling."
 +        }
-+        $uninstallTransactions = @(Get-HerdrTransactions -InstallRoot $InstallRoot -Kind "uninstall")
-+        $processRoots = @($InstallRoot) + $uninstallTransactions
 +        $processes = @(& $ProcessProvider)
-+        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots $processRoots) {
++        if (Test-HerdrProcessWithinRoots -Processes $processes -Roots @($InstallRoot)) {
 +            throw "A process from the managed Herdr install tree is still active."
-+        }
-+        foreach ($path in $uninstallTransactions) {
-+            Remove-HerdrRecoverableUninstallTransaction -Path $path -InstallRoot $InstallRoot
 +        }
 +
 +        $preservedSkillPaths = @(
-+            Remove-HerdrSkillCopies `
++            Remove-HerdrSkillCopiesBestEffort `
 +                -AgentSkillsRoot $AgentSkillsRoot `
 +                -ClaudeSkillsRoots $ClaudeSkillsRoots `
 +                -KnownHashes $KnownSkillHashes `
 +                -Disposition $SkillDisposition
 +        )
-+        $installManifestPath = Join-Path $stateDir "install.manifest"
-+
-+        $transaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $InstallRoot
-+        if (Test-Path -LiteralPath $installManifestPath) {
-+            Copy-HerdrDurableFile -Source $installManifestPath -Destination (Join-Path $transaction.Path "root.manifest")
++        $uninstallPending = Join-Path $stateDir "uninstall.pending"
++        if (-not (Test-Path -LiteralPath $uninstallPending)) {
++            Write-HerdrDurableText -Path $uninstallPending -Text $script:UninstallMarkerText
++        } else {
++            Assert-HerdrRegularFile -Path $uninstallPending
 +        }
-+        if (-not (Test-Path -LiteralPath (Join-Path $stateDir "uninstall.pending"))) {
-+            Write-HerdrDurableText -Path (Join-Path $transaction.Path "uninstall.pending") -Text $script:UninstallMarkerText
-+            Publish-HerdrStagedFile `
-+                -Source (Join-Path $transaction.Path "uninstall.pending") `
-+                -Destination (Join-Path $stateDir "uninstall.pending") `
-+                -BackupDir $transaction.Path
++        foreach ($name in @("bin", "runtime")) {
++            $path = Join-Path $InstallRoot $name
++            if (Test-Path -LiteralPath $path) {
++                Remove-HerdrValidatedDirectory -Path $path
++            }
 +        }
-+        if (Test-Path -LiteralPath (Join-Path $InstallRoot "bin")) {
-+            [IO.Directory]::Move((Join-Path $InstallRoot "bin"), (Join-Path $transaction.Path "bin"))
-+        }
-+        if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime")) {
-+            [IO.Directory]::Move((Join-Path $InstallRoot "runtime"), (Join-Path $transaction.Path "runtime"))
-+        }
-+        Assert-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
-+        Remove-HerdrUninstallTransaction -Path $transaction.Path -InstallRoot $InstallRoot
-+
-+        Remove-HerdrStaleLeases -LeaseStatus $leaseStatus
 +        $pendingLauncher = Get-HerdrPendingLauncher -StateDir $stateDir
 +        if ($null -ne $pendingLauncher) {
 +            Remove-Item -LiteralPath $pendingLauncher.Path -Force
@@ -3420,7 +3063,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +        }
 +        $leasesDir = Join-Path $stateDir "leases"
 +        if (Test-Path -LiteralPath $leasesDir) {
-+            Remove-Item -LiteralPath $leasesDir -Force
++            Remove-HerdrValidatedDirectory -Path $leasesDir
 +        }
 +    } finally {
 +        $coordination.Dispose()
@@ -3449,6 +3092,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
 +        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
++        $allowCurrentRootConvergence = Test-Path -LiteralPath $script:ArpKey
 +        $pathOwned = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot
 +        $preservedSkillPaths = @(
 +            Invoke-HerdrUninstallLayout `
@@ -3457,6 +3101,7 @@ index 0000000000000000000000000000000000000000..c47534da79ec58434c56b9abfe762a46
 +                -ClaudeSkillsRoots (Get-HerdrClaudeSkillsRootsForRemoval) `
 +                -KnownSkillHashes $knownSkillHashes `
 +                -SkillDisposition $SkillDisposition `
++                -AllowCurrentRootConvergence $allowCurrentRootConvergence `
 +                -UninstallFault $UninstallFault `
 +                -UninstallFaultMarkerPrefix $UninstallFaultMarkerPrefix
 +        )
@@ -56782,10 +56427,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..554ac324422e1d5936589f95531f94bd068777ea
+index 0000000000000000000000000000000000000000..26c0f4500e99947ea4ce6eecf7f26284157d1194
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,888 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -57031,36 +56676,56 @@ index 0000000000000000000000000000000000000000..554ac324422e1d5936589f95531f94bd
 +        self.assertIn("-ProductName $ProductName", fault_test)
 +        self.assertIn("CLAUDE_CONFIG_DIR", fault_test)
 +
-+    def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
++    def test_private_staging_never_overrides_terminal_user_intent(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
 +        lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
-+        self.assertIn('New-HerdrTransaction -Kind "fresh"', helper)
-+        self.assertIn('New-HerdrTransaction -Kind "update"', helper)
-+        self.assertIn('New-HerdrTransaction -Kind "uninstall"', helper)
++        self.assertIn('New-HerdrStagingDirectory -Kind "fresh"', helper)
++        self.assertIn('New-HerdrStagingDirectory -Kind "update"', helper)
++        self.assertNotIn('New-HerdrStagingDirectory -Kind "uninstall"', helper)
 +        self.assertIn("[IO.Directory]::Move($stagedRoot, $InstallRoot)", helper)
 +        self.assertNotIn('Join-Path $RuntimeRoot (".staging.', helper)
 +        self.assertIn("uninstall.pending", helper)
 +        self.assertIn("Assert-HerdrUninstallRetryRoot", helper)
-+        self.assertIn("Complete-HerdrDeadUninstallTransactions", helper)
++        self.assertIn("Remove-HerdrStaleStagingDirectories", helper)
++        self.assertIn("Remove-HerdrCurrentRootForConvergence", helper)
++        self.assertIn('$effectiveInstallManager = "WinGet"', helper)
++        self.assertIn("-InstallManager $effectiveInstallManager", helper)
 +        self.assertIn("Remove-HerdrUninstallResidual", helper)
-+        self.assertNotIn(
-+            "A previous Herdr uninstall transaction is incomplete", helper
-+        )
-+        recovery = helper[
-+            helper.index("function Complete-HerdrDeadUninstallTransactions {") : helper.index(
-+                "function Test-HerdrLegacyLauncherHop {"
++        self.assertNotIn("cleanup.manifest", helper)
++        self.assertNotIn("root.manifest", helper)
++        self.assertNotIn("New-HerdrTransaction", helper)
++        uninstall = helper[
++            helper.index("function Invoke-HerdrUninstallLayout {") : helper.index(
++                "function Invoke-HerdrUninstall {"
 +            )
 +        ]
-+        gate = recovery.index('Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock")')
-+        process_check = recovery.index("$processes = @(Get-HerdrProcessSnapshot)", gate)
-+        bin_move = recovery.index('[IO.Directory]::Move($source', process_check)
-+        gate_release = recovery.index("$coordination.Dispose()", bin_move)
++        gate = uninstall.index('Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock")')
++        process_check = uninstall.index("$processes = @(& $ProcessProvider)", gate)
++        marker = uninstall.index("Write-HerdrDurableText -Path $uninstallPending", process_check)
++        bin_remove = uninstall.index('foreach ($name in @("bin", "runtime"))', marker)
++        gate_release = uninstall.index("$coordination.Dispose()", bin_remove)
 +        self.assertLess(gate, process_check)
-+        self.assertLess(process_check, bin_move)
-+        self.assertLess(bin_move, gate_release)
-+        self.assertIn("Dead uninstall transaction survived setup recovery", lifecycle)
++        self.assertLess(process_check, marker)
++        self.assertLess(marker, bin_remove)
++        self.assertLess(bin_remove, gate_release)
++        direct_uninstall = uninstall[
++            uninstall.index("could not use normal uninstall recovery") : uninstall.index(
++                "if ($rootKind -eq \"UninstallResidual\")"
++            )
++        ]
++        self.assertLess(
++            direct_uninstall.index("Remove-HerdrCurrentRootForConvergence"),
++            direct_uninstall.index("Remove-HerdrSkillCopiesBestEffort"),
++        )
++        self.assertIn("Malformed private staging blocked direct installation", lifecycle)
++        self.assertIn("Direct setup over a WinGet root lost package-manager ownership", lifecycle)
++        self.assertIn("Direct uninstall convergence retained the partial current root", lifecycle)
++        self.assertIn("Direct uninstall bypassed launcher-lock contention", lifecycle)
++        self.assertIn("Direct uninstall bypassed an active runtime lease", lifecycle)
++        self.assertIn("Direct uninstall bypassed an active managed process", lifecycle)
 +        self.assertIn("Exact uninstall residual did not recover", lifecycle)
-+        self.assertIn("Uninstall retained its dead transaction", lifecycle)
++        self.assertIn("Pending-marker retry did not remove the application", lifecycle)
++        self.assertIn("Locked skill residual blocked application uninstall", lifecycle)
 +
 +    def test_persistent_sibling_lock_serializes_outer_lifecycle(self) -> None:
 +        helper = HELPER.read_text(encoding="utf-8")
@@ -57479,7 +57144,7 @@ index 0000000000000000000000000000000000000000..554ac324422e1d5936589f95531f94bd
 +        helper = HELPER.read_text(encoding="utf-8")
 +        cleanup = helper[
 +            helper.index("function Assert-HerdrUninstallCleanupRoot {") : helper.index(
-+                "function Assert-HerdrInterruptedUninstallRoot {"
++                "function New-HerdrStagingDirectory {"
 +            )
 +        ]
 +        for exact_name in (
@@ -58516,10 +58181,10 @@ index 0000000000000000000000000000000000000000..fad04ed6f6f40a9cc2d2e6c5323bb13b
 +}
 diff --git a/scripts/windows_installer_test.ps1 b/scripts/windows_installer_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2e50bcc80
+index 0000000000000000000000000000000000000000..d141e2e14c2ed7cb1f93bde7bed598236aad19ec
 --- /dev/null
 +++ b/scripts/windows_installer_test.ps1
-@@ -0,0 +1,1059 @@
+@@ -0,0 +1,1078 @@
 +[CmdletBinding()]
 +param()
 +
@@ -58640,7 +58305,9 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
 +        [string]$AgentSkillsRoot = $script:TestAgentSkillsRoot,
 +        [string]$ClaudeSkillsRoot,
-+        [int]$LockTimeoutMilliseconds = 3000
++        [int]$LockTimeoutMilliseconds = 3000,
++        [bool]$AllowCurrentRootConvergence = $false,
++        [scriptblock]$ProcessProvider = { Get-HerdrProcessSnapshot }
 +    )
 +    return Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
 +        Install-HerdrLayout `
@@ -58658,7 +58325,9 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +            -DisplayVersion $DisplayVersion `
 +            -NumericVersion $NumericVersion `
 +            -InstallManager $InstallManager `
-+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
++            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
++            -AllowCurrentRootConvergence $AllowCurrentRootConvergence `
++            -ProcessProvider $ProcessProvider
 +    }
 +}
 +
@@ -58670,7 +58339,8 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +        [string]$SkillHashManifestPath = $script:TestSkillHashManifest,
 +        [ValidateSet("Keep", "Auto", "Remove")][string]$SkillDisposition = "Auto",
 +        [scriptblock]$ProcessProvider = { @() },
-+        [int]$LockTimeoutMilliseconds = 3000
++        [int]$LockTimeoutMilliseconds = 3000,
++        [bool]$AllowCurrentRootConvergence = $false
 +    )
 +    $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath)
 +    Invoke-HerdrLifecycleOperation -InstallRoot $Root -TimeoutMilliseconds $LockTimeoutMilliseconds -Operation {
@@ -58681,7 +58351,8 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +            -KnownSkillHashes $knownSkillHashes `
 +            -SkillDisposition $SkillDisposition `
 +            -ProcessProvider $ProcessProvider `
-+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
++            -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
++            -AllowCurrentRootConvergence $AllowCurrentRootConvergence
 +    }
 +}
 +
@@ -58710,7 +58381,7 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    return Start-Process powershell.exe -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded) -PassThru -WindowStyle Hidden
 +}
 +
-+function Start-TestLifecycleTransactionOwner {
++function Start-TestLifecycleStagingOwner {
 +    param([string]$HelperPath, [string]$InstallRoot, [string]$ReadyPath, [int]$Seconds = 3)
 +    $escapedHelper = $HelperPath.Replace("'", "''")
 +    $escapedRoot = $InstallRoot.Replace("'", "''")
@@ -58719,10 +58390,10 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +`$ErrorActionPreference = 'Stop'
 +. '$escapedHelper'
 +Invoke-HerdrLifecycleOperation -InstallRoot '$escapedRoot' -TimeoutMilliseconds 3000 -Operation {
-+    `$transaction = New-HerdrTransaction -Kind 'fresh' -InstallRoot '$escapedRoot'
-+    New-Item -ItemType Directory -Path (Join-Path `$transaction.Path 'root') | Out-Null
-+    Write-HerdrDurableText -Path (Join-Path `$transaction.Path 'root\live.txt') -Text 'live'
-+    [IO.File]::WriteAllText('$escapedReady', `$transaction.Path)
++    `$staging = New-HerdrStagingDirectory -Kind 'fresh' -InstallRoot '$escapedRoot'
++    New-Item -ItemType Directory -Path (Join-Path `$staging.Path 'root') | Out-Null
++    Write-HerdrDurableText -Path (Join-Path `$staging.Path 'root\live.txt') -Text 'live'
++    [IO.File]::WriteAllText('$escapedReady', `$staging.Path)
 +    Start-Sleep -Seconds $Seconds
 +}
 +"@
@@ -58795,27 +58466,27 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    Assert-Throws {
 +        Read-HerdrManagedSkillHashes -Path $missingCurrentSkillHashManifest -CurrentSkillPath $script:TestSkillSource
 +    } "current Herdr agent skill hash is absent" "A manifest without the current skill payload was accepted."
-+    # A persistent sibling lifecycle lock protects a live transaction from a
++    # A persistent sibling lifecycle lock protects live staging from a
 +    # second real PowerShell process before any recovery/classification runs.
 +    $concurrencyRoot = Join-Path $tempRoot "concurrent-install"
 +    $concurrencyReady = Join-Path $tempRoot "concurrency-ready"
-+    $transactionOwner = Start-TestLifecycleTransactionOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -ReadyPath $concurrencyReady -Seconds 3
-+    $childProcesses.Add($transactionOwner)
++    $stagingOwner = Start-TestLifecycleStagingOwner -HelperPath $helperPath -InstallRoot $concurrencyRoot -ReadyPath $concurrencyReady -Seconds 3
++    $childProcesses.Add($stagingOwner)
 +    Wait-TestPath -Path $concurrencyReady -TimeoutMilliseconds 15000
-+    $liveTransaction = [IO.File]::ReadAllText($concurrencyReady)
-+    Assert-HerdrTransaction -Path $liveTransaction -Kind "fresh" -InstallRoot $concurrencyRoot
++    $liveStaging = [IO.File]::ReadAllText($concurrencyReady)
++    Assert-HerdrStagingDirectory -Path $liveStaging -Kind "fresh" -InstallRoot $concurrencyRoot
 +    Assert-Throws {
 +        Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 250 -Operation {
-+            Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
++            Remove-HerdrStaleStagingDirectories -InstallRoot $concurrencyRoot
 +        }
-+    } "Timed out after 250 ms" "A second lifecycle invocation entered while the first owned a live transaction."
-+    Assert-True (Test-Path -LiteralPath (Join-Path $liveTransaction "root\live.txt")) "Contending lifecycle invocation deleted a live transaction."
-+    if (-not $transactionOwner.WaitForExit(10000)) { throw "Lifecycle transaction owner did not exit within 10 seconds." }
-+    if ($transactionOwner.ExitCode -ne 0) { throw "Lifecycle transaction owner exited with $($transactionOwner.ExitCode)." }
++    } "Timed out after 250 ms" "A second lifecycle invocation entered while the first owned live staging."
++    Assert-True (Test-Path -LiteralPath (Join-Path $liveStaging "root\live.txt")) "Contending lifecycle invocation deleted live staging."
++    if (-not $stagingOwner.WaitForExit(10000)) { throw "Lifecycle staging owner did not exit within 10 seconds." }
++    if ($stagingOwner.ExitCode -ne 0) { throw "Lifecycle staging owner exited with $($stagingOwner.ExitCode)." }
 +    Invoke-HerdrLifecycleOperation -InstallRoot $concurrencyRoot -TimeoutMilliseconds 3000 -Operation {
-+        Remove-HerdrRecoverableInstallTransactions -InstallRoot $concurrencyRoot
++        Remove-HerdrStaleStagingDirectories -InstallRoot $concurrencyRoot
 +    }
-+    Assert-True (-not (Test-Path -LiteralPath $liveTransaction)) "Completed lifecycle transaction was not recovered after lock release."
++    Assert-True (-not (Test-Path -LiteralPath $liveStaging)) "Completed lifecycle staging was not removed after lock release."
 +    $persistentLifecycleLock = Get-HerdrLifecycleLockPath -InstallRoot $concurrencyRoot
 +    Assert-HerdrRegularFile -Path $persistentLifecycleLock
 +    Assert-Equal (Get-Item -LiteralPath $persistentLifecycleLock).Length ([long]0) "Persistent lifecycle lock is not an empty regular file."
@@ -59053,12 +58724,12 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($pathRegistrySubKey, $false)
 +    }
 +
-+    # A complete fresh tree is built in a sibling transaction and retries clean
-+    # both complete and partial pre-publication artifacts.
++    # A complete fresh tree is built in disposable sibling staging. Stale regular
++    # content is discarded under the lifecycle lock instead of becoming a gate.
 +    $installRoot = Join-Path $tempRoot "managed-install"
 +    $emptyFreshCrash = "$installRoot.installer-fresh.$([Guid]::NewGuid().ToString('N'))"
 +    New-Item -ItemType Directory -Path $emptyFreshCrash | Out-Null
-+    $crashFresh = New-HerdrTransaction -Kind "fresh" -InstallRoot $installRoot
++    $crashFresh = New-HerdrStagingDirectory -Kind "fresh" -InstallRoot $installRoot
 +    New-HerdrManagedRootTree `
 +        -Destination (Join-Path $crashFresh.Path "root") `
 +        -StageDir $stage1 `
@@ -59070,12 +58741,13 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +        -DisplayVersion $display1 `
 +        -NumericVersion $numeric1
 +    Remove-Item -LiteralPath (Join-Path $crashFresh.Path "root\runtime\$id1\herdr.exe") -Force
++    Write-TestFile -Path (Join-Path $crashFresh.Path "stale-private-data.txt") -Text "discard"
 +    Assert-True (-not (Test-Path -LiteralPath $installRoot)) "Fresh staging mutated InstallRoot before publication."
 +    $fresh = Invoke-TestInstall -Root $installRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
 +    Assert-Equal $fresh.Status "Activated" "Fresh install did not activate."
 +    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\package-manager"))) "Direct setup published package-manager ownership."
-+    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty pre-marker transaction was not recovered."
-+    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Fresh crash transaction was not recovered."
++    Assert-True (-not (Test-Path -LiteralPath $emptyFreshCrash)) "Empty stale staging was not removed."
++    Assert-True (-not (Test-Path -LiteralPath $crashFresh.Path)) "Malformed fresh staging blocked installation."
 +    Assert-HerdrManagedRoot -InstallRoot $installRoot
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
@@ -59145,54 +58817,48 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    [IO.File]::WriteAllText((Join-Path $firstRuntime "runtime.manifest"), (Get-HerdrRuntimeManifestText -RuntimeRoot $firstRuntime), $script:Utf8NoBom)
 +    Assert-HerdrRuntimeDirectory -Path $firstRuntime -ExpectedBuildId $id1
 +
-+    # A dead uninstall transaction is recovery evidence, not a permanent setup
-+    # blocker. This reproduces the observed field state: only the exact managed
-+    # bin survives while the sibling transaction retains root.manifest.
-+    $deadUninstallRoot = Join-Path $tempRoot "dead-uninstall-install"
-+    $deadUninstallSkillsRoot = Join-Path $tempRoot "dead-uninstall-agent-skills"
-+    [void](Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallSkillsRoot)
-+    $deadUninstallTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $deadUninstallTransaction.Path "root.manifest")
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "runtime") -Recurse -Force
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "state") -Recurse -Force
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRoot "uninstall.exe") -Force
-+    $recoveredDeadUninstall = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
-+    Assert-Equal $recoveredDeadUninstall.Status "Activated" "Dead uninstall transaction did not recover into a fresh install."
-+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallTransaction.Path)) "Dead uninstall transaction survived setup recovery."
-+    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
-+    Assert-Equal (Read-HerdrPointer -Path (Join-Path $deadUninstallRoot "state\active")) $id2 "Dead uninstall recovery selected the wrong build."
++    # A registered current root that normal layout repair cannot classify converges
++    # directly to the requested complete installation. Private stale staging is
++    # disposable evidence and never becomes the recovery authority.
++    $directRepairRoot = Join-Path $tempRoot "direct-repair-install"
++    $directRepairSkillsRoot = Join-Path $tempRoot "direct-repair-agent-skills"
++    [void](Invoke-TestInstall -Root $directRepairRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $directRepairSkillsRoot -InstallManager WinGet)
++    $staleUninstallStaging = "$directRepairRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
++    Write-TestFile -Path (Join-Path $staleUninstallStaging "malformed-private-state.txt") -Text "discard"
++    Remove-Item -LiteralPath (Join-Path $directRepairRoot "runtime") -Recurse -Force
++    Remove-Item -LiteralPath (Join-Path $directRepairRoot "uninstall.exe") -Force
++    $directlyRepaired = Invoke-TestInstall -Root $directRepairRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $directRepairSkillsRoot -AllowCurrentRootConvergence $true -ProcessProvider { @() }
++    Assert-Equal $directlyRepaired.Status "Activated" "Direct current-root convergence did not install the requested build."
++    Assert-True (-not (Test-Path -LiteralPath $staleUninstallStaging)) "Malformed private staging blocked direct installation."
++    Assert-HerdrManagedRoot -InstallRoot $directRepairRoot
++    Assert-Equal (Read-HerdrPointer -Path (Join-Path $directRepairRoot "state\active")) $id2 "Direct convergence selected the wrong build."
++    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $directRepairRoot "state\package-manager")) $script:PackageManagerMarkerText "Direct setup over a WinGet root lost package-manager ownership."
 +
-+    # Recovery holds the launcher's coordination gate from its final process and
-+    # lease checks until bin is moved out of the install root. A concurrent
-+    # launcher owner therefore blocks recovery without losing transaction state.
-+    $gatedRecoveryRoot = Join-Path $tempRoot "gated-dead-uninstall"
-+    $gatedRecoverySkillsRoot = Join-Path $tempRoot "gated-dead-uninstall-agent-skills"
++    # Direct convergence still holds the existing launcher gate while checking
++    # processes and removing launchable files.
++    $gatedRecoveryRoot = Join-Path $tempRoot "gated-direct-repair"
++    $gatedRecoverySkillsRoot = Join-Path $tempRoot "gated-direct-repair-agent-skills"
 +    [void](Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $gatedRecoverySkillsRoot)
-+    $gatedRecoveryTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $gatedRecoveryRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $gatedRecoveryRoot "state\install.manifest") -Destination (Join-Path $gatedRecoveryTransaction.Path "root.manifest")
 +    Remove-Item -LiteralPath (Join-Path $gatedRecoveryRoot "runtime") -Recurse -Force
-+    $gatedRecoveryReady = Join-Path $tempRoot "gated-dead-uninstall-ready"
++    $gatedRecoveryReady = Join-Path $tempRoot "gated-direct-repair-ready"
 +    $gatedRecoveryOwner = Start-TestSharedFileHolder -Path (Join-Path $gatedRecoveryRoot "state\launcher.lock") -ReadyPath $gatedRecoveryReady -Seconds 2 -ShareMode None
 +    $childProcesses.Add($gatedRecoveryOwner)
 +    Wait-TestPath -Path $gatedRecoveryReady
 +    Assert-Throws {
-+        Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -LockTimeoutMilliseconds 250
-+    } "Timed out after 250 ms.*launcher.lock" "Dead uninstall recovery entered while a launcher owned its coordination gate."
-+    Assert-True (Test-Path -LiteralPath $gatedRecoveryTransaction.Path) "Blocked recovery deleted its transaction."
-+    Assert-True (Test-Path -LiteralPath (Join-Path $gatedRecoveryRoot "bin\herdr.exe")) "Blocked recovery removed its launcher."
-+    if (-not $gatedRecoveryOwner.WaitForExit(10000)) { throw "Gated recovery owner did not exit within 10 seconds." }
-+    $recoveredGatedUninstall = Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot
-+    Assert-Equal $recoveredGatedUninstall.Status "Activated" "Gated dead uninstall did not recover after launcher coordination released."
++        Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -LockTimeoutMilliseconds 250 -AllowCurrentRootConvergence $true -ProcessProvider { @() }
++    } "Timed out after 250 ms.*launcher.lock" "Direct convergence bypassed the launcher coordination gate."
++    Assert-True (Test-Path -LiteralPath (Join-Path $gatedRecoveryRoot "bin\herdr.exe")) "Blocked convergence removed its launcher."
++    if (-not $gatedRecoveryOwner.WaitForExit(10000)) { throw "Gated convergence owner did not exit within 10 seconds." }
++    $recoveredGatedUninstall = Invoke-TestInstall -Root $gatedRecoveryRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $gatedRecoverySkillsRoot -AllowCurrentRootConvergence $true -ProcessProvider { @() }
++    Assert-Equal $recoveredGatedUninstall.Status "Activated" "Direct convergence did not continue after launcher coordination released."
 +    Assert-HerdrManagedRoot -InstallRoot $gatedRecoveryRoot
 +
-+    # A transaction that died before changing a complete managed root is simply
-+    # discarded; setup must preserve the installation and follow normal update.
-+    $preMutationTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRoot "state\install.manifest") -Destination (Join-Path $preMutationTransaction.Path "root.manifest")
-+    $recoveredPreMutation = Invoke-TestInstall -Root $deadUninstallRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $deadUninstallSkillsRoot
-+    Assert-Equal $recoveredPreMutation.Status "AlreadyActive" "Pre-mutation uninstall transaction changed normal setup behavior."
-+    Assert-True (-not (Test-Path -LiteralPath $preMutationTransaction.Path)) "Pre-mutation uninstall transaction survived setup recovery."
-+    Assert-HerdrManagedRoot -InstallRoot $deadUninstallRoot
++    $preMutationStaging = "$directRepairRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
++    Write-TestFile -Path (Join-Path $preMutationStaging "unknown.txt") -Text "discard"
++    $recoveredPreMutation = Invoke-TestInstall -Root $directRepairRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2 -AgentSkillsRoot $directRepairSkillsRoot
++    Assert-Equal $recoveredPreMutation.Status "AlreadyActive" "Stale private staging changed normal setup behavior."
++    Assert-True (-not (Test-Path -LiteralPath $preMutationStaging)) "Stale private staging survived normal setup."
++    Assert-HerdrManagedRoot -InstallRoot $directRepairRoot
 +
 +    # An exact residual left by an older interrupted uninstaller remains
 +    # resumable by setup even though current helpers finalize it under the lock.
@@ -59239,20 +58905,54 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +        Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
 +    }
 +
-+    # The same dead-transaction recovery is shared by uninstall. With no running
-+    # managed process, a partial current install is removed instead of wedging the
-+    # uninstaller on its own abandoned transaction.
-+    $deadUninstallRemovalRoot = Join-Path $tempRoot "dead-uninstall-removal"
-+    $deadUninstallRemovalSkillsRoot = Join-Path $tempRoot "dead-uninstall-removal-agent-skills"
-+    [void](Invoke-TestInstall -Root $deadUninstallRemovalRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $deadUninstallRemovalSkillsRoot)
-+    $deadUninstallRemovalTransaction = New-HerdrTransaction -Kind "uninstall" -InstallRoot $deadUninstallRemovalRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $deadUninstallRemovalRoot "state\install.manifest") -Destination (Join-Path $deadUninstallRemovalTransaction.Path "root.manifest")
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "runtime") -Recurse -Force
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "state") -Recurse -Force
-+    Remove-Item -LiteralPath (Join-Path $deadUninstallRemovalRoot "uninstall.exe") -Force
-+    Invoke-TestUninstall -Root $deadUninstallRemovalRoot -AgentSkillsRoot $deadUninstallRemovalSkillsRoot -ProcessProvider { @() }
-+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalRoot)) "Uninstall did not remove its dead-transaction partial root."
-+    Assert-True (-not (Test-Path -LiteralPath $deadUninstallRemovalTransaction.Path)) "Uninstall retained its dead transaction."
++    # Direct uninstall does not mutate external skill state until every true
++    # launcher, lease, and process blocker has cleared.
++    $directUninstallRoot = Join-Path $tempRoot "direct-uninstall-removal"
++    $directUninstallSkillsRoot = Join-Path $tempRoot "direct-uninstall-removal-agent-skills"
++    [void](Invoke-TestInstall -Root $directUninstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $directUninstallSkillsRoot)
++    $directUninstallSkill = Join-Path $directUninstallSkillsRoot "herdr\SKILL.md"
++    Write-TestFile -Path (Join-Path $directUninstallRoot "stale.private") -Text "reclaim-current-root"
++    $directUninstallStaging = "$directUninstallRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
++    Write-TestFile -Path (Join-Path $directUninstallStaging "malformed.txt") -Text "discard"
++
++    $directLockReady = Join-Path $tempRoot "direct-uninstall-lock-ready"
++    $directLockOwner = Start-TestSharedFileHolder -Path (Join-Path $directUninstallRoot "state\launcher.lock") -ReadyPath $directLockReady -Seconds 2 -ShareMode None
++    $childProcesses.Add($directLockOwner)
++    Wait-TestPath -Path $directLockReady
++    Assert-Throws {
++        Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 250 -AllowCurrentRootConvergence $true
++    } "Timed out after 250 ms.*launcher.lock" "Direct uninstall bypassed launcher-lock contention."
++    Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Launcher-lock refusal removed the managed skill before application convergence."
++    if (-not $directLockOwner.WaitForExit(10000)) { throw "Direct uninstall launcher-lock owner did not exit within 10 seconds." }
++
++    $directLease = [IO.File]::Open(
++        (Join-Path $directUninstallRoot "state\leases\$id1.lease"),
++        [IO.FileMode]::OpenOrCreate,
++        [IO.FileAccess]::ReadWrite,
++        [IO.FileShare]::ReadWrite
++    )
++    try {
++        Assert-Throws {
++            Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -AllowCurrentRootConvergence $true
++        } "still active" "Direct uninstall bypassed an active runtime lease."
++        Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Lease refusal removed the managed skill before application convergence."
++    } finally {
++        $directLease.Dispose()
++    }
++
++    $directProcess = Start-Process -FilePath (Join-Path $directUninstallRoot "bin\herdr.exe") -ArgumentList @("--wait") -PassThru -WindowStyle Hidden
++    $childProcesses.Add($directProcess)
++    Start-Sleep -Milliseconds 200
++    Assert-Throws {
++        Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { Get-HerdrProcessSnapshot } -AllowCurrentRootConvergence $true
++    } "process from the managed Herdr install tree" "Direct uninstall bypassed an active managed process."
++    Assert-True (Test-Path -LiteralPath $directUninstallSkill -PathType Leaf) "Process refusal removed the managed skill before application convergence."
++    if (-not $directProcess.WaitForExit(10000)) { throw "Direct uninstall managed process did not exit within 10 seconds." }
++
++    Invoke-TestUninstall -Root $directUninstallRoot -AgentSkillsRoot $directUninstallSkillsRoot -ProcessProvider { @() } -AllowCurrentRootConvergence $true
++    Assert-True (-not (Test-Path -LiteralPath $directUninstallRoot)) "Direct uninstall convergence retained the partial current root."
++    Assert-True (-not (Test-Path -LiteralPath $directUninstallStaging)) "Direct uninstall convergence retained stale private staging."
++    Assert-True (-not (Test-Path -LiteralPath $directUninstallSkill)) "Direct uninstall convergence retained its known managed skill."
 +
 +    # Filesystem finalization occurs inside the outer lifecycle operation. Even
 +    # after the root is gone, another setup cannot publish a new generation until
@@ -59286,12 +58986,12 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    Write-TestFile -Path (Join-Path $script:TestAgentSkillsRoot "herdr\obsolete-resources\old.txt") -Text "old-resource"
 +    $script:TestSkillSource = $skillSource2
 +
-+    # Runtime and pointer crash artifacts are external and recoverable. A real
++    # Runtime and pointer staging artifacts are external and disposable. A real
 +    # second PowerShell process holds the old build lease across the upgrade.
-+    $runtimeCrash = New-HerdrTransaction -Kind "update" -InstallRoot $installRoot
++    $runtimeCrash = New-HerdrStagingDirectory -Kind "update" -InstallRoot $installRoot
 +    New-Item -ItemType Directory -Path (Join-Path $runtimeCrash.Path "runtime") | Out-Null
 +    Write-TestFile -Path (Join-Path $runtimeCrash.Path "runtime\partial") -Text "partial"
-+    $pointerCrash = New-HerdrTransaction -Kind "update" -InstallRoot $installRoot
++    $pointerCrash = New-HerdrStagingDirectory -Kind "update" -InstallRoot $installRoot
 +    New-Item -ItemType Directory -Path (Join-Path $pointerCrash.Path "metadata") | Out-Null
 +    Write-TestFile -Path (Join-Path $pointerCrash.Path "metadata\pending") -Text "partial pointer"
 +    $leasePath = Join-Path $installRoot "state\leases\$id1.lease"
@@ -59301,8 +59001,8 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    Wait-TestPath -Path $leaseReady
 +    $pending = Invoke-TestInstall -Root $installRoot -Stage $stage2 -Launcher $launcher2 -Uninstaller $uninstaller -BuildId $id2 -DisplayVersion $display2 -NumericVersion $numeric2
 +    Assert-Equal $pending.Status "Pending" "Second-process lease did not produce pending success."
-+    Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Runtime crash transaction was not recovered."
-+    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Pointer crash transaction was not recovered."
++    Assert-True (-not (Test-Path -LiteralPath $runtimeCrash.Path)) "Stale runtime staging was not removed."
++    Assert-True (-not (Test-Path -LiteralPath $pointerCrash.Path)) "Stale pointer staging was not removed."
 +    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\active")) $id1 "Busy upgrade changed active."
 +    Assert-Equal (Read-HerdrPointer -Path (Join-Path $installRoot "state\pending")) $id2 "Busy upgrade did not publish pending."
 +    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Busy upgrade replaced the active launcher."
@@ -59393,7 +59093,7 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    } "not compatible with this setup.*Uninstall the existing Herdr or Herdr Win entry" "An incompatible install root was accepted."
 +    Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 +
-+    # A junction at the fixed install root is rejected before transaction repair,
++    # A junction at the fixed install root is rejected before staging cleanup,
 +    # setup publication, or uninstall cleanup can mutate its target.
 +    $reparseInstallTarget = Join-Path $tempRoot "reparse-install-target"
 +    New-Item -ItemType Directory -Path $reparseInstallTarget | Out-Null
@@ -59479,47 +59179,31 @@ index 0000000000000000000000000000000000000000..b40fa936133ce866d89574a7731b23a2
 +    Remove-Item -LiteralPath $processSkillSibling -Force
 +    Install-HerdrSkillFile -SourcePath $script:TestSkillSource -SkillsRoot $processAgentSkillsRoot -KnownHashes $parsedTestSkillHashes
 +
-+    # An unchanged but temporarily locked owned skill keeps uninstall retryable
-+    # and preserves the install manifest until cleanup can succeed.
++    # A temporarily locked external skill residual no longer blocks application
++    # removal. The exact skill is preserved and reported through the helper warning.
 +    $lockedSkill = $processSkill
 +    $lockedSkillReady = Join-Path $tempRoot "locked-skill-ready"
 +    $lockedSkillProcess = Start-TestSharedFileHolder -Path $lockedSkill -ReadyPath $lockedSkillReady -Seconds 2 -ShareMode None
 +    $childProcesses.Add($lockedSkillProcess)
 +    Wait-TestPath -Path $lockedSkillReady
-+    Assert-Throws {
-+        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-+    } "being used|cannot access|access to the path" "Locked owned skill did not keep uninstall retryable."
-+    Assert-True (Test-Path -LiteralPath (Join-Path $processRoot "state\install.manifest")) "Failed skill cleanup removed uninstall ownership state."
++    Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
++    Assert-True (-not (Test-Path -LiteralPath $processRoot)) "Locked skill residual blocked application uninstall."
++    Assert-True (Test-Path -LiteralPath $lockedSkill -PathType Leaf) "Locked skill residual was not preserved."
 +    if (-not $lockedSkillProcess.WaitForExit(10000)) { throw "Locked skill holder did not exit within 10 seconds." }
 +
-+    # Crash after uninstall marker/bin move is retryable; exact transaction
-+    # ownership is validated before deletion and helper remains for NSIS last.
-+    $stagedMarkerTx = New-HerdrTransaction -Kind "uninstall" -InstallRoot $processRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $processRoot "state\install.manifest") -Destination (Join-Path $stagedMarkerTx.Path "root.manifest")
-+    Write-HerdrDurableText -Path (Join-Path $stagedMarkerTx.Path "uninstall.pending") -Text $script:UninstallMarkerText
-+    $uninstallTx = New-HerdrTransaction -Kind "uninstall" -InstallRoot $processRoot
-+    Copy-HerdrDurableFile -Source (Join-Path $processRoot "state\install.manifest") -Destination (Join-Path $uninstallTx.Path "root.manifest")
-+    Write-HerdrDurableText -Path (Join-Path $processRoot "state\uninstall.pending") -Text $script:UninstallMarkerText
-+    [IO.Directory]::Move((Join-Path $processRoot "bin"), (Join-Path $uninstallTx.Path "bin"))
-+    Write-HerdrUninstallCleanupManifest -Path $uninstallTx.Path
-+    Remove-Item -LiteralPath (Join-Path $uninstallTx.Path "bin\herdr.exe") -Force
-+    $unownedUninstallFile = Join-Path $uninstallTx.Path "unowned.txt"
-+    Write-TestFile -Path $unownedUninstallFile -Text "preserve"
-+    Assert-Throws {
-+        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-+    } "unowned file" "Partial uninstall cleanup accepted an unowned survivor."
-+    Assert-True (Test-Path -LiteralPath $unownedUninstallFile) "Rejected partial-uninstall content was deleted."
-+    Remove-Item -LiteralPath $unownedUninstallFile -Force
-+    $unownedUninstallDirectory = Join-Path $uninstallTx.Path "bin\unexpected-empty"
-+    New-Item -ItemType Directory -Path $unownedUninstallDirectory | Out-Null
-+    Assert-Throws {
-+        Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-+    } "unowned directory" "Partial uninstall cleanup accepted an unowned empty directory."
-+    Assert-True (Test-Path -LiteralPath $unownedUninstallDirectory) "Rejected partial-uninstall directory was deleted."
-+    Remove-Item -LiteralPath $unownedUninstallDirectory -Force
-+    Invoke-TestUninstall -Root $processRoot -AgentSkillsRoot $processAgentSkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
-+    Assert-True (-not (Test-Path -LiteralPath $processRoot)) "Dead uninstall recovery retained its partial managed root."
-+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $processAgentSkillsRoot "herdr"))) "Uninstall retained its unchanged owned Herdr skill."
++    # The pending marker is a launch gate, not a journal grammar. A malformed
++    # regular marker and arbitrary regular stale private staging still converge to
++    # complete removal.
++    $retryRoot = Join-Path $tempRoot "marker-retry-install"
++    $retrySkillsRoot = Join-Path $tempRoot "marker-retry-agent-skills"
++    [void](Invoke-TestInstall -Root $retryRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1 -AgentSkillsRoot $retrySkillsRoot)
++    Write-TestFile -Path (Join-Path $retryRoot "state\uninstall.pending") -Text "stale-private-marker"
++    $retryStaging = "$retryRoot.installer-uninstall.$([Guid]::NewGuid().ToString('N'))"
++    Write-TestFile -Path (Join-Path $retryStaging "unknown\stale.bin") -Text "discard"
++    Invoke-TestUninstall -Root $retryRoot -AgentSkillsRoot $retrySkillsRoot -ProcessProvider { @() } -LockTimeoutMilliseconds 3000
++    Assert-True (-not (Test-Path -LiteralPath $retryRoot)) "Pending-marker retry did not remove the application."
++    Assert-True (-not (Test-Path -LiteralPath $retryStaging)) "Pending-marker retry retained stale private staging."
++    Assert-True (-not (Test-Path -LiteralPath (Join-Path $retrySkillsRoot "herdr"))) "Pending-marker retry retained its unchanged owned Herdr skill."
 +
 +    # Explicit removal deletes an unknown SKILL.md while preserving extra files
 +    # and nested directories.
@@ -63643,4 +63327,3 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..6cb62f46daafa763deab9fc83aa0d3ed
      }
 -- 
 2.55.0.windows.3
-

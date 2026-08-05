@@ -243,36 +243,56 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("-ProductName $ProductName", fault_test)
         self.assertIn("CLAUDE_CONFIG_DIR", fault_test)
 
-    def test_crash_artifacts_stay_outside_strict_roots(self) -> None:
+    def test_private_staging_never_overrides_terminal_user_intent(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
         lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
-        self.assertIn('New-HerdrTransaction -Kind "fresh"', helper)
-        self.assertIn('New-HerdrTransaction -Kind "update"', helper)
-        self.assertIn('New-HerdrTransaction -Kind "uninstall"', helper)
+        self.assertIn('New-HerdrStagingDirectory -Kind "fresh"', helper)
+        self.assertIn('New-HerdrStagingDirectory -Kind "update"', helper)
+        self.assertNotIn('New-HerdrStagingDirectory -Kind "uninstall"', helper)
         self.assertIn("[IO.Directory]::Move($stagedRoot, $InstallRoot)", helper)
         self.assertNotIn('Join-Path $RuntimeRoot (".staging.', helper)
         self.assertIn("uninstall.pending", helper)
         self.assertIn("Assert-HerdrUninstallRetryRoot", helper)
-        self.assertIn("Complete-HerdrDeadUninstallTransactions", helper)
+        self.assertIn("Remove-HerdrStaleStagingDirectories", helper)
+        self.assertIn("Remove-HerdrCurrentRootForConvergence", helper)
+        self.assertIn('$effectiveInstallManager = "WinGet"', helper)
+        self.assertIn("-InstallManager $effectiveInstallManager", helper)
         self.assertIn("Remove-HerdrUninstallResidual", helper)
-        self.assertNotIn(
-            "A previous Herdr uninstall transaction is incomplete", helper
-        )
-        recovery = helper[
-            helper.index("function Complete-HerdrDeadUninstallTransactions {") : helper.index(
-                "function Test-HerdrLegacyLauncherHop {"
+        self.assertNotIn("cleanup.manifest", helper)
+        self.assertNotIn("root.manifest", helper)
+        self.assertNotIn("New-HerdrTransaction", helper)
+        uninstall = helper[
+            helper.index("function Invoke-HerdrUninstallLayout {") : helper.index(
+                "function Invoke-HerdrUninstall {"
             )
         ]
-        gate = recovery.index('Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock")')
-        process_check = recovery.index("$processes = @(Get-HerdrProcessSnapshot)", gate)
-        bin_move = recovery.index('[IO.Directory]::Move($source', process_check)
-        gate_release = recovery.index("$coordination.Dispose()", bin_move)
+        gate = uninstall.index('Open-HerdrShareModeLock -Path (Join-Path $stateDir "launcher.lock")')
+        process_check = uninstall.index("$processes = @(& $ProcessProvider)", gate)
+        marker = uninstall.index("Write-HerdrDurableText -Path $uninstallPending", process_check)
+        bin_remove = uninstall.index('foreach ($name in @("bin", "runtime"))', marker)
+        gate_release = uninstall.index("$coordination.Dispose()", bin_remove)
         self.assertLess(gate, process_check)
-        self.assertLess(process_check, bin_move)
-        self.assertLess(bin_move, gate_release)
-        self.assertIn("Dead uninstall transaction survived setup recovery", lifecycle)
+        self.assertLess(process_check, marker)
+        self.assertLess(marker, bin_remove)
+        self.assertLess(bin_remove, gate_release)
+        direct_uninstall = uninstall[
+            uninstall.index("could not use normal uninstall recovery") : uninstall.index(
+                "if ($rootKind -eq \"UninstallResidual\")"
+            )
+        ]
+        self.assertLess(
+            direct_uninstall.index("Remove-HerdrCurrentRootForConvergence"),
+            direct_uninstall.index("Remove-HerdrSkillCopiesBestEffort"),
+        )
+        self.assertIn("Malformed private staging blocked direct installation", lifecycle)
+        self.assertIn("Direct setup over a WinGet root lost package-manager ownership", lifecycle)
+        self.assertIn("Direct uninstall convergence retained the partial current root", lifecycle)
+        self.assertIn("Direct uninstall bypassed launcher-lock contention", lifecycle)
+        self.assertIn("Direct uninstall bypassed an active runtime lease", lifecycle)
+        self.assertIn("Direct uninstall bypassed an active managed process", lifecycle)
         self.assertIn("Exact uninstall residual did not recover", lifecycle)
-        self.assertIn("Uninstall retained its dead transaction", lifecycle)
+        self.assertIn("Pending-marker retry did not remove the application", lifecycle)
+        self.assertIn("Locked skill residual blocked application uninstall", lifecycle)
 
     def test_persistent_sibling_lock_serializes_outer_lifecycle(self) -> None:
         helper = HELPER.read_text(encoding="utf-8")
@@ -691,7 +711,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         helper = HELPER.read_text(encoding="utf-8")
         cleanup = helper[
             helper.index("function Assert-HerdrUninstallCleanupRoot {") : helper.index(
-                "function Assert-HerdrInterruptedUninstallRoot {"
+                "function New-HerdrStagingDirectory {"
             )
         ]
         for exact_name in (

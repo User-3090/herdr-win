@@ -1,4 +1,4 @@
-From 2752cccb028ca33ca03ab2177c1a1914491d9c31 Mon Sep 17 00:00:00 2001
+From ab75c32e44d3395b2db02c1221e3a85c7e058a5f Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 19:41:54 +0200
 Subject: [PATCH 4/5] fix(opencode): preserve truthful lifecycle state
@@ -1315,4 +1315,3 @@ index 8be54c8406e8bad4310141b25f0d77d3ec652916..b24ff95a8915a20020630f043f517bd7
  const KILO_INTEGRATION_VERSION: u32 = 4;
 -- 
 2.55.0.windows.3
-
