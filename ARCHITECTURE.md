@@ -86,6 +86,22 @@ behavior; code and tests remain the detailed implementation truth.
   user-settings removal, and recoverable install/uninstall state. Rust owns runtime
   selection and
   downloading/verifying/launching the immutable installer asset.
+- NSIS forces its embedded CRC check and recognizes package-manager and destructive
+  custom flags only as exact tokens.
+- The helper validates the complete managed Installed Apps value set, registry
+  kinds, and content before mutation or key removal; unknown values or subkeys are
+  preserved and rejected. Only setup may accept the prior current-layout direct
+  quiet-uninstall command, and after publishing the runner it rewrites that exact
+  registration before PATH mutation; uninstall and registration removal require
+  the current runner command.
+- Installed Apps quiet uninstall invokes one installed PowerShell runner that
+  validates and copies `uninstall.exe` to a random temporary path, launches it
+  once with `/S` and `_?=`, waits boundedly, and returns its terminal exit code.
+  The runner remains available through every recoverable cleanup fault and is
+  removed only during final validated residual cleanup. That final pair deletion
+  snapshots and hashes the actual current runner and uninstaller bytes, restoring
+  both on any nonterminal deletion failure instead of substituting a published
+  payload hash.
 - NSIS accepts `/WINGET` as the sole explicit package-manager origin signal and
   passes a bounded Direct/WinGet value into the helper. The helper owns the optional
   strict UTF-8 `state/package-manager` record; only the exact

@@ -8,6 +8,9 @@
 !ifndef ARG_HELPER_PS1
   !error "ARG_HELPER_PS1 is required"
 !endif
+!ifndef ARG_UNINSTALL_RUNNER_PS1
+  !error "ARG_UNINSTALL_RUNNER_PS1 is required"
+!endif
 !ifndef ARG_SKILL_MD
   !error "ARG_SKILL_MD is required"
 !endif
@@ -72,6 +75,7 @@ Caption "${INFO_DISTRIBUTIONNAME} Setup"
 OutFile "${APP_OUTPUT_PATH}"
 InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 RequestExecutionLevel user
+CRCCheck force
 SetCompressor lzma
 SetDatablockOptimize on
 SetCompressorDictSize 8
@@ -289,8 +293,9 @@ Function .onInit
   SetShellVarContext current
   StrCpy $InstallManager "Direct"
   ${GetParameters} $0
+  StrCpy $2 "$0 "
   ClearErrors
-  ${GetOptions} "$0" "/WINGET" $1
+  ${GetOptions} "$2" "/WINGET " $1
   ${IfNot} ${Errors}
     StrCpy $InstallManager "WinGet"
   ${EndIf}
@@ -311,13 +316,14 @@ Function un.onInit
   StrCpy $SettingsDisposition "Keep"
   StrCpy $SkillDisposition "Auto"
   ${GetParameters} $0
+  StrCpy $2 "$0 "
   ClearErrors
-  ${GetOptions} "$0" "/REMOVE_SETTINGS" $1
+  ${GetOptions} "$2" "/REMOVE_SETTINGS " $1
   ${IfNot} ${Errors}
     StrCpy $SettingsDisposition "Remove"
   ${EndIf}
   ClearErrors
-  ${GetOptions} "$0" "/REMOVE_SKILL" $1
+  ${GetOptions} "$2" "/REMOVE_SKILL " $1
   ${IfNot} ${Errors}
     StrCpy $SkillDisposition "Remove"
   ${EndIf}
@@ -403,6 +409,7 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   SetOutPath "$PLUGINSDIR"
   File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
   File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
+  File /oname=uninstall-runner.ps1 "${ARG_UNINSTALL_RUNNER_PS1}"
   SetOutPath "$PLUGINSDIR\skill"
   File /oname=SKILL.md "${ARG_SKILL_MD}"
   File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"

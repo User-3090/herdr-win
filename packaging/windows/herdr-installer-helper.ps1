@@ -29,7 +29,9 @@ param(
         "after-launcher-lock",
         "after-installer-helper",
         "after-state-directory",
-        "before-uninstaller"
+        "before-uninstaller",
+        "after-uninstaller",
+        "after-uninstall-runner"
     )]
     [string]$UninstallFault = "",
     [string]$UninstallFaultMarkerPrefix = "herdr"
@@ -62,6 +64,7 @@ $script:ManagedBinMarkerText = "herdr-managed-bin-v1`n"
 $script:PackageManagerMarkerText = "herdr-package-manager-v1`nmanager=winget`n"
 $script:UninstallMarkerText = "herdr-uninstall-v1`n"
 $script:TransactionMarkerName = ".herdr-installer-transaction"
+$script:UninstallRunnerName = "uninstall-runner.ps1"
 $script:ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$script:ProductName"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 
@@ -1113,6 +1116,7 @@ function Repair-HerdrLauncherPublication {
     if (-not (Test-Path -LiteralPath $InstallRoot)) {
         return
     }
+    Assert-HerdrRegularDirectory -Path $InstallRoot
     $stateDir = Join-Path $InstallRoot "state"
     $manifest = Read-HerdrInstallManifest -StateDir $stateDir
     $launcher = Join-Path $InstallRoot "bin\herdr.exe"
@@ -1220,11 +1224,24 @@ function Assert-HerdrManagedRoot {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
     Assert-HerdrRegularDirectory -Path $InstallRoot
-    $rootNames = @(Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object { $_.Name })
-    if (@(Compare-Object @("bin", "runtime", "state", "uninstall.exe") $rootNames -CaseSensitive).Count -ne 0) {
-        throw "Managed Herdr root has an unrecognized owned layout: $InstallRoot"
+    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe", $script:UninstallRunnerName)
+    foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
+        if ($allowedRoot -cnotcontains $entry.Name -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            (($entry.Name -in @("bin", "runtime", "state")) -ne $entry.PSIsContainer)) {
+            throw "Managed Herdr root has an unrecognized owned layout: $($entry.FullName)"
+        }
+    }
+    foreach ($required in @("bin", "runtime", "state", "uninstall.exe")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $required))) {
+            throw "Managed Herdr root is missing $required."
+        }
     }
     Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
+    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+    if (Test-Path -LiteralPath $uninstallRunner) {
+        Assert-HerdrRegularFile -Path $uninstallRunner
+    }
     $stateDir = Join-Path $InstallRoot "state"
     Assert-HerdrRegularDirectory -Path $stateDir
     $allowedState = @("active", "pending", "leases", "launcher.lock", "installer-helper.ps1", "install.manifest", "package-manager")
@@ -1273,13 +1290,17 @@ function Assert-HerdrUninstallRetryRoot {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
     Assert-HerdrRegularDirectory -Path $InstallRoot
-    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe")
+    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe", $script:UninstallRunnerName)
     foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
         if ($allowedRoot -cnotcontains $entry.Name -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Unrecognized content in uninstall-retry root: $($entry.FullName)"
         }
     }
     Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
+    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+    if (Test-Path -LiteralPath $uninstallRunner) {
+        Assert-HerdrRegularFile -Path $uninstallRunner
+    }
     $stateDir = Join-Path $InstallRoot "state"
     Assert-HerdrRegularDirectory -Path $stateDir
     foreach ($required in @("installer-helper.ps1", "launcher.lock", "uninstall.pending")) {
@@ -1334,9 +1355,12 @@ function Assert-HerdrUninstallRetryRoot {
 function Assert-HerdrUninstallResidual {
     param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
-    $rootNames = @(Get-ChildItem -LiteralPath $InstallRoot -Force | ForEach-Object { $_.Name })
-    if (@(Compare-Object @("state", "uninstall.exe") $rootNames -CaseSensitive).Count -ne 0) {
-        throw "Uninstall residual root contains unexpected content."
+    foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
+        if ($entry.Name -cnotin @("state", "uninstall.exe", $script:UninstallRunnerName) -or
+            ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            (($entry.Name -ceq "state") -ne $entry.PSIsContainer)) {
+            throw "Uninstall residual root contains unexpected content."
+        }
     }
     $stateDir = Join-Path $InstallRoot "state"
     $stateNames = @(Get-ChildItem -LiteralPath $stateDir -Force | ForEach-Object { $_.Name })
@@ -1344,6 +1368,10 @@ function Assert-HerdrUninstallResidual {
         throw "Uninstall residual state contains unexpected content."
     }
     Assert-HerdrRegularFile -Path (Join-Path $InstallRoot "uninstall.exe")
+    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+    if (Test-Path -LiteralPath $uninstallRunner) {
+        Assert-HerdrRegularFile -Path $uninstallRunner
+    }
     Assert-HerdrRegularFile -Path (Join-Path $stateDir "installer-helper.ps1")
     Assert-HerdrRegularFile -Path (Join-Path $stateDir "launcher.lock")
     if ((Read-HerdrStrictUtf8 -Path (Join-Path $stateDir "uninstall.pending")) -cne $script:UninstallMarkerText) {
@@ -1356,7 +1384,7 @@ function Assert-HerdrUninstallCleanupRoot {
 
     Assert-HerdrRegularDirectory -Path $InstallRoot
     foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
-        if ($entry.Name -cnotin @("state", "uninstall.exe") -or
+        if ($entry.Name -cnotin @("state", "uninstall.exe", $script:UninstallRunnerName) -or
             ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Uninstall cleanup root contains unexpected content: $($entry.FullName)"
         }
@@ -1368,6 +1396,10 @@ function Assert-HerdrUninstallCleanupRoot {
     $uninstaller = Join-Path $InstallRoot "uninstall.exe"
     if (Test-Path -LiteralPath $uninstaller) {
         Assert-HerdrRegularFile -Path $uninstaller
+    }
+    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+    if (Test-Path -LiteralPath $uninstallRunner) {
+        Assert-HerdrRegularFile -Path $uninstallRunner
     }
     $stateDir = Join-Path $InstallRoot "state"
     if (-not (Test-Path -LiteralPath $stateDir)) {
@@ -1430,6 +1462,67 @@ function Remove-HerdrUninstallFaultMarker {
     }
 }
 
+function Remove-HerdrTerminalUninstallFiles {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$UninstallFault = "",
+        [string]$UninstallFaultMarkerPrefix = "herdr"
+    )
+
+    Assert-HerdrUninstallCleanupRoot -InstallRoot $InstallRoot
+    $retryFiles = @()
+    foreach ($name in @("uninstall.exe", $script:UninstallRunnerName)) {
+        $path = Join-Path $InstallRoot $name
+        if (Test-Path -LiteralPath $path) {
+            Assert-HerdrRegularFile -Path $path
+            $retryFiles += [PSCustomObject]@{
+                Path = $path
+                Bytes = [IO.File]::ReadAllBytes($path)
+                Sha256 = Get-HerdrSha256 -Path $path
+            }
+        }
+    }
+
+    try {
+        Invoke-HerdrUninstallFault -Point "before-uninstaller" -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
+        $uninstaller = Join-Path $InstallRoot "uninstall.exe"
+        if (Test-Path -LiteralPath $uninstaller) {
+            Remove-Item -LiteralPath $uninstaller -Force
+        }
+        Invoke-HerdrUninstallFault -Point "after-uninstaller" -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
+
+        $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+        if (Test-Path -LiteralPath $uninstallRunner) {
+            Remove-Item -LiteralPath $uninstallRunner -Force
+        }
+        Invoke-HerdrUninstallFault -Point "after-uninstall-runner" -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
+        Remove-Item -LiteralPath $InstallRoot -Force
+    } catch {
+        $terminalFailure = $_
+        try {
+            if (Test-Path -LiteralPath $InstallRoot) {
+                Assert-HerdrRegularDirectory -Path $InstallRoot
+                foreach ($record in $retryFiles) {
+                    if (Test-Path -LiteralPath $record.Path) {
+                        Assert-HerdrRegularFile -Path $record.Path
+                        if ((Get-HerdrSha256 -Path $record.Path) -cne $record.Sha256) {
+                            throw "Refusing to overwrite changed uninstall retry state: $($record.Path)"
+                        }
+                    } else {
+                        Write-HerdrDurableBytes -Path $record.Path -Bytes $record.Bytes
+                    }
+                    if ((Get-HerdrSha256 -Path $record.Path) -cne $record.Sha256) {
+                        throw "Restored uninstall retry state does not match its actual pre-cleanup bytes: $($record.Path)"
+                    }
+                }
+            }
+        } catch {
+            throw "Terminal uninstall cleanup failed ($($terminalFailure.Exception.Message)) and retry-file restoration also failed: $($_.Exception.Message)"
+        }
+        throw $terminalFailure
+    }
+}
+
 function Remove-HerdrUninstallResidual {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
@@ -1457,12 +1550,10 @@ function Remove-HerdrUninstallResidual {
         Remove-Item -LiteralPath $stateDir -Force
         Invoke-HerdrUninstallFault -Point "after-state-directory" -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
     }
-    Invoke-HerdrUninstallFault -Point "before-uninstaller" -Fault $UninstallFault -MarkerPrefix $UninstallFaultMarkerPrefix
-    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
-    if (Test-Path -LiteralPath $uninstaller) {
-        Remove-Item -LiteralPath $uninstaller -Force
-    }
-    Remove-Item -LiteralPath $InstallRoot -Force
+    Remove-HerdrTerminalUninstallFiles `
+        -InstallRoot $InstallRoot `
+        -UninstallFault $UninstallFault `
+        -UninstallFaultMarkerPrefix $UninstallFaultMarkerPrefix
 }
 
 function Assert-HerdrInterruptedUninstallRoot {
@@ -1473,7 +1564,7 @@ function Assert-HerdrInterruptedUninstallRoot {
     )
 
     Assert-HerdrRegularDirectory -Path $InstallRoot
-    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe")
+    $allowedRoot = @("bin", "runtime", "state", "uninstall.exe", $script:UninstallRunnerName)
     foreach ($entry in @(Get-ChildItem -LiteralPath $InstallRoot -Force)) {
         if ($allowedRoot -cnotcontains $entry.Name -or
             ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -1646,7 +1737,7 @@ function Remove-HerdrTransaction {
             continue
         }
         if ($entry.PSIsContainer -or
-            $entry.Name -cnotmatch '^(?:active|pending|launcher|installer-helper\.ps1|uninstall\.exe|install\.manifest)\.backup\.[0-9a-f]{32}$') {
+            $entry.Name -cnotmatch '^(?:active|pending|launcher|installer-helper\.ps1|uninstall(?:-runner\.ps1|\.exe)|install\.manifest)\.backup\.[0-9a-f]{32}$') {
             throw "Update installer transaction contains unexpected content: $($entry.FullName)"
         }
     }
@@ -2018,11 +2109,7 @@ function Complete-HerdrDeadUninstallTransactions {
     if (Test-Path -LiteralPath $stateDir) {
         Remove-HerdrValidatedDirectory -Path $stateDir
     }
-    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
-    if (Test-Path -LiteralPath $uninstaller) {
-        Remove-Item -LiteralPath $uninstaller -Force
-    }
-    Remove-Item -LiteralPath $InstallRoot -Force
+    Remove-HerdrTerminalUninstallFiles -InstallRoot $InstallRoot
     return $true
 }
 
@@ -2395,6 +2482,7 @@ function New-HerdrManagedRootTree {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$UninstallRunnerPath,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -2410,6 +2498,7 @@ function New-HerdrManagedRootTree {
     Write-HerdrDurableBytes -Path (Join-Path $Destination "state\launcher.lock") -Bytes ([byte[]]@())
     Write-HerdrDurableText -Path (Join-Path $Destination "state\active") -Text (Get-HerdrPointerText -BuildId $BuildId)
     Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $Destination "state\installer-helper.ps1")
+    Copy-HerdrDurableFile -Source $UninstallRunnerPath -Destination (Join-Path $Destination $script:UninstallRunnerName)
     Copy-HerdrDurableFile -Source $UninstallerPath -Destination (Join-Path $Destination "uninstall.exe")
     Write-HerdrDurableText -Path (Join-Path $Destination "state\install.manifest") -Text (
         Get-HerdrInstallManifestText `
@@ -2442,6 +2531,7 @@ function Install-HerdrManagedUpgrade {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$UninstallRunnerPath,
         [Parameter(Mandatory = $true)][string]$BuildId,
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -2456,6 +2546,7 @@ function Install-HerdrManagedUpgrade {
         $metadata = Join-Path $transaction.Path "metadata"
         New-Item -ItemType Directory -Path $metadata | Out-Null
         Copy-HerdrDurableFile -Source $HelperSourcePath -Destination (Join-Path $metadata "installer-helper.ps1")
+        Copy-HerdrDurableFile -Source $UninstallRunnerPath -Destination (Join-Path $metadata $script:UninstallRunnerName)
         Copy-HerdrDurableFile -Source $UninstallerPath -Destination (Join-Path $metadata "uninstall.exe")
         Write-HerdrDurableText -Path (Join-Path $metadata "pending") -Text (Get-HerdrPointerText -BuildId $BuildId)
 
@@ -2478,6 +2569,7 @@ function Install-HerdrManagedUpgrade {
             }
 
             Publish-HerdrStagedFile -Source (Join-Path $metadata "installer-helper.ps1") -Destination (Join-Path $stateDir "installer-helper.ps1") -BackupDir $transaction.Path
+            Publish-HerdrStagedFile -Source (Join-Path $metadata $script:UninstallRunnerName) -Destination (Join-Path $InstallRoot $script:UninstallRunnerName) -BackupDir $transaction.Path
             Publish-HerdrStagedFile -Source (Join-Path $metadata "uninstall.exe") -Destination (Join-Path $InstallRoot "uninstall.exe") -BackupDir $transaction.Path
             [void](Set-HerdrPendingLauncher -InstallRoot $InstallRoot -LauncherPath $LauncherPath -BuildId $BuildId)
 
@@ -2529,6 +2621,7 @@ function Install-HerdrLayout {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$UninstallRunnerPath,
         [Parameter(Mandatory = $true)][string]$SkillSourcePath,
         [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
         [Parameter(Mandatory = $true)][string]$AgentSkillsRoot,
@@ -2542,6 +2635,9 @@ function Install-HerdrLayout {
 
     Assert-HerdrVersionIdentity -DisplayVersion $DisplayVersion -NumericVersion $NumericVersion -BuildId $BuildId
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    if (Test-Path -LiteralPath $InstallRoot) {
+        Assert-HerdrRegularDirectory -Path $InstallRoot
+    }
     $StageDir = Get-HerdrFullPath -Path $StageDir
     Assert-HerdrRegularDirectory -Path $StageDir
     Assert-HerdrRegularFile -Path $LauncherPath
@@ -2551,6 +2647,7 @@ function Install-HerdrLayout {
     }
     Assert-HerdrRegularFile -Path $UninstallerPath
     Assert-HerdrRegularFile -Path $HelperSourcePath
+    Assert-HerdrRegularFile -Path $UninstallRunnerPath
     $knownSkillHashes = @(Read-HerdrManagedSkillHashes -Path $SkillHashManifestPath -CurrentSkillPath $SkillSourcePath)
     Assert-HerdrSkillTarget -SkillsRoot $AgentSkillsRoot
     if (-not [string]::IsNullOrWhiteSpace($ClaudeSkillsRoot) -and
@@ -2591,6 +2688,7 @@ function Install-HerdrLayout {
             -LauncherPath $LauncherPath `
             -UninstallerPath $UninstallerPath `
             -HelperSourcePath $HelperSourcePath `
+            -UninstallRunnerPath $UninstallRunnerPath `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
@@ -2606,6 +2704,7 @@ function Install-HerdrLayout {
                 -LauncherPath $LauncherPath `
                 -UninstallerPath $UninstallerPath `
                 -HelperSourcePath $HelperSourcePath `
+                -UninstallRunnerPath $UninstallRunnerPath `
                 -BuildId $BuildId `
                 -DisplayVersion $DisplayVersion `
                 -NumericVersion $NumericVersion `
@@ -2790,22 +2889,127 @@ function Remove-HerdrUserPath {
     return Update-HerdrUserPath -BinDir $BinDir -RequestedAction Remove -InstallerOwned $InstallerOwned -RegistrySubKey $RegistrySubKey
 }
 
+function Get-HerdrQuietUninstallString {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $runner = Join-Path $InstallRoot $script:UninstallRunnerName
+    $uninstaller = Join-Path $InstallRoot "uninstall.exe"
+    return ('"{0}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Uninstaller "{2}" -InstallRoot "{3}"' -f $powerShell, $runner, $uninstaller, $InstallRoot)
+}
+
+function Get-HerdrArpValue {
+    param(
+        [Parameter(Mandatory = $true)]$Registration,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][Microsoft.Win32.RegistryValueKind]$Kind
+    )
+
+    if (@($Registration.GetValueNames()) -cnotcontains $Name) {
+        throw "The Herdr ARP registration is missing $Name."
+    }
+    if ($Registration.GetValueKind($Name) -ne $Kind) {
+        $kindName = if ($Kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) { "REG_DWORD" } else { "REG_SZ" }
+        throw "The Herdr ARP $Name value must be $kindName."
+    }
+    return $Registration.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+}
+
 function Assert-HerdrArpOwnership {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot, [string]$RegistryPath = $script:ArpKey)
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$RegistryPath = $script:ArpKey,
+        [switch]$AllowLegacyQuietUninstall
+    )
 
     if (-not (Test-Path -LiteralPath $RegistryPath)) {
         return
     }
-    $registeredRoot = [string](Get-ItemProperty -LiteralPath $RegistryPath).InstallLocation
-    if ([string]::IsNullOrWhiteSpace($registeredRoot) -or -not (Test-HerdrPathEntryEqual -Left $registeredRoot -Right $InstallRoot)) {
-        throw "Refusing to modify an ARP registration not owned by this Herdr install."
+    $registration = Get-Item -LiteralPath $RegistryPath
+    try {
+        $requiredNames = @(
+            "DisplayName", "DisplayVersion", "Publisher", "InstallLocation", "DisplayIcon",
+            "UninstallString", "QuietUninstallString", "VersionMajor", "VersionMinor", "NoModify", "NoRepair"
+        )
+        $actualNames = [string]::Join("`n", @($registration.GetValueNames() | Sort-Object))
+        $withoutPath = [string]::Join("`n", @($requiredNames | Sort-Object))
+        $withPath = [string]::Join("`n", @($requiredNames + "PathAdded" | Sort-Object))
+        if (($actualNames -cne $withoutPath -and $actualNames -cne $withPath) -or $registration.GetSubKeyNames().Count -ne 0) {
+            throw "The Herdr ARP registration contains unknown or incomplete state."
+        }
+
+        $displayName = [string](Get-HerdrArpValue -Registration $registration -Name "DisplayName" -Kind String)
+        $displayVersion = [string](Get-HerdrArpValue -Registration $registration -Name "DisplayVersion" -Kind String)
+        $publisher = [string](Get-HerdrArpValue -Registration $registration -Name "Publisher" -Kind String)
+        $registeredRoot = [string](Get-HerdrArpValue -Registration $registration -Name "InstallLocation" -Kind String)
+        $displayIcon = [string](Get-HerdrArpValue -Registration $registration -Name "DisplayIcon" -Kind String)
+        $uninstallString = [string](Get-HerdrArpValue -Registration $registration -Name "UninstallString" -Kind String)
+        $quietUninstallString = [string](Get-HerdrArpValue -Registration $registration -Name "QuietUninstallString" -Kind String)
+        $versionMajor = [int](Get-HerdrArpValue -Registration $registration -Name "VersionMajor" -Kind DWord)
+        $versionMinor = [int](Get-HerdrArpValue -Registration $registration -Name "VersionMinor" -Kind DWord)
+        $noModify = [int](Get-HerdrArpValue -Registration $registration -Name "NoModify" -Kind DWord)
+        $noRepair = [int](Get-HerdrArpValue -Registration $registration -Name "NoRepair" -Kind DWord)
+        if (@($registration.GetValueNames()) -ccontains "PathAdded") {
+            $pathAdded = [int](Get-HerdrArpValue -Registration $registration -Name "PathAdded" -Kind DWord)
+            if ($pathAdded -notin @(0, 1)) {
+                throw "The Herdr ARP PathAdded ownership value is invalid."
+            }
+        }
+
+        $uninstaller = Join-Path $InstallRoot "uninstall.exe"
+        $launcher = Join-Path $InstallRoot "bin\herdr.exe"
+        $legacyQuietUninstallString = '"' + $uninstaller + '" /S'
+        $quietUninstallOwned = $quietUninstallString -ceq (Get-HerdrQuietUninstallString -InstallRoot $InstallRoot) -or
+            ($AllowLegacyQuietUninstall -and $quietUninstallString -ceq $legacyQuietUninstallString)
+        $displayMatch = [regex]::Match($displayVersion, $script:DisplayVersionPattern)
+        if ($displayName -cne $script:ProductName -or
+            $publisher -cne "herdr-win" -or
+            -not (Test-HerdrPathEntryEqual -Left $registeredRoot -Right $InstallRoot) -or
+            $displayIcon -cne "$launcher,0" -or
+            $uninstallString -cne ('"' + $uninstaller + '"') -or
+            -not $quietUninstallOwned -or
+            -not $displayMatch.Success -or
+            $versionMajor -ne [int]$displayMatch.Groups[1].Value -or
+            $versionMinor -ne [int]$displayMatch.Groups[2].Value -or
+            $noModify -ne 1 -or $noRepair -ne 1) {
+            throw "Refusing to modify an ARP registration not owned by this Herdr install."
+        }
+    } finally {
+        $registration.Dispose()
+    }
+}
+
+function Test-HerdrLegacyQuietUninstallRegistration {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot, [string]$RegistryPath = $script:ArpKey)
+
+    if (-not (Test-Path -LiteralPath $RegistryPath)) {
+        return $false
+    }
+    $registration = Get-Item -LiteralPath $RegistryPath
+    try {
+        $uninstaller = Join-Path $InstallRoot "uninstall.exe"
+        $quietUninstallString = [string]$registration.GetValue(
+            "QuietUninstallString",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        return $quietUninstallString -ceq ('"' + $uninstaller + '" /S')
+    } finally {
+        $registration.Dispose()
     }
 }
 
 function Get-HerdrArpPathOwnership {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot, [string]$RegistryPath = $script:ArpKey)
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [string]$RegistryPath = $script:ArpKey,
+        [switch]$AllowLegacyQuietUninstall
+    )
 
-    Assert-HerdrArpOwnership -InstallRoot $InstallRoot -RegistryPath $RegistryPath
+    Assert-HerdrArpOwnership `
+        -InstallRoot $InstallRoot `
+        -RegistryPath $RegistryPath `
+        -AllowLegacyQuietUninstall:$AllowLegacyQuietUninstall
     if (-not (Test-Path -LiteralPath $RegistryPath)) {
         return $false
     }
@@ -2833,10 +3037,16 @@ function Set-HerdrArpRegistration {
         [Parameter(Mandatory = $true)][string]$DisplayVersion,
         [Parameter(Mandatory = $true)][string]$NumericVersion,
         [bool]$PathAdded,
-        [string]$RegistryPath = $script:ArpKey
+        [string]$RegistryPath = $script:ArpKey,
+        [switch]$AllowLegacyQuietUninstall
     )
 
-    Assert-HerdrArpOwnership -InstallRoot $InstallRoot -RegistryPath $RegistryPath
+    Assert-HerdrArpOwnership `
+        -InstallRoot $InstallRoot `
+        -RegistryPath $RegistryPath `
+        -AllowLegacyQuietUninstall:$AllowLegacyQuietUninstall
+    $uninstallRunner = Join-Path $InstallRoot $script:UninstallRunnerName
+    Assert-HerdrRegularFile -Path $uninstallRunner
     New-Item -Path $RegistryPath -Force | Out-Null
     $uninstaller = Join-Path $InstallRoot "uninstall.exe"
     $launcher = Join-Path $InstallRoot "bin\herdr.exe"
@@ -2848,7 +3058,7 @@ function Set-HerdrArpRegistration {
         InstallLocation = $InstallRoot
         DisplayIcon = "$launcher,0"
         UninstallString = ('"' + $uninstaller + '"')
-        QuietUninstallString = ('"' + $uninstaller + '" /S')
+        QuietUninstallString = Get-HerdrQuietUninstallString -InstallRoot $InstallRoot
     }
     foreach ($name in $values.Keys) {
         New-ItemProperty -LiteralPath $RegistryPath -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null
@@ -2858,6 +3068,7 @@ function Set-HerdrArpRegistration {
     New-ItemProperty -LiteralPath $RegistryPath -Name "NoModify" -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -LiteralPath $RegistryPath -Name "NoRepair" -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -LiteralPath $RegistryPath -Name "PathAdded" -Value ([int]$PathAdded) -PropertyType DWord -Force | Out-Null
+    Assert-HerdrArpOwnership -InstallRoot $InstallRoot -RegistryPath $RegistryPath
 }
 
 function Remove-HerdrArpRegistration {
@@ -2876,6 +3087,7 @@ function Invoke-HerdrInstall {
         [Parameter(Mandatory = $true)][string]$LauncherPath,
         [Parameter(Mandatory = $true)][string]$UninstallerPath,
         [Parameter(Mandatory = $true)][string]$HelperSourcePath,
+        [Parameter(Mandatory = $true)][string]$UninstallRunnerPath,
         [Parameter(Mandatory = $true)][string]$SkillSourcePath,
         [Parameter(Mandatory = $true)][string]$SkillHashManifestPath,
         [Parameter(Mandatory = $true)][string]$BuildId,
@@ -2887,8 +3099,9 @@ function Invoke-HerdrInstall {
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
     return Invoke-HerdrLifecycleOperation -InstallRoot $InstallRoot -TimeoutMilliseconds $LifecycleLockTimeoutMilliseconds -Operation {
-        Assert-HerdrArpOwnership -InstallRoot $InstallRoot
-        $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot
+        Assert-HerdrArpOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
+        $legacyQuietUninstall = Test-HerdrLegacyQuietUninstallRegistration -InstallRoot $InstallRoot
+        $previousPathOwnership = Get-HerdrArpPathOwnership -InstallRoot $InstallRoot -AllowLegacyQuietUninstall
         $agentSkillsRoot = Get-HerdrAgentSkillsRoot
         $claudeSkillsRoot = if (Test-HerdrClaudeCodeInstalled) { Get-HerdrClaudeSkillsRoot } else { $null }
         $result = Install-HerdrLayout `
@@ -2897,6 +3110,7 @@ function Invoke-HerdrInstall {
             -LauncherPath $LauncherPath `
             -UninstallerPath $UninstallerPath `
             -HelperSourcePath $HelperSourcePath `
+            -UninstallRunnerPath $UninstallRunnerPath `
             -SkillSourcePath $SkillSourcePath `
             -SkillHashManifestPath $SkillHashManifestPath `
             -AgentSkillsRoot $agentSkillsRoot `
@@ -2905,6 +3119,14 @@ function Invoke-HerdrInstall {
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
             -InstallManager $InstallManager
+        if ($legacyQuietUninstall) {
+            Set-HerdrArpRegistration `
+                -InstallRoot $InstallRoot `
+                -DisplayVersion $DisplayVersion `
+                -NumericVersion $NumericVersion `
+                -PathAdded $previousPathOwnership `
+                -AllowLegacyQuietUninstall
+        }
         $pathUpdate = Set-HerdrUserPath -BinDir (Join-Path $InstallRoot "bin") -PreviouslyOwned $previousPathOwnership
         Set-HerdrArpRegistration `
             -InstallRoot $InstallRoot `
@@ -2929,6 +3151,9 @@ function Invoke-HerdrUninstallLayout {
     )
 
     $InstallRoot = Get-HerdrFullPath -Path $InstallRoot
+    if (Test-Path -LiteralPath $InstallRoot) {
+        Assert-HerdrRegularDirectory -Path $InstallRoot
+    }
     if ((Test-Path -LiteralPath (Join-Path $InstallRoot "state\install.manifest")) -and
         (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\herdr.exe"))) {
         Repair-HerdrLauncherPublication -InstallRoot $InstallRoot
@@ -3092,6 +3317,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $LauncherPath = Join-Path $PackageRoot "app-launcher.exe"
                 $UninstallerPath = Join-Path $PackageRoot "uninstall.exe"
                 $HelperSourcePath = Join-Path $PackageRoot "installer-helper.ps1"
+                $UninstallRunnerPath = Join-Path $PackageRoot $script:UninstallRunnerName
                 $SkillSourcePath = Join-Path $PackageRoot "skill\SKILL.md"
                 $SkillHashManifestPath = Join-Path $PackageRoot "skill\managed-skill-hashes.txt"
                 $result = Invoke-HerdrInstall `
@@ -3100,6 +3326,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     -LauncherPath $LauncherPath `
                     -UninstallerPath $UninstallerPath `
                     -HelperSourcePath $HelperSourcePath `
+                    -UninstallRunnerPath $UninstallRunnerPath `
                     -SkillSourcePath $SkillSourcePath `
                     -SkillHashManifestPath $SkillHashManifestPath `
                     -BuildId $BuildId `

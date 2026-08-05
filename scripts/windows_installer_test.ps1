@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $helperPath = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
+$script:TestUninstallRunnerSource = Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"
 . $helperPath
 
 function Assert-True {
@@ -126,6 +127,7 @@ function Invoke-TestInstall {
             -LauncherPath $Launcher `
             -UninstallerPath $Uninstaller `
             -HelperSourcePath $helperPath `
+            -UninstallRunnerPath $script:TestUninstallRunnerSource `
             -SkillSourcePath $SkillSource `
             -SkillHashManifestPath $SkillHashManifestPath `
             -AgentSkillsRoot $AgentSkillsRoot `
@@ -541,6 +543,7 @@ try {
         -LauncherPath $launcher1 `
         -UninstallerPath $uninstaller `
         -HelperSourcePath $helperPath `
+        -UninstallRunnerPath $script:TestUninstallRunnerSource `
         -BuildId $id1 `
         -DisplayVersion $display1 `
         -NumericVersion $numeric1
@@ -554,6 +557,7 @@ try {
     Assert-HerdrManagedRoot -InstallRoot $installRoot
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $installRoot "bin\managed-install-v1\marker")) "herdr-managed-bin-v1`n" "Managed-bin sentinel is wrong."
     Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot "bin\herdr.exe")) (Get-HerdrSha256 -Path $launcher1) "Fresh launcher differs from its input."
+    Assert-Equal (Get-HerdrSha256 -Path (Join-Path $installRoot $script:UninstallRunnerName)) (Get-HerdrSha256 -Path $script:TestUninstallRunnerSource) "Fresh quiet-uninstall runner differs from its input."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$id1\herdr-launcher.exe"))) "Fresh runtime retained a second launcher hop."
     $installedSkill = Join-Path $script:TestAgentSkillsRoot "herdr\SKILL.md"
     Assert-Equal (Get-HerdrSha256 -Path $installedSkill) (Get-HerdrSha256 -Path $script:TestSkillSource) "Fresh install did not publish the canonical cross-agent skill."
@@ -655,7 +659,9 @@ try {
         "after-launcher-lock",
         "after-installer-helper",
         "after-state-directory",
-        "before-uninstaller"
+        "before-uninstaller",
+        "after-uninstaller",
+        "after-uninstall-runner"
     )) {
         Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
         $faultRoot = Join-Path $tempRoot "fault-$fault"
@@ -663,10 +669,12 @@ try {
         Write-TestFile -Path (Join-Path $faultRoot "state\launcher.lock") -Text ""
         Write-HerdrDurableText -Path (Join-Path $faultRoot "state\uninstall.pending") -Text $script:UninstallMarkerText
         Write-TestFile -Path (Join-Path $faultRoot "uninstall.exe") -Text "uninstaller"
+        Write-TestFile -Path (Join-Path $faultRoot $script:UninstallRunnerName) -Text "runner"
         Assert-Throws {
             Remove-HerdrUninstallResidual -InstallRoot $faultRoot -UninstallFault $fault -UninstallFaultMarkerPrefix $faultMarkerPrefix
         } "Injected uninstall cleanup fault" "Helper cleanup fault '$fault' did not interrupt its first pass."
         Assert-True (Test-Path -LiteralPath (Join-Path $faultRoot "uninstall.exe")) "Helper cleanup fault '$fault' removed its retry executable."
+        Assert-True (Test-Path -LiteralPath (Join-Path $faultRoot $script:UninstallRunnerName)) "Helper cleanup fault '$fault' removed its retry runner."
         Remove-HerdrUninstallResidual -InstallRoot $faultRoot -UninstallFault $fault -UninstallFaultMarkerPrefix $faultMarkerPrefix
         Assert-True (-not (Test-Path -LiteralPath $faultRoot)) "Helper cleanup fault '$fault' was not retryable."
         Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
@@ -826,13 +834,49 @@ try {
     } "not compatible with this setup.*Uninstall the existing Herdr or Herdr Win entry" "An incompatible install root was accepted."
     Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $incompatibleRoot "bin\herdr.exe")) "preserve" "Rejected incompatible content was changed."
 
+    # A junction at the fixed install root is rejected before transaction repair,
+    # setup publication, or uninstall cleanup can mutate its target.
+    $reparseInstallTarget = Join-Path $tempRoot "reparse-install-target"
+    New-Item -ItemType Directory -Path $reparseInstallTarget | Out-Null
+    Write-TestFile -Path (Join-Path $reparseInstallTarget "preserve.txt") -Text "preserve"
+    $reparseInstallRoot = Join-Path $tempRoot "reparse-install-root"
+    New-Item -ItemType Junction -Path $reparseInstallRoot -Target $reparseInstallTarget | Out-Null
+    try {
+        Assert-Throws {
+            Invoke-TestInstall -Root $reparseInstallRoot -Stage $stage1 -Launcher $launcher1 -Uninstaller $uninstaller -BuildId $id1 -DisplayVersion $display1 -NumericVersion $numeric1
+        } "reparse-point directory" "Setup followed a reparse-point install root."
+        Assert-Throws {
+            Invoke-TestUninstall -Root $reparseInstallRoot -ProcessProvider { @() }
+        } "reparse-point directory" "Uninstall followed a reparse-point install root."
+        Assert-Equal (Read-HerdrStrictUtf8 -Path (Join-Path $reparseInstallTarget "preserve.txt")) "preserve" "Rejected install-root junction changed its target."
+    } finally {
+        if (Test-Path -LiteralPath $reparseInstallRoot) {
+            [IO.Directory]::Delete($reparseInstallRoot)
+        }
+    }
+
     # ARP stores the truthful display/numeric identity and preserves mismatches.
     Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -PathAdded $true -RegistryPath $registryPath
     $arp = Get-ItemProperty -LiteralPath $registryPath
     Assert-Equal ([string]$arp.DisplayName) $script:ProductName "ARP package identity is not the configured distribution name."
     Assert-Equal ([string]$arp.DisplayVersion) $display2 "ARP display version is not truthful."
     Assert-Equal ([int]$arp.VersionMajor) 0 "ARP major version is wrong."
+    Assert-Equal ([string]$arp.QuietUninstallString) (Get-HerdrQuietUninstallString -InstallRoot $installRoot) "ARP quiet uninstall does not propagate terminal status through the runner."
     Assert-True (Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath) "ARP did not retain exact PATH ownership."
+    Set-ItemProperty -LiteralPath $registryPath -Name QuietUninstallString -Value ('"' + (Join-Path $installRoot "uninstall.exe") + '" /S')
+    Assert-Throws {
+        Assert-HerdrArpOwnership -InstallRoot $installRoot -RegistryPath $registryPath
+    } "not owned" "Legacy quiet uninstall registration was accepted outside setup adoption."
+    Assert-HerdrArpOwnership -InstallRoot $installRoot -RegistryPath $registryPath -AllowLegacyQuietUninstall
+    Assert-True (Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath -AllowLegacyQuietUninstall) "Setup-scoped legacy registration lost PATH ownership."
+    Set-HerdrArpRegistration -InstallRoot $installRoot -DisplayVersion $display2 -NumericVersion $numeric2 -PathAdded $true -RegistryPath $registryPath -AllowLegacyQuietUninstall
+    Assert-Equal ([string](Get-ItemProperty -LiteralPath $registryPath).QuietUninstallString) (Get-HerdrQuietUninstallString -InstallRoot $installRoot) "Setup adoption did not immediately rewrite legacy quiet uninstall registration."
+    New-ItemProperty -LiteralPath $registryPath -Name UnknownValue -Value "preserve" -PropertyType String | Out-Null
+    Assert-Throws { Assert-HerdrArpOwnership -InstallRoot $installRoot -RegistryPath $registryPath } "unknown or incomplete" "Unknown ARP state was accepted."
+    Remove-ItemProperty -LiteralPath $registryPath -Name UnknownValue
+    New-Item -Path (Join-Path $registryPath "UnknownSubkey") | Out-Null
+    Assert-Throws { Assert-HerdrArpOwnership -InstallRoot $installRoot -RegistryPath $registryPath } "unknown or incomplete" "Unknown ARP subkey was accepted."
+    Remove-Item -LiteralPath (Join-Path $registryPath "UnknownSubkey") -Force
     Remove-ItemProperty -LiteralPath $registryPath -Name PathAdded
     Assert-True (-not (Get-HerdrArpPathOwnership -InstallRoot $installRoot -RegistryPath $registryPath)) "Missing legacy PATH ownership was claimed."
     New-ItemProperty -LiteralPath $registryPath -Name PathAdded -Value "1" -PropertyType String | Out-Null
@@ -972,7 +1016,7 @@ try {
     if (Test-Path -LiteralPath $tempRoot) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    foreach ($fault in @("after-uninstall-pending", "after-launcher-lock", "after-installer-helper", "after-state-directory", "before-uninstaller")) {
+    foreach ($fault in @("after-uninstall-pending", "after-launcher-lock", "after-installer-helper", "after-state-directory", "before-uninstaller", "after-uninstaller", "after-uninstall-runner")) {
         Remove-HerdrUninstallFaultMarker -Fault $fault -MarkerPrefix $faultMarkerPrefix
     }
 }

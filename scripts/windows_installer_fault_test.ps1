@@ -14,7 +14,9 @@ param(
         "after-launcher-lock",
         "after-installer-helper",
         "after-state-directory",
-        "before-uninstaller"
+        "before-uninstaller",
+        "after-uninstaller",
+        "after-uninstall-runner"
     )
 )
 
@@ -130,7 +132,9 @@ $allowedFaults = @(
     "after-launcher-lock",
     "after-installer-helper",
     "after-state-directory",
-    "before-uninstaller"
+    "before-uninstaller",
+    "after-uninstaller",
+    "after-uninstall-runner"
 )
 if ($ProductName -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$') {
     throw "Invalid product name '$ProductName'."
@@ -171,6 +175,30 @@ function Start-TestProcess {
     } finally {
         $process.Dispose()
     }
+}
+
+function Invoke-TestQuietUninstall {
+    $uninstaller = Join-Path $installRoot "uninstall.exe"
+    $runner = Join-Path $installRoot "uninstall-runner.ps1"
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+        throw "Quiet-uninstall runner is missing: $runner"
+    }
+    $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $expected = ('"{0}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Uninstaller "{2}" -InstallRoot "{3}"' -f $powerShell, $runner, $uninstaller, $installRoot)
+    $actual = [string](Get-ItemProperty -LiteralPath $arpKey).QuietUninstallString
+    if ($actual -cne $expected) {
+        throw "ARP quiet uninstall command is not exact. Expected '$expected', got '$actual'."
+    }
+    return Start-TestProcess -FilePath $powerShell -Arguments @(
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass",
+        "-File", ('"' + $runner + '"'),
+        "-Uninstaller", ('"' + $uninstaller + '"'),
+        "-InstallRoot", ('"' + $installRoot + '"')
+    )
 }
 
 function Wait-TestUninstallerIdle {
@@ -306,7 +334,10 @@ try {
         [IO.File]::WriteAllText((Join-Path $settingsRoot "settings.toml"), "preserve-by-default")
 
         $uninstaller = Join-Path $installRoot "uninstall.exe"
-        [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
+        $firstQuietExit = Invoke-TestQuietUninstall
+        if ($firstQuietExit -eq 0) {
+            throw "Quiet uninstall reported success after injected failure $fault."
+        }
         Wait-TestCondition -Description "first injected uninstall for $fault" -Condition {
             Test-Path -LiteralPath $faultMarker
         }
@@ -327,8 +358,14 @@ try {
         if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
             throw "Injected uninstall $fault removed its retry executable."
         }
+        if (-not (Test-Path -LiteralPath (Join-Path $installRoot "uninstall-runner.ps1") -PathType Leaf)) {
+            throw "Injected uninstall $fault removed its quiet retry runner."
+        }
 
-        [void](Start-TestProcess -FilePath $uninstaller -Arguments @("/S"))
+        $retryQuietExit = Invoke-TestQuietUninstall
+        if ($retryQuietExit -ne 0) {
+            throw "Quiet uninstall retry $fault exited with $retryQuietExit."
+        }
         Wait-TestCondition -Description "retry uninstall for $fault" -Condition {
             -not (Test-Path -LiteralPath $installRoot) -and
                 -not (Test-Path -LiteralPath $arpKey) -and
@@ -359,7 +396,7 @@ try {
         -NumericVersion $NumericVersion `
         -ProductName $ProductName `
         -OutputPath $modifiedInstaller
-    $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
+    $modifiedInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S", "/WINGETjunk")
     if ($modifiedInstallExit -ne 0) {
         throw "Modified-tree installer exited with $modifiedInstallExit."
     }
@@ -368,6 +405,17 @@ try {
             (Test-Path -LiteralPath $arpKey)
     }
     Assert-TestSkillInstalled
+    if (Test-Path -LiteralPath (Join-Path $installRoot "state\package-manager")) {
+        throw "Setup accepted /WINGETjunk as package-manager ownership."
+    }
+    $wingetInstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S", "/WINGET")
+    if ($wingetInstallExit -ne 0) {
+        throw "Exact /WINGET setup exited with $wingetInstallExit."
+    }
+    $packageManagerMarker = [IO.File]::ReadAllText((Join-Path $installRoot "state\package-manager")).Replace("`r`n", "`n")
+    if ($packageManagerMarker -cne "herdr-package-manager-v1`nmanager=winget`n") {
+        throw "Setup did not accept exact /WINGET package-manager ownership."
+    }
     [IO.File]::WriteAllText($skillPath, "customized universal skill")
     [IO.File]::WriteAllText($claudeSkillPath, "customized Claude skill")
     New-Item -ItemType Directory -Path $settingsRoot -Force | Out-Null
@@ -375,6 +423,29 @@ try {
     [IO.File]::WriteAllText((Join-Path $skillRoot "user.txt"), "preserve-file")
     New-Item -ItemType Directory -Path (Join-Path $skillRoot "resources") | Out-Null
     [IO.File]::WriteAllText((Join-Path $skillRoot "resources\nested.txt"), "preserve-nested")
+    $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
+    $prefixUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGSjunk", "/REMOVE_SKILLjunk")
+    if ($prefixUninstallExit -ne 0) {
+        throw "Prefix-option uninstall exited with $prefixUninstallExit."
+    }
+    Wait-TestCondition -Description "prefix-option uninstall" -Condition {
+        -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+    }
+    Wait-TestUninstallerIdle
+    if (-not (Test-Path -LiteralPath $settingsRoot) -or -not (Test-Path -LiteralPath $skillPath) -or -not (Test-Path -LiteralPath $claudeSkillPath)) {
+        throw "A destructive option prefix was accepted as an exact uninstall flag."
+    }
+    $reinstallExit = Start-TestProcess -FilePath $modifiedInstaller -Arguments @("/S")
+    if ($reinstallExit -ne 0) {
+        throw "Reinstall after prefix-option test exited with $reinstallExit."
+    }
+    Wait-TestCondition -Description "reinstall after prefix-option test" -Condition {
+        (Test-Path -LiteralPath (Join-Path $installRoot "state\active")) -and (Test-Path -LiteralPath $arpKey)
+    }
+    if ([IO.File]::ReadAllText($skillPath) -cne "customized universal skill" -or
+        [IO.File]::ReadAllText($claudeSkillPath) -cne "customized Claude skill") {
+        throw "Reinstall after prefix-option test overwrote customized skill content."
+    }
     $modifiedUninstaller = Join-Path $installRoot "uninstall.exe"
     $modifiedUninstallExit = Start-TestProcess -FilePath $modifiedUninstaller -Arguments @("/S", "/REMOVE_SETTINGS", "/REMOVE_SKILL")
     if ($modifiedUninstallExit -ne 0) {

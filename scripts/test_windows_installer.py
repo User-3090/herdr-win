@@ -12,6 +12,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NSI = PROJECT_ROOT / "packaging/windows/installer/project.nsi"
 HELPER = PROJECT_ROOT / "packaging/windows/herdr-installer-helper.ps1"
+UNINSTALL_RUNNER = PROJECT_ROOT / "packaging/windows/uninstall-runner.ps1"
 PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
 POWERSHELL_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
 FAULT_TEST = PROJECT_ROOT / "scripts/windows_installer_fault_test.ps1"
@@ -56,6 +57,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         for path in (
             NSI,
             HELPER,
+            UNINSTALL_RUNNER,
             PACKAGER,
             POWERSHELL_TEST,
             FAULT_TEST,
@@ -114,7 +116,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         managed_install = MANAGED_INSTALL.read_text(encoding="utf-8")
         update = UPDATE.read_text(encoding="utf-8")
         lifecycle = POWERSHELL_TEST.read_text(encoding="utf-8")
-        self.assertIn('${GetOptions} "$0" "/WINGET" $1', nsi)
+        self.assertIn('StrCpy $2 "$0 "', nsi)
+        self.assertIn('${GetOptions} "$2" "/WINGET " $1', nsi)
         self.assertIn('StrCpy $InstallManager "WinGet"', nsi)
         self.assertIn('-InstallManager "$InstallManager"', nsi)
         self.assertIn(
@@ -349,6 +352,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "ARG_STAGE_DIR",
             "ARG_LAUNCHER_EXE",
             "ARG_HELPER_PS1",
+            "ARG_UNINSTALL_RUNNER_PS1",
             "ARG_SKILL_MD",
             "ARG_SKILL_HASH_MANIFEST",
             "ARG_ARTWORK_DIR",
@@ -507,6 +511,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertEqual(compression_order, tuple(sorted(compression_order)))
         self.assertIn("AllowSkipFiles off", nsi)
+        self.assertIn("CRCCheck force", nsi)
         self.assertIn("ManifestDPIAware true", nsi)
 
     def test_installer_artwork_is_an_exact_native_bmp3_set(self) -> None:
@@ -557,6 +562,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
     def test_nsis_is_per_user_silent_safe_and_truthful(self) -> None:
         nsi = NSI.read_text(encoding="utf-8")
         helper = HELPER.read_text(encoding="utf-8")
+        runner = UNINSTALL_RUNNER.read_text(encoding="utf-8")
         self.assertIn("RequestExecutionLevel user", nsi)
         self.assertIn(
             'InstallDir "$LOCALAPPDATA\\Programs\\${INFO_PRODUCTNAME}"', nsi
@@ -577,8 +583,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("IntCmp $0 600", nsi)
         self.assertIn('StrCpy $SettingsDisposition "Keep"', nsi)
         self.assertIn('StrCpy $SkillDisposition "Auto"', nsi)
-        self.assertIn('${GetOptions} "$0" "/REMOVE_SETTINGS" $1', nsi)
-        self.assertIn('${GetOptions} "$0" "/REMOVE_SKILL" $1', nsi)
+        self.assertIn('${GetOptions} "$2" "/REMOVE_SETTINGS " $1', nsi)
+        self.assertIn('${GetOptions} "$2" "/REMOVE_SKILL " $1', nsi)
         self.assertIn('StrCpy $SettingsDisposition "Remove"', nsi)
         self.assertNotIn("/KEEP_SETTINGS", nsi)
         self.assertIn('${NSD_Check} $SettingsCheckbox', nsi)
@@ -592,12 +598,22 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("SetErrorLevel 1", nsi)
         self.assertIn("SetErrorLevel 0", nsi)
         self.assertIn("QuietUninstallString", helper)
+        self.assertIn("Get-HerdrQuietUninstallString", helper)
+        self.assertIn('Arguments = "/S _?=$InstallRoot"', runner)
+        self.assertIn("$installRootItem = Get-Item -LiteralPath $InstallRoot -Force", runner)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", runner)
+        self.assertIn("WaitForExit(180000)", runner)
+        self.assertIn("exit $exitCode", runner)
         message_boxes = [match.start() for match in re.finditer(r"\bMessageBox\b", nsi)]
         self.assertEqual(len(message_boxes), 2)
         for position in message_boxes:
             self.assertIn("IfSilent", nsi[max(0, position - 120) : position])
         self.assertEqual(
             nsi.count('File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"'), 2
+        )
+        self.assertEqual(
+            nsi.count('File /oname=uninstall-runner.ps1 "${ARG_UNINSTALL_RUNNER_PS1}"'),
+            1,
         )
         self.assertIn(
             '-File "$PLUGINSDIR\\installer-helper.ps1" -Action Uninstall', nsi
@@ -640,6 +656,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         for exact_name in (
             '"state"',
             '"uninstall.exe"',
+            "$script:UninstallRunnerName",
             '"installer-helper.ps1"',
             '"launcher.lock"',
             '"uninstall.pending"',
@@ -657,8 +674,14 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "after-installer-helper",
             "after-state-directory",
             "before-uninstaller",
+            "after-uninstaller",
+            "after-uninstall-runner",
         ):
             self.assertIn(f'"{stage}"', helper)
+        self.assertIn("Remove-HerdrTerminalUninstallFiles", cleanup)
+        self.assertIn("Bytes = [IO.File]::ReadAllBytes($path)", cleanup)
+        self.assertIn("Sha256 = Get-HerdrSha256 -Path $path", cleanup)
+        self.assertIn("actual pre-cleanup bytes", cleanup)
         lifecycle = helper[
             helper.index("function Invoke-HerdrUninstall {") : helper.index(
                 "if ($MyInvocation.InvocationName -ne '.')"
@@ -683,6 +706,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         )
         self.assertIn("downloads.sourceforge.net/project/nsis", packager)
         self.assertIn('"/WX"', packager)
+        self.assertIn('"/DARG_UNINSTALL_RUNNER_PS1=$uninstallRunner"', packager)
         self.assertIn('"validate"', packager)
         self.assertIn('package_windows_conpty.py', packager)
         self.assertIn('"--max-time", "120"', packager)
