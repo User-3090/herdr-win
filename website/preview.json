@@ -2,40 +2,76 @@
   "schema_version": 1,
   "channel": "preview",
   "base_version": "0.8.0",
-  "build_id": "346411fa21af.bc083aca84b7",
+  "build_id": "346411fa21af.0c42b05a5ab6",
   "commit": "346411fa21afd297f5ed3b3fa56f9e3fbf7654b7",
-  "built_at": "2026-08-05T09:55:38Z",
+  "built_at": "2026-08-05T20:01:48Z",
   "protocol": 20,
-  "notes": "Unofficial herdr-win snapshot built from Herdr v0.8.0, the latest stable upstream release selected during the manual refresh, plus the maintained herdr-win delta.\nMatching Linux and macOS executables are built from that same stable source for cross-platform remote compatibility.\n\n- herdr-win release: `v2026.08.05.3`\n- Latest stable upstream release: `Herdr v0.8.0`\n- Upstream source: `346411fa21afd297f5ed3b3fa56f9e3fbf7654b7`\n- herdr-win control revision: `b6e6c0455502d007bef573662d4dd965167f6624`\n- Build identity: `346411fa21af.bc083aca84b7`\n\nApplied patches:\n- `0001-windows-terminal-appearance.patch`\n- `0003-windows-remote-attach.patch`\n- `0004-windows-managed-distribution.patch`\n- `0005-opencode-retry-notifications.patch`\n- `0006-harden-curl-transfers.patch`\n\nThe executable and command remain `herdr` on every platform. This is not an official upstream release.",
+  "notes": "Unofficial herdr-win snapshot built from Herdr v0.8.0, the latest stable upstream release selected during the manual refresh, plus the maintained herdr-win delta.\nMatching Linux and macOS executables are built from that same stable source for cross-platform remote compatibility.\n\n- herdr-win release: `v2026.08.05.4`\n- Latest stable upstream release: `Herdr v0.8.0`\n- Upstream source: `346411fa21afd297f5ed3b3fa56f9e3fbf7654b7`\n- herdr-win control revision: `a7813afd70d97e22741846134dd5979a0ea9a391`\n- Build identity: `346411fa21af.0c42b05a5ab6`\n\nApplied patches:\n- `0001-windows-terminal-appearance.patch`\n- `0003-windows-remote-attach.patch`\n- `0004-windows-managed-distribution.patch`\n- `0005-opencode-retry-notifications.patch`\n- `0006-harden-curl-transfers.patch`\n\nThe executable and command remain `herdr` on every platform. This is not an official upstream release.",
   "assets": {
     "linux-x86_64": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_linux_amd64",
-      "sha256": "f5d5e584250b6000a06f8bca2cfca2ea86c36117a828624c6bdae3992c9ac189"
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_linux_amd64",
+      "sha256": "7d1979c02e9881654f1a26225d8bea9de3694cfd2c71f333b9b2b5eb149b4623"
     },
     "linux-aarch64": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_linux_arm64",
-      "sha256": "bf3c08a418a413374b4e5f2dc17814091a0014a88db47e662e39fb749a38eb96"
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_linux_arm64",
+      "sha256": "13683181d36e020fbc244918e147c260bbc61a5ada1fac1c99ec8b3dd01c854e"
     },
     "macos-x86_64": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_macos_amd64",
-      "sha256": "fa06b5a1d5b1713a20c6078463e190f2a8d1e0ad08ff22cd7b9281344689b3e7"
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_macos_amd64",
+      "sha256": "75c06f2ee82601a0e79a5ad0603eeea75112bc98112ccea4add4c6eb5290b6d8"
     },
     "macos-aarch64": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_macos_arm64",
-      "sha256": "7324ddf93b105e7e752ccc4bca025c72531f998c69f971edd02a6603eb6bb155"
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_macos_arm64",
+      "sha256": "765d5b4b0dced88dc143aea7858aa1300a205c2f625090d54beccd9ef831b5aa"
     },
     "windows-x86_64": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_windows_amd64.zip",
-      "sha256": "35b65c7cff7c4c4a2563d0d62bf616052be9dd0d33902553c1de2a7a03ab1891",
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_windows_amd64.zip",
+      "sha256": "09fbee54d37afa589faf205912d11e9353fdc63ff854c27790dd53cabcdf45c5",
       "format": "zip"
     },
     "windows-x86_64-installer": {
-      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.3/herdr-win_v2026.08.05.3_windows_amd64_setup.exe",
-      "sha256": "c56d67715d5cff353fa586183890632f8e83b0c799ae19005ea6a05e615b0fe3",
+      "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_windows_amd64_setup.exe",
+      "sha256": "183a3d6432231f3099a94b6eb62b8fecf59f72a9725efc0c8acc28f8d162f0e4",
       "format": "nsis"
     }
   },
   "builds": {
+    "346411fa21af.0c42b05a5ab6": {
+      "base_version": "0.8.0",
+      "commit": "346411fa21afd297f5ed3b3fa56f9e3fbf7654b7",
+      "built_at": "2026-08-05T20:01:48Z",
+      "protocol": 20,
+      "tag": "v2026.08.05.4",
+      "assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_linux_amd64",
+          "sha256": "7d1979c02e9881654f1a26225d8bea9de3694cfd2c71f333b9b2b5eb149b4623"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_linux_arm64",
+          "sha256": "13683181d36e020fbc244918e147c260bbc61a5ada1fac1c99ec8b3dd01c854e"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_macos_amd64",
+          "sha256": "75c06f2ee82601a0e79a5ad0603eeea75112bc98112ccea4add4c6eb5290b6d8"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_macos_arm64",
+          "sha256": "765d5b4b0dced88dc143aea7858aa1300a205c2f625090d54beccd9ef831b5aa"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_windows_amd64.zip",
+          "sha256": "09fbee54d37afa589faf205912d11e9353fdc63ff854c27790dd53cabcdf45c5",
+          "format": "zip"
+        },
+        "windows-x86_64-installer": {
+          "url": "https://github.com/hdosys/herdr-win/releases/download/v2026.08.05.4/herdr-win_v2026.08.05.4_windows_amd64_setup.exe",
+          "sha256": "183a3d6432231f3099a94b6eb62b8fecf59f72a9725efc0c8acc28f8d162f0e4",
+          "format": "nsis"
+        }
+      },
+      "release_version": "2026.08.05.4"
+    },
     "346411fa21af.bc083aca84b7": {
       "base_version": "0.8.0",
       "commit": "346411fa21afd297f5ed3b3fa56f9e3fbf7654b7",
@@ -287,5 +323,5 @@
       }
     }
   },
-  "release_version": "2026.08.05.3"
+  "release_version": "2026.08.05.4"
 }
