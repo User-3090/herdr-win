@@ -54,7 +54,9 @@ tests remain the detailed implementation truth.
   the selected immutable runtime payload directly; runtime directories never carry
   a second launcher. Setup replaces the launcher immediately when idle or stages a
   replacement whose hash and embedded build ID are validated before publication
-  after the final managed payload exits.
+  after the final managed payload exits. Every retained release candidate has a
+  distinct runtime build ID, including retries or independent builds from unchanged
+  source, so byte-different payloads never compete for one immutable runtime path.
 - Setup updates only an exact current managed installation. Any other existing
   install layout, including the former runtime-local launcher design, is preserved
   and rejected with instructions to uninstall the existing **Herdr** or **Herdr Win**

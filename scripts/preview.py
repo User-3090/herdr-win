@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -194,6 +195,22 @@ def herdr_win_asset_names(release_version: str) -> dict[str, str]:
     }
 
 
+def candidate_build_id(
+    upstream_sha: str, control_sha: str, run_id: str, run_attempt: int
+) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", upstream_sha):
+        raise ValueError("upstream_sha must be a full lowercase 40-hex commit")
+    if not re.fullmatch(r"[0-9a-f]{40}", control_sha):
+        raise ValueError("control_sha must be a full lowercase 40-hex commit")
+    if not re.fullmatch(r"[1-9][0-9]*", run_id):
+        raise ValueError("run_id must be a positive decimal GitHub Actions run ID")
+    if run_attempt < 1:
+        raise ValueError("run_attempt must be a positive GitHub Actions attempt")
+    identity = f"{control_sha}\n{run_id}\n{run_attempt}\n".encode()
+    candidate = hashlib.sha256(identity).hexdigest()[:12]
+    return f"{upstream_sha[:12]}.{candidate}"
+
+
 def default_asset_urls(
     repo: str, tag: str, release_version: str | None = None
 ) -> dict[str, str]:
@@ -248,7 +265,7 @@ def build_manifest(
     release_version: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{12}\.[0-9a-f]{12}", build_id):
-        raise ValueError("build_id must be two lowercase 12-hex commit prefixes")
+        raise ValueError("build_id must be two lowercase 12-hex components")
     urls = default_asset_urls(repo, tag, release_version)
     assets = asset_objects(urls, shas)
     current = read_json(output) or {}
@@ -340,6 +357,18 @@ def cmd_asset_names(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidate_build_id(args: argparse.Namespace) -> int:
+    print(
+        candidate_build_id(
+            args.upstream_sha,
+            args.control_sha,
+            args.run_id,
+            args.run_attempt,
+        )
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Preview channel release helpers")
     sub = parser.add_subparsers(required=True)
@@ -372,6 +401,13 @@ def main() -> int:
     asset_names = sub.add_parser("herdr-win-asset-names")
     asset_names.add_argument("--release-version", required=True)
     asset_names.set_defaults(func=cmd_asset_names)
+
+    build_id = sub.add_parser("candidate-build-id")
+    build_id.add_argument("--upstream-sha", required=True)
+    build_id.add_argument("--control-sha", required=True)
+    build_id.add_argument("--run-id", required=True)
+    build_id.add_argument("--run-attempt", required=True, type=int)
+    build_id.set_defaults(func=cmd_candidate_build_id)
 
     current = sub.add_parser("current-commit")
     current.add_argument("--manifest", default="website/preview.json")

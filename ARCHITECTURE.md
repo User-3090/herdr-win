@@ -186,7 +186,10 @@ behavior; code and tests remain the detailed implementation truth.
   native/package tests and the four upstream-supported Linux/macOS executable
   builds. Every platform job independently replays recorded `BASE` and the queue;
   each source tree must match the tree tested by the Windows owner job, while one
-  shared upstream/control build ID and protocol value identify all assets.
+  shared candidate-scoped build ID and protocol value identify all assets. The
+  build ID combines the upstream prefix with a hash of the selected control commit,
+  workflow run ID, and attempt, preventing byte-distinct rebuilds of unchanged
+  source from colliding in one immutable runtime directory.
 - A successful build retains its candidate artifacts for 14 days. The Windows
   candidate owns `RELEASE_CANDIDATE.json`, which records the workflow run and
   attempt, CalVer, source/control identities, protocol, and exact expected release
@@ -222,10 +225,11 @@ behavior; code and tests remain the detailed implementation truth.
   compatibility. The GitHub release title is `herdr-win v<CalVer> (Herdr
   v<upstream-version>)`; release notes and installer metadata expose that same
   stable upstream version alongside the CalVer-bearing original filename.
-- The runtime build ID remains the upstream/control 12-hex pair because it owns
-  managed-runtime identity and exact source provenance. CalVer owns the human fork
-  release identity; the upstream Cargo version remains compatibility/provenance
-  metadata and does not define the herdr-win release.
+- The runtime build ID remains two lowercase 12-hex components because it owns
+  managed-runtime identity: the upstream prefix plus the candidate identity hash.
+  Full upstream/control hashes and run/attempt metadata remain the exact provenance
+  owners. CalVer owns the human fork release identity; the upstream Cargo version
+  remains compatibility/provenance metadata and does not define the herdr-win release.
 - `website/preview.json` is generated channel state and the promotion operation is
   its only writer. Release publication uses the exact tested candidate and fails
   closed on source drift, stale control state, missing/mutable assets, or

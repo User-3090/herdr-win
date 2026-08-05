@@ -206,7 +206,7 @@ class PreviewNotesTests(unittest.TestCase):
                 set(preview.ASSET_TARGETS),
             )
 
-    def test_manifest_build_id_uses_source_and_control_hashes(self):
+    def test_manifest_build_id_uses_two_hex_components(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "two lowercase 12-hex"):
                 preview.build_manifest(
@@ -222,6 +222,29 @@ class PreviewNotesTests(unittest.TestCase):
                     shas=VALID_SHAS,
                     retain=1,
                 )
+
+    def test_candidate_build_id_is_stable_and_attempt_scoped(self):
+        upstream = "a" * 40
+        control = "b" * 40
+
+        first = preview.candidate_build_id(upstream, control, "123456789", 1)
+        repeated = preview.candidate_build_id(upstream, control, "123456789", 1)
+        retry = preview.candidate_build_id(upstream, control, "123456789", 2)
+
+        self.assertEqual(first, "aaaaaaaaaaaa.cd2554cf7a34")
+        self.assertEqual(repeated, first)
+        self.assertEqual(retry, "aaaaaaaaaaaa.86029009c362")
+        self.assertNotEqual(retry, first)
+
+    def test_candidate_build_id_rejects_invalid_identity(self):
+        with self.assertRaisesRegex(ValueError, "upstream_sha"):
+            preview.candidate_build_id("bad", "b" * 40, "1", 1)
+        with self.assertRaisesRegex(ValueError, "control_sha"):
+            preview.candidate_build_id("a" * 40, "bad", "1", 1)
+        with self.assertRaisesRegex(ValueError, "run_id"):
+            preview.candidate_build_id("a" * 40, "b" * 40, "0", 1)
+        with self.assertRaisesRegex(ValueError, "run_attempt"):
+            preview.candidate_build_id("a" * 40, "b" * 40, "1", 0)
 
     def test_hidden_subjects_include_preview_manifest_commits(self):
         self.assertTrue(preview.hidden_subject("docs: update preview manifest"))

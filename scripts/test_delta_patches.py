@@ -304,8 +304,13 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertIn("Release promotion does not accept a CalVer override", workflow)
         self.assertIn("Candidate builds do not accept a promotion build run ID", workflow)
         self.assertIn(
-            "Candidate build ID does not match its source identities", workflow
+            "Candidate build ID does not match its run identity", workflow
         )
+        self.assertEqual(workflow.count("candidate-build-id"), 2)
+        self.assertIn("--run-id $env:GITHUB_RUN_ID", workflow)
+        self.assertIn("--run-attempt $env:GITHUB_RUN_ATTEMPT", workflow)
+        self.assertIn('--run-id "$BUILD_RUN_ID"', workflow)
+        self.assertIn('--run-attempt "$candidate_attempt"', workflow)
         self.assertIn(
             'selected="$(cd control && python3 scripts/preview.py select-commit '
             '--ref origin/master)"',

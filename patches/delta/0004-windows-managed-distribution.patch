@@ -1,4 +1,4 @@
-From 6fe863dcf7012d2fea2884f7e57e70b2d2b8f962 Mon Sep 17 00:00:00 2001
+From 2434998f3b8f0c7d5212d32ac36c0827112fb984 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
@@ -20,9 +20,9 @@ Refs ogulcancelik/herdr#1947
  packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
  scripts/package_windows_installer.ps1         |  501 +++
- scripts/preview.py                            |   88 +-
+ scripts/preview.py                            |  124 +-
  scripts/test_package_windows_conpty.py        |   36 +-
- scripts/test_preview.py                       |  180 +-
+ scripts/test_preview.py                       |  203 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
  scripts/test_windows_installer.py             |  803 +++++
@@ -49,7 +49,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  878 ++++-
- 44 files changed, 9845 insertions(+), 392 deletions(-)
+ 44 files changed, 9904 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/herdr-installer-helper.ps1
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
@@ -55848,10 +55848,14 @@ index 0000000000000000000000000000000000000000..93418f47d45d8bdd393f1ff563bd608a
 +
 +Write-Host "Created $DistributionName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
-index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51ffba676d 100644
+index fa55d623d865cfe1f797ab3efad58ae842f91c7c..20a76dada8055be79602e7e1e4a4ab31ff45e2f6 100644
 --- a/scripts/preview.py
 +++ b/scripts/preview.py
-@@ -5,6 +5,7 @@ import argparse
+@@ -2,9 +2,11 @@
+ from __future__ import annotations
+ 
+ import argparse
++import hashlib
  import json
  import re
  import subprocess
@@ -55859,7 +55863,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
  from pathlib import Path
  from typing import Any
  
-@@ -14,11 +15,16 @@ ASSET_TARGETS = (
+@@ -14,11 +16,16 @@ ASSET_TARGETS = (
      "macos-x86_64",
      "macos-aarch64",
      "windows-x86_64",
@@ -55876,7 +55880,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
  HIDDEN_SUBJECTS = (
      "docs: update website manifest",
      "docs: update preview manifest",
-@@ -164,9 +170,38 @@ def build_notes(previous: str, commit: str, build_id: str, base_version: str, re
+@@ -164,9 +171,54 @@ def build_notes(previous: str, commit: str, build_id: str, base_version: str, re
      return "\n".join(lines).rstrip() + "\n"
  
  
@@ -55893,7 +55897,8 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
 +        )
 +    except ValueError as error:
 +        raise ValueError("release_version must contain a real UTC calendar date") from error
-+    return {
+     return {
+-        target: f"https://github.com/{repo}/releases/download/{tag}/{EXPECTED_ASSET_NAMES[target]}"
 +        "linux-x86_64": f"herdr-win_v{release_version}_linux_amd64",
 +        "linux-aarch64": f"herdr-win_v{release_version}_linux_arm64",
 +        "macos-x86_64": f"herdr-win_v{release_version}_macos_amd64",
@@ -55905,19 +55910,34 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
 +    }
 +
 +
++def candidate_build_id(
++    upstream_sha: str, control_sha: str, run_id: str, run_attempt: int
++) -> str:
++    if not re.fullmatch(r"[0-9a-f]{40}", upstream_sha):
++        raise ValueError("upstream_sha must be a full lowercase 40-hex commit")
++    if not re.fullmatch(r"[0-9a-f]{40}", control_sha):
++        raise ValueError("control_sha must be a full lowercase 40-hex commit")
++    if not re.fullmatch(r"[1-9][0-9]*", run_id):
++        raise ValueError("run_id must be a positive decimal GitHub Actions run ID")
++    if run_attempt < 1:
++        raise ValueError("run_attempt must be a positive GitHub Actions attempt")
++    identity = f"{control_sha}\n{run_id}\n{run_attempt}\n".encode()
++    candidate = hashlib.sha256(identity).hexdigest()[:12]
++    return f"{upstream_sha[:12]}.{candidate}"
++
++
 +def default_asset_urls(
 +    repo: str, tag: str, release_version: str | None = None
 +) -> dict[str, str]:
 +    names = dict(EXPECTED_ASSET_NAMES)
 +    if release_version is not None:
 +        names.update(herdr_win_asset_names(release_version))
-     return {
--        target: f"https://github.com/{repo}/releases/download/{tag}/{EXPECTED_ASSET_NAMES[target]}"
++    return {
 +        target: f"https://github.com/{repo}/releases/download/{tag}/{names[target]}"
          for target in ASSET_TARGETS
      }
  
-@@ -181,17 +216,19 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
+@@ -181,17 +233,19 @@ def read_sha_file(path: Path | None) -> dict[str, str]:
  
  
  def asset_objects(urls: dict[str, str], shas: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -55945,7 +55965,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
          assets[target] = entry
      return assets
  
-@@ -208,13 +245,16 @@ def build_manifest(
+@@ -208,13 +262,16 @@ def build_manifest(
      notes: str,
      shas: dict[str, str],
      retain: int,
@@ -55953,7 +55973,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
  ) -> str:
 -    urls = default_asset_urls(repo, tag)
 +    if not re.fullmatch(r"[0-9a-f]{12}\.[0-9a-f]{12}", build_id):
-+        raise ValueError("build_id must be two lowercase 12-hex commit prefixes")
++        raise ValueError("build_id must be two lowercase 12-hex components")
 +    urls = default_asset_urls(repo, tag, release_version)
      assets = asset_objects(urls, shas)
      current = read_json(output) or {}
@@ -55966,7 +55986,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
          "base_version": normalize_version(base_version),
          "commit": commit,
          "built_at": built_at,
-@@ -222,6 +262,9 @@ def build_manifest(
+@@ -222,6 +279,9 @@ def build_manifest(
          "tag": tag,
          "assets": assets,
      }
@@ -55976,7 +55996,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
      ordered_builds = {
          key: builds[key]
          for key in sorted(
-@@ -242,6 +285,8 @@ def build_manifest(
+@@ -242,6 +302,8 @@ def build_manifest(
          "assets": assets,
          "builds": ordered_builds,
      }
@@ -55985,7 +56005,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
      return json.dumps(manifest, indent=2) + "\n"
  
  
-@@ -267,6 +312,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
+@@ -267,6 +329,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
          notes=notes,
          shas=shas,
          retain=args.retain,
@@ -55993,7 +56013,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
      )
      Path(args.output).write_text(content, encoding="utf-8")
      return 0
-@@ -289,6 +335,11 @@ def cmd_range_base(args: argparse.Namespace) -> int:
+@@ -289,6 +352,23 @@ def cmd_range_base(args: argparse.Namespace) -> int:
      return 0
  
  
@@ -56002,10 +56022,22 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
 +    return 0
 +
 +
++def cmd_candidate_build_id(args: argparse.Namespace) -> int:
++    print(
++        candidate_build_id(
++            args.upstream_sha,
++            args.control_sha,
++            args.run_id,
++            args.run_attempt,
++        )
++    )
++    return 0
++
++
  def main() -> int:
      parser = argparse.ArgumentParser(description="Preview channel release helpers")
      sub = parser.add_subparsers(required=True)
-@@ -299,13 +350,13 @@ def main() -> int:
+@@ -299,13 +379,13 @@ def main() -> int:
      notes.add_argument("--commit", required=True)
      notes.add_argument("--build-id", required=True)
      notes.add_argument("--base-version", required=True)
@@ -56021,7 +56053,7 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
      manifest.add_argument("--tag", required=True)
      manifest.add_argument("--build-id", required=True)
      manifest.add_argument("--commit", required=True)
-@@ -315,8 +366,13 @@ def main() -> int:
+@@ -315,8 +395,20 @@ def main() -> int:
      manifest.add_argument("--notes", required=True)
      manifest.add_argument("--sha-file")
      manifest.add_argument("--retain", type=int, default=30)
@@ -56031,6 +56063,13 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..7e0d15912ee22b09745d342a7de34e51
 +    asset_names = sub.add_parser("herdr-win-asset-names")
 +    asset_names.add_argument("--release-version", required=True)
 +    asset_names.set_defaults(func=cmd_asset_names)
++
++    build_id = sub.add_parser("candidate-build-id")
++    build_id.add_argument("--upstream-sha", required=True)
++    build_id.add_argument("--control-sha", required=True)
++    build_id.add_argument("--run-id", required=True)
++    build_id.add_argument("--run-attempt", required=True, type=int)
++    build_id.set_defaults(func=cmd_candidate_build_id)
 +
      current = sub.add_parser("current-commit")
      current.add_argument("--manifest", default="website/preview.json")
@@ -56113,7 +56152,7 @@ index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..7a9f323734bd548969b6e4034be3cca5
              (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
              with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
 diff --git a/scripts/test_preview.py b/scripts/test_preview.py
-index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb685b2b042 100644
+index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d81153d7307bb 100644
 --- a/scripts/test_preview.py
 +++ b/scripts/test_preview.py
 @@ -9,6 +9,11 @@ from pathlib import Path
@@ -56128,7 +56167,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
  
  class PreviewNotesTests(unittest.TestCase):
      def test_humanize_groups_conventional_subjects(self):
-@@ -31,55 +36,193 @@ class PreviewNotesTests(unittest.TestCase):
+@@ -31,55 +36,216 @@ class PreviewNotesTests(unittest.TestCase):
              notes = "Preview notes\n"
              content = preview.build_manifest(
                  output=output,
@@ -56196,7 +56235,8 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
 +                data["builds"]["abcdef123456.7890abcdef12"]["release_version"],
 +                "2026.06.02.1",
 +            )
-+
+ 
+-    def test_windows_preview_asset_requires_sha256(self):
 +    def test_herdr_win_asset_names_require_real_calver(self):
 +        self.assertEqual(
 +            preview.herdr_win_asset_names("2026.07.31.1"),
@@ -56227,8 +56267,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
 +                ValueError, "release_version"
 +            ):
 +                preview.herdr_win_asset_names(invalid)
- 
--    def test_windows_preview_asset_requires_sha256(self):
++
 +    def test_preview_assets_require_sha256(self):
          with tempfile.TemporaryDirectory() as tmp:
 -            with self.assertRaisesRegex(ValueError, "windows-x86_64 requires"):
@@ -56319,7 +56358,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
 +                set(preview.ASSET_TARGETS),
 +            )
 +
-+    def test_manifest_build_id_uses_source_and_control_hashes(self):
++    def test_manifest_build_id_uses_two_hex_components(self):
 +        with tempfile.TemporaryDirectory() as tmp:
 +            with self.assertRaisesRegex(ValueError, "two lowercase 12-hex"):
 +                preview.build_manifest(
@@ -56336,10 +56375,33 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
 +                        retain=1,
 +                    )
 +
++    def test_candidate_build_id_is_stable_and_attempt_scoped(self):
++        upstream = "a" * 40
++        control = "b" * 40
++
++        first = preview.candidate_build_id(upstream, control, "123456789", 1)
++        repeated = preview.candidate_build_id(upstream, control, "123456789", 1)
++        retry = preview.candidate_build_id(upstream, control, "123456789", 2)
++
++        self.assertEqual(first, "aaaaaaaaaaaa.cd2554cf7a34")
++        self.assertEqual(repeated, first)
++        self.assertEqual(retry, "aaaaaaaaaaaa.86029009c362")
++        self.assertNotEqual(retry, first)
++
++    def test_candidate_build_id_rejects_invalid_identity(self):
++        with self.assertRaisesRegex(ValueError, "upstream_sha"):
++            preview.candidate_build_id("bad", "b" * 40, "1", 1)
++        with self.assertRaisesRegex(ValueError, "control_sha"):
++            preview.candidate_build_id("a" * 40, "bad", "1", 1)
++        with self.assertRaisesRegex(ValueError, "run_id"):
++            preview.candidate_build_id("a" * 40, "b" * 40, "0", 1)
++        with self.assertRaisesRegex(ValueError, "run_attempt"):
++            preview.candidate_build_id("a" * 40, "b" * 40, "1", 0)
++
      def test_hidden_subjects_include_preview_manifest_commits(self):
          self.assertTrue(preview.hidden_subject("docs: update preview manifest"))
          self.assertTrue(preview.hidden_subject("docs: update website manifest"))
-@@ -183,7 +326,7 @@ file: ../../../public/assets/logo.svg
+@@ -183,7 +349,7 @@ file: ../../../public/assets/logo.svg
          self.assertIn("from '../../../../components/LocaleWidget.astro'", output)
          self.assertIn("Preview build `2026-07-29-44b3adb12552`", output)
          self.assertIn(
@@ -56348,7 +56410,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..df61b97790d0c15bd2e4c5d6c5166eb6
              output,
          )
  
-@@ -211,7 +354,6 @@ file: ../../../public/assets/logo.svg
+@@ -211,7 +377,6 @@ file: ../../../public/assets/logo.svg
          self.assertIn("[Install](/docs/0.7.4/install/)", output)
          self.assertIn("file: ../../../../../public/assets/logo.svg", output)
          self.assertIn("from '../../../../components/ConfigReference.astro'", output)
@@ -62874,3 +62936,4 @@ index 2120fb3c9cad9fd20cfae7dee307298120d7fca6..6cb62f46daafa763deab9fc83aa0d3ed
      }
 -- 
 2.55.0.windows.3
+

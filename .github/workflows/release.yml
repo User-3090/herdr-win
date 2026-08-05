@@ -167,10 +167,17 @@ jobs:
             if ($LASTEXITCODE -ne 0 -or $selected -ne $control) {
               throw "tested preview selector disagrees with validated control revision $control"
             }
+            $buildId = (python scripts\preview.py candidate-build-id `
+              --upstream-sha $upstream `
+              --control-sha $control `
+              --run-id $env:GITHUB_RUN_ID `
+              --run-attempt $env:GITHUB_RUN_ATTEMPT).Trim()
+            if ($LASTEXITCODE -ne 0 -or $buildId -cnotmatch '^[0-9a-f]{12}\.[0-9a-f]{12}$') {
+              throw "failed to derive candidate-scoped build identity"
+            }
           } finally {
             Pop-Location
           }
-          $buildId = "$($upstream.Substring(0, 12)).$($control.Substring(0, 12))"
           "upstream_sha=$upstream" >> $env:GITHUB_OUTPUT
           "control_sha=$control" >> $env:GITHUB_OUTPUT
           "build_id=$buildId" >> $env:GITHUB_OUTPUT
@@ -984,6 +991,7 @@ jobs:
           upstream_sha="$(jq -er .upstream_sha "$metadata")"
           control_sha="$(jq -er .control_sha "$metadata")"
           build_id="$(jq -er .build_id "$metadata")"
+          candidate_attempt="$(jq -er '.workflow_run_attempt | tostring' "$metadata")"
           replay_tree="$(jq -er .replay_tree "$metadata")"
           base_version="$(jq -er .base_version "$metadata")"
           protocol="$(jq -er .protocol "$metadata")"
@@ -1048,8 +1056,13 @@ jobs:
             echo "$unexpected_paths" >&2
             exit 1
           fi
-          if [[ "${upstream_sha:0:12}.${control_sha:0:12}" != "$build_id" ]]; then
-            echo "Candidate build ID does not match its source identities." >&2
+          expected_build_id="$(python3 control/scripts/preview.py candidate-build-id \
+            --upstream-sha "$upstream_sha" \
+            --control-sha "$control_sha" \
+            --run-id "$BUILD_RUN_ID" \
+            --run-attempt "$candidate_attempt")"
+          if [[ "$expected_build_id" != "$build_id" ]]; then
+            echo "Candidate build ID does not match its run identity." >&2
             exit 1
           fi
 

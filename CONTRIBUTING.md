@@ -104,7 +104,10 @@ separate dispatches:
 1. Choose `build` and supply one unused herdr-win CalVer in `YYYY.MM.DD.N` format.
    Use the intended UTC release date and increment `N` for another release that
    day. The successful run retains the complete candidate and its provenance for
-   14 days but does not publish a release. Record its workflow run ID.
+   14 days but does not publish a release. Record its workflow run ID. The workflow
+   derives one candidate-scoped runtime build ID from the selected control commit,
+   run ID, and attempt; never assign that identity to a separately built local
+   artifact.
 2. Review the successful candidate run, then choose `promote` and supply that run
    ID before its artifacts expire. Promotion accepts no replacement CalVer and
    does not replay source, compile, or package; it publishes only the candidate's

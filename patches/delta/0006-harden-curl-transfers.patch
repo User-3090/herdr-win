@@ -1,4 +1,4 @@
-From c2819238a04417e49a5e24d1148e75075e5b4f80 Mon Sep 17 00:00:00 2001
+From 56745402646de95468a16dcaf7274d9ff59651ad Mon Sep 17 00:00:00 2001
 From: User-3090 <71881005+User-3090@users.noreply.github.com>
 Date: Wed, 5 Aug 2026 09:38:50 +0200
 Subject: [PATCH 5/5] fix(security): harden curl transfers
@@ -239,3 +239,4 @@ index 6cb62f46daafa763deab9fc83aa0d3ede39cb7c5..68c48ae55787f3a7464e3cd3f1333eed
      if !status.success() {
 -- 
 2.55.0.windows.3
+
