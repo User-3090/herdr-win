@@ -288,7 +288,7 @@ jobs:
             scripts.test_preview.PreviewNotesTests.test_build_manifest_archives_current_assets `
             scripts.test_preview.PreviewNotesTests.test_preview_assets_require_sha256 `
             scripts.test_preview.PreviewNotesTests.test_manifest_preserves_legacy_zip_only_archived_build `
-            scripts.test_preview.PreviewNotesTests.test_manifest_build_id_uses_source_and_control_hashes
+            scripts.test_preview.PreviewNotesTests.test_manifest_build_id_uses_two_hex_components
           cargo fmt --check
           cargo clippy --bins --locked --target $env:WINDOWS_TARGET -- -D warnings
           cargo test --locked --target $env:WINDOWS_TARGET --bin herdr-launcher
