@@ -144,7 +144,7 @@ impl ManagedInstall {
     }
 
     pub(crate) fn installer_helper_path(&self) -> PathBuf {
-        self.state_dir().join("installer-helper.ps1")
+        self.state_dir().join("installer-helper.exe")
     }
 
     #[cfg(windows)]

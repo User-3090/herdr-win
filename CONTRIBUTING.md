@@ -157,8 +157,8 @@ cargo clippy --bins --locked --target x86_64-pc-windows-msvc -- -D warnings
 
 Use the manually dispatched workflow's `build` operation for the Linux/macOS target
 builds and machine checks as well as the signed ConPTY package, enhanced-input,
-PowerShell 5.1/7 installer lifecycle and fault-retry matrix, managed launcher, and
-system-fallback gates that depend on GitHub's Windows runner.
+PowerShell wrapper checks, native installer-helper lifecycle and fault-retry matrix,
+managed launcher, and system-fallback gates that depend on GitHub's Windows runner.
 
 Workflow changes require `actionlint` plus review of triggers, permissions,
 credential persistence, immutable source identity, artifact digests, and failure

@@ -337,6 +337,7 @@ jobs:
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
           $exe = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr.exe"
           $launcher = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr-launcher.exe"
+          $installerHelper = Join-Path $PWD "source\target\$env:WINDOWS_TARGET\release\herdr-installer-helper.exe"
           New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
           function Stop-BoundedProcessTree {
@@ -491,6 +492,7 @@ jobs:
             (Join-Path $PWD "source\scripts\package_windows_installer.ps1"),
             "-StageDir", $stage,
             "-LauncherExe", $launcher,
+            "-InstallerHelperExe", $installerHelper,
             "-BuildId", $env:HERDR_BUILD_ID,
             "-DisplayVersion", $displayVersion,
             "-NumericVersion", $numericVersion,
@@ -501,6 +503,7 @@ jobs:
             (Join-Path $PWD "source\scripts\windows_installer_fault_test.ps1"),
             "-StageDir", $stage,
             "-LauncherExe", $launcher,
+            "-InstallerHelperExe", $installerHelper,
             "-BuildId", $env:HERDR_BUILD_ID,
             "-DisplayVersion", $displayVersion,
             "-NumericVersion", $numericVersion,

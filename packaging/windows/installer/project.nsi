@@ -5,8 +5,11 @@
 !ifndef ARG_LAUNCHER_EXE
   !error "ARG_LAUNCHER_EXE is required"
 !endif
-!ifndef ARG_HELPER_PS1
-  !error "ARG_HELPER_PS1 is required"
+!ifndef ARG_HELPER_EXE
+  !error "ARG_HELPER_EXE is required"
+!endif
+!ifndef ARG_HELPER_BRIDGE_PS1
+  !error "ARG_HELPER_BRIDGE_PS1 is required"
 !endif
 !ifndef ARG_UNINSTALL_RUNNER_PS1
   !error "ARG_UNINSTALL_RUNNER_PS1 is required"
@@ -102,7 +105,6 @@ VIAddVersionKey /LANG=${APP_LANG_ENGLISH} "OriginalFilename" "${INFO_ORIGINALFIL
 !include "WinMessages.nsh"
 !include "x64.nsh"
 
-Var PowerShellPath
 Var HelperExitCode
 Var HelperOutput
 Var StartGate
@@ -155,7 +157,7 @@ LangString AppSettingsCheckbox ${LANG_ENGLISH} "Also delete ${INFO_PRODUCTNAME} 
 LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME} settings and session data..."
 
 !ifdef TEST_UNINSTALL_FAULT
-  !define APP_UNINSTALL_FAULT_ARGS '-UninstallFault "${TEST_UNINSTALL_FAULT}" -UninstallFaultMarkerPrefix "${APP_TEST_MARKER_PREFIX}"'
+  !define APP_UNINSTALL_FAULT_ARGS '--uninstall-fault "${TEST_UNINSTALL_FAULT}" --fault-marker-prefix "${APP_TEST_MARKER_PREFIX}"'
 !else
   !define APP_UNINSTALL_FAULT_ARGS ""
 !endif
@@ -164,22 +166,6 @@ LangString AppDetailRemoveSettings ${LANG_ENGLISH} "Removing ${INFO_PRODUCTNAME}
 !else
   !define APP_USER_PROFILE_ROOT "$PROFILE"
 !endif
-
-Function SetPowerShellPath
-  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-  ${If} ${RunningX64}
-    ; NSIS is a 32-bit process. Sysnative selects the native PowerShell so
-    ; HKCU ARP registration is not dependent on WOW64 registry behavior.
-    StrCpy $PowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  ${EndIf}
-FunctionEnd
-
-Function un.SetPowerShellPath
-  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-  ${If} ${RunningX64}
-    StrCpy $PowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
-  ${EndIf}
-FunctionEnd
 
 Function NotifyEnvironmentChange
   ; WM_SETTINGCHANGE officially uses SendMessageTimeout with HWND_BROADCAST.
@@ -321,11 +307,6 @@ installer_local_appdata_ready:
     Call FailInstall
   ${EndIf}
   Call WaitForUpdaterStartGate
-  Call SetPowerShellPath
-  IfFileExists "$PowerShellPath" powershell_ok
-  Push "Windows PowerShell is required to install ${INFO_DISTRIBUTIONNAME}."
-  Call FailInstall
-powershell_ok:
 FunctionEnd
 
 Function un.onInit
@@ -348,15 +329,10 @@ uninstaller_profile_ready:
   ${IfNot} ${Errors}
     StrCpy $SkillDisposition "Remove"
   ${EndIf}
-  Call un.SetPowerShellPath
-  IfFileExists "$PowerShellPath" un_powershell_ok
-  Push "Windows PowerShell is required to uninstall ${INFO_DISTRIBUTIONNAME}."
-  Call un.FailUninstall
-un_powershell_ok:
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   ClearErrors
-  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
+  File /oname=installer-helper.exe "${ARG_HELPER_EXE}"
   File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
   IfErrors 0 un_skill_manifest_ready
   Push "The managed uninstall helper or skill ownership manifest could not be unpacked; uninstall was preserved."
@@ -368,8 +344,8 @@ Function un.SettingsPage
   IfSilent settings_page_done 0
   ${If} $SkillDisposition == "Auto"
     StrCpy $SkillDisposition "Keep"
-    IfFileExists "$INSTDIR\state\installer-helper.ps1" 0 skill_default_done
-    nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\state\installer-helper.ps1" -Action GetSkillRemovalDefault -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -ProductName "${INFO_DISTRIBUTIONNAME}"'
+    IfFileExists "$INSTDIR\state\installer-helper.exe" 0 skill_default_done
+    nsExec::ExecToStack /TIMEOUT=30000 '"$INSTDIR\state\installer-helper.exe" skill-removal-default --user-profile-root "${APP_USER_PROFILE_ROOT}" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt"'
     Pop $HelperExitCode
     Pop $HelperOutput
     StrCmp $HelperExitCode "0" 0 skill_default_done
@@ -429,7 +405,8 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   File /r "${ARG_STAGE_DIR}\*"
   SetOutPath "$PLUGINSDIR"
   File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
-  File /oname=installer-helper.ps1 "${ARG_HELPER_PS1}"
+  File /oname=installer-helper.exe "${ARG_HELPER_EXE}"
+  File /oname=installer-helper-bridge.ps1 "${ARG_HELPER_BRIDGE_PS1}"
   File /oname=uninstall-runner.ps1 "${ARG_UNINSTALL_RUNNER_PS1}"
   SetOutPath "$PLUGINSDIR\skill"
   File /oname=SKILL.md "${ARG_SKILL_MD}"
@@ -442,12 +419,20 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
 
 installer_inputs_ready:
   DetailPrint "Validating and activating ${INFO_DISTRIBUTIONNAME} ${INFO_PRODUCTVERSION_UI}..."
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Install -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -PackageRoot "$PLUGINSDIR" -ProductName "${INFO_DISTRIBUTIONNAME}" -BuildId "${APP_BUILD_ID}" -DisplayVersion "${INFO_PRODUCTVERSION_DISPLAY}" -NumericVersion "${INFO_PRODUCTVERSION_FIXED}" -InstallManager "$InstallManager"'
+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" install --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --package-root "$PLUGINSDIR" --build-id "${APP_BUILD_ID}" --display-version "${INFO_PRODUCTVERSION_DISPLAY}" --numeric-version "${INFO_PRODUCTVERSION_FIXED}" --install-manager "$InstallManager"'
   Pop $HelperExitCode
   Pop $HelperOutput
+  StrCmp $HelperExitCode "error" installer_helper_start_failed
+  StrCmp $HelperExitCode "timeout" installer_helper_timed_out
   StrCmp $HelperExitCode "0" installer_complete
   StrCpy $0 "${INFO_DISTRIBUTIONNAME} setup failed ($HelperExitCode). $HelperOutput"
   Push $0
+  Call FailInstall
+installer_helper_start_failed:
+  Push "${INFO_DISTRIBUTIONNAME} setup could not start its native installer helper."
+  Call FailInstall
+installer_helper_timed_out:
+  Push "${INFO_DISTRIBUTIONNAME} setup exceeded its 180 second installer-helper deadline."
   Call FailInstall
 
 installer_complete:
@@ -458,14 +443,22 @@ SectionEnd
 
 Section "Uninstall"
   SetAutoClose true
-  ; The uninstaller carries its own helper so every retry uses one validation and
-  ; lifecycle-lock owner even after an interrupted cleanup removed installed state.
-  nsExec::ExecToStack /TIMEOUT=120000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-helper.ps1" -Action Uninstall -InstallRoot "$INSTDIR" -UserProfileRoot "${APP_USER_PROFILE_ROOT}" -ProductName "${INFO_DISTRIBUTIONNAME}" -SettingsDisposition "$SettingsDisposition" -SkillHashManifestPath "$PLUGINSDIR\managed-skill-hashes.txt" -SkillDisposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
+  ; The uninstaller carries its own native helper so every retry uses one
+  ; validation and lifecycle-lock owner after installed state is removed.
+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" uninstall --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --settings-disposition "$SettingsDisposition" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt" --skill-disposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
   Pop $HelperExitCode
   Pop $HelperOutput
+  StrCmp $HelperExitCode "error" un_helper_start_failed
+  StrCmp $HelperExitCode "timeout" un_helper_timed_out
   StrCmp $HelperExitCode "0" un_helper_complete
   StrCpy $0 "${INFO_DISTRIBUTIONNAME} uninstall failed ($HelperExitCode). $HelperOutput"
   Push $0
+  Call un.FailUninstall
+un_helper_start_failed:
+  Push "${INFO_DISTRIBUTIONNAME} uninstall could not start its native installer helper."
+  Call un.FailUninstall
+un_helper_timed_out:
+  Push "${INFO_DISTRIBUTIONNAME} uninstall exceeded its 180 second installer-helper deadline."
   Call un.FailUninstall
 
 un_helper_complete:

@@ -1,0 +1,175 @@
+//! Native owner for the managed Windows install lifecycle.
+
+use std::{collections::BTreeMap, ffi::OsString, io, path::PathBuf};
+
+use crate::managed_install::BuildId;
+
+#[path = "installer_helper_files.rs"]
+mod installer_helper_files;
+#[path = "installer_helper_lifecycle.rs"]
+mod installer_helper_lifecycle;
+#[path = "installer_helper_registry.rs"]
+mod installer_helper_registry;
+#[path = "installer_helper_skills.rs"]
+mod installer_helper_skills;
+
+use installer_helper_files::invalid_data;
+use installer_helper_lifecycle::{
+    InstallManager, InstallOptions, MaintenanceOptions, SettingsDisposition, SkillDefaultOptions,
+    UninstallOptions,
+};
+use installer_helper_skills::SkillDisposition;
+
+pub(crate) fn run() -> io::Result<String> {
+    let mut args = std::env::args_os().skip(1);
+    let action = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| {
+            invalid_data(
+                "missing installer helper action; expected install, uninstall, skill-removal-default, or complete-maintenance",
+            )
+        })?;
+    let values = parse_named_arguments(args.collect())?;
+    match action.as_str() {
+        "install" => installer_helper_lifecycle::install(InstallOptions {
+            install_root: required_path(&values, "--install-root")?,
+            user_profile_root: required_path(&values, "--user-profile-root")?,
+            package_root: required_path(&values, "--package-root")?,
+            build_id: BuildId::parse(&required_utf8(&values, "--build-id")?)?,
+            display_version: required_utf8(&values, "--display-version")?,
+            numeric_version: required_utf8(&values, "--numeric-version")?,
+            install_manager: match required_utf8(&values, "--install-manager")?.as_str() {
+                "Direct" => InstallManager::Direct,
+                "WinGet" => InstallManager::WinGet,
+                value => {
+                    return Err(invalid_data(format!(
+                        "invalid --install-manager value {value:?}"
+                    )))
+                }
+            },
+        }),
+        "uninstall" => installer_helper_lifecycle::uninstall(UninstallOptions {
+            install_root: required_path(&values, "--install-root")?,
+            user_profile_root: required_path(&values, "--user-profile-root")?,
+            skill_hash_manifest: required_path(&values, "--skill-hash-manifest")?,
+            settings_disposition: match required_utf8(&values, "--settings-disposition")?.as_str() {
+                "Keep" => SettingsDisposition::Keep,
+                "Remove" => SettingsDisposition::Remove,
+                value => {
+                    return Err(invalid_data(format!(
+                        "invalid --settings-disposition value {value:?}"
+                    )))
+                }
+            },
+            skill_disposition: parse_skill_disposition(&required_utf8(
+                &values,
+                "--skill-disposition",
+            )?)?,
+            fault: optional_utf8(&values, "--uninstall-fault")?,
+            fault_marker_prefix: optional_utf8(&values, "--fault-marker-prefix")?
+                .unwrap_or_else(|| "herdr".to_string()),
+        }),
+        "skill-removal-default" => {
+            installer_helper_lifecycle::skill_removal_default(SkillDefaultOptions {
+                user_profile_root: required_path(&values, "--user-profile-root")?,
+                skill_hash_manifest: required_path(&values, "--skill-hash-manifest")?,
+            })
+        }
+        "complete-maintenance" => {
+            installer_helper_lifecycle::complete_maintenance(MaintenanceOptions {
+                install_root: required_path(&values, "--install-root")?,
+                parent_process_id: optional_utf8(&values, "--parent-process-id")?
+                    .map(|value| {
+                        value.parse::<u32>().map_err(|_| {
+                            invalid_data(format!("invalid parent process ID {value:?}"))
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(0),
+            })
+        }
+        _ => Err(invalid_data(format!(
+            "unknown installer helper action {action:?}"
+        ))),
+    }
+}
+
+fn parse_named_arguments(args: Vec<OsString>) -> io::Result<BTreeMap<String, OsString>> {
+    if !args.len().is_multiple_of(2) {
+        return Err(invalid_data(
+            "installer helper arguments must be --name value pairs",
+        ));
+    }
+    let mut output = BTreeMap::new();
+    for pair in args.chunks_exact(2) {
+        let name = pair[0]
+            .to_str()
+            .ok_or_else(|| invalid_data("installer helper option name is not UTF-8"))?;
+        if !name.starts_with("--") || name.len() < 3 {
+            return Err(invalid_data(format!(
+                "invalid installer helper option {name:?}"
+            )));
+        }
+        if output.insert(name.to_string(), pair[1].clone()).is_some() {
+            return Err(invalid_data(format!(
+                "duplicate installer helper option {name:?}"
+            )));
+        }
+    }
+    Ok(output)
+}
+
+fn required_path(values: &BTreeMap<String, OsString>, name: &str) -> io::Result<PathBuf> {
+    values
+        .get(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid_data(format!("missing required installer helper option {name}")))
+}
+
+fn required_utf8(values: &BTreeMap<String, OsString>, name: &str) -> io::Result<String> {
+    optional_utf8(values, name)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_data(format!("missing required installer helper option {name}")))
+}
+
+fn optional_utf8(values: &BTreeMap<String, OsString>, name: &str) -> io::Result<Option<String>> {
+    values
+        .get(name)
+        .map(|value| {
+            value
+                .clone()
+                .into_string()
+                .map_err(|_| invalid_data(format!("installer helper option {name} is not UTF-8")))
+        })
+        .transpose()
+}
+
+fn parse_skill_disposition(value: &str) -> io::Result<SkillDisposition> {
+    match value {
+        "Keep" => Ok(SkillDisposition::Keep),
+        "Auto" => Ok(SkillDisposition::Auto),
+        "Remove" => Ok(SkillDisposition::Remove),
+        _ => Err(invalid_data(format!(
+            "invalid --skill-disposition value {value:?}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_rejects_duplicates_and_unpaired_values() {
+        assert!(parse_named_arguments(vec![OsString::from("--one")]).is_err());
+        assert!(parse_named_arguments(vec![
+            OsString::from("--one"),
+            OsString::from("a"),
+            OsString::from("--one"),
+            OsString::from("b"),
+        ])
+        .is_err());
+    }
+}

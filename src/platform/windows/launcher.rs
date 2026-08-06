@@ -264,32 +264,12 @@ fn maintenance_needed_locked(install: &ManagedInstall) -> io::Result<bool> {
 
 fn spawn_post_exit_maintenance(install: &ManagedInstall) -> io::Result<()> {
     let helper = install.validate_installer_helper()?;
-    let windows = std::env::var_os("WINDIR").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "WINDIR is missing; cannot start managed Herdr maintenance",
-        )
-    })?;
-    let powershell = Path::new(&windows)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    let mut command = Command::new(&powershell);
+    let mut command = Command::new(&helper);
     command
-        .args([
-            OsStr::new("-NoLogo"),
-            OsStr::new("-NoProfile"),
-            OsStr::new("-NonInteractive"),
-            OsStr::new("-ExecutionPolicy"),
-            OsStr::new("Bypass"),
-            OsStr::new("-File"),
-        ])
-        .arg(&helper)
-        .args([OsStr::new("-Action"), OsStr::new("CompleteMaintenance")])
-        .arg("-InstallRoot")
+        .arg("complete-maintenance")
+        .arg("--install-root")
         .arg(install.root())
-        .arg("-ParentProcessId")
+        .arg("--parent-process-id")
         .arg(std::process::id().to_string())
         .env_remove(MANAGED_LEASE_HANDLE_ENV)
         .stdin(Stdio::null())
@@ -301,7 +281,7 @@ fn spawn_post_exit_maintenance(install: &ManagedInstall) -> io::Result<()> {
             err,
             format!(
                 "failed to start managed Herdr maintenance helper {}",
-                powershell.display()
+                helper.display()
             ),
         )
     })?;

@@ -63,9 +63,10 @@ behavior; code and tests remain the detailed implementation truth.
   from mixing while sessions remain active.
 - The launcher owns runtime selection, process forwarding, lease inheritance, and
   opportunistic activation after the final old lease. On a normal payload exit, it
-  invokes the existing installer helper only when pending launcher publication or
-  runtime pruning is needed. It does not terminate user sessions or require a
-  service, reparse point, reboot replacement, or background poller.
+  invokes the installed native helper at `state/installer-helper.exe` only when
+  pending launcher publication or runtime pruning is needed. It does not terminate
+  user sessions or require a service, reparse point, reboot replacement, or
+  background poller.
 - Setup serializes launcher changes with `state/launcher.lock`. It replaces an idle
   launcher atomically or writes one hash-addressed `launcher.pending-<sha256>.exe`
   plus a strict pending record while the launcher is in use. The post-exit helper
@@ -78,14 +79,15 @@ behavior; code and tests remain the detailed implementation truth.
   every other exact runtime whose lease can be acquired exclusively. Busy,
   malformed, reparse-point, or otherwise ambiguous content is preserved and causes
   the maintenance attempt to report failure rather than broadening deletion.
-- NSIS owns the setup/uninstall executable shell, embedded inputs, and user-visible
-  progress/error boundary. Uninstall runs the embedded temporary PowerShell helper
-  and never mutates the installed root directly; that helper owns final root cleanup
-  while holding the persistent lifecycle lock, plus filesystem validation, launcher
-  publication, runtime pruning, PATH/Installed Apps integration, optional
-  user-settings removal, and recoverable install/uninstall state. Rust owns runtime
-  selection and
-  downloading/verifying/launching the immutable installer asset.
+- The Windows package has three Rust executables: the user-facing runtime, the stable
+  launcher, and the internal installer helper. NSIS owns the setup/uninstall shell,
+  embedded inputs, and user-visible progress/error boundary. It runs the embedded
+  temporary native helper and never mutates the installed root directly. The helper
+  owns final root cleanup while holding the persistent lifecycle lock, filesystem
+  validation, launcher publication, runtime pruning, PATH/Installed Apps integration,
+  optional user-settings removal, and recoverable install/uninstall state. Rust also
+  owns runtime selection and downloading/verifying/launching the immutable installer
+  asset.
 - NSIS forces its embedded CRC check and recognizes package-manager and destructive
   custom flags only as exact tokens.
 - The helper validates the complete managed Installed Apps value set, registry
@@ -102,6 +104,12 @@ behavior; code and tests remain the detailed implementation truth.
   snapshots and hashes the actual current runner and uninstaller bytes, restoring
   both on any nonterminal deletion failure instead of substituting a published
   payload hash.
+- A current-format installation published before the native helper may temporarily
+  retain `state/installer-helper.ps1` during upgrade. That file is a bounded
+  `CompleteMaintenance` bridge from an already-running old launcher to
+  `installer-helper.exe`; it owns no lifecycle logic and is removed after pending
+  launcher publication. Fresh installs and settled native upgrades retain only the
+  native helper.
 - NSIS accepts `/WINGET` as the sole explicit package-manager origin signal and
   passes a bounded Direct/WinGet value into the helper. The helper owns the optional
   strict UTF-8 `state/package-manager` record; only the exact
@@ -133,10 +141,11 @@ behavior; code and tests remain the detailed implementation truth.
   selection or `CreateProcess`. Thus a killed uninstaller cannot admit a new session
   between releasing its process-owned lock and a later recovery pass; the existing
   launcher is reused and no service or second launch path is added.
-- The packager owns installer-facing product identity inputs. It passes one runtime
-  product name into NSIS and the helper, plus one title-cased human distribution
-  display name, a derived short UI version, and the fork and official-upstream URLs
-  into NSIS. The runtime/install-root identity remains Herdr, while executable
+- The packager owns installer-facing product identity inputs and validates the
+  runtime, launcher, and native helper as three distinct x64 executables. It passes
+  one runtime product name, one title-cased human distribution display name, a
+  derived short UI version, and the fork and official-upstream URLs into NSIS. The
+  runtime/install-root identity remains Herdr, while executable
   metadata and Installed Apps consistently present **Herdr Win**. The NSIS presentation
   uses standard MUI2 Welcome/License/Files/Finish pages plus the existing custom
   uninstall choice. Window, Welcome, progress, and Finish presentation reuse that
@@ -176,7 +185,8 @@ behavior; code and tests remain the detailed implementation truth.
 - Exact ARP ownership plus the current bin sentinel and install manifest permit
   repair of the installer control filenames only: missing runner, helper, or
   uninstaller files are recreated, and changed regular files are atomically
-  replaced using `File.Replace` backups of their actual current bytes. When this
+  replaced through the native `ReplaceFileW` boundary with backups of their actual
+  current bytes. When this
   normal path cannot classify a root already bound by exact current registration,
   the same helper treats the dedicated managed root as a complete convergence root:
   it holds available launcher coordination, rejects active processes, leases, and
@@ -187,9 +197,9 @@ behavior; code and tests remain the detailed implementation truth.
   manifest for the current and every historically installer-delivered
   `skills/herdr/SKILL.md` byte hash. The packager validates that the current payload
   is present; NSIS embeds the payload and the same manifest into setup and uninstall
-  without adding either to the persistent managed-root layout. The existing
-  PowerShell boundary copies a missing skill, replaces a known hash, and preserves
-  an unknown regular file while returning a visible setup warning.
+  without adding either to the persistent managed-root layout. The native helper
+  copies a missing skill, replaces a known hash, and preserves an unknown regular
+  file while returning a visible setup warning.
 - Skill inspection is pure. Across the universal root and configured/default Claude
   roots, only all-known-or-absent state selects the interactive removal checkbox;
   unknown or ambiguous state leaves it clear. Interactive selection or
@@ -286,7 +296,8 @@ behavior; code and tests remain the detailed implementation truth.
   gates on one frozen logical snapshot.
 - Formatting, Clippy, and Rust tests run in replayed product source. Cross-platform
   release builds add native target/machine checks and static-link validation for
-  Linux. Windows packaging changes add package/vendor checks plus PowerShell 5.1/7
-  and realistic native installer evidence where that boundary changed.
+  Linux. Windows packaging changes add package/vendor checks, PowerShell wrapper
+  checks, native helper and launcher tests, and realistic installer evidence where
+  that boundary changed.
 - Broad gates run on an implementation-frozen snapshot. Passing evidence remains
   valid until relevant source, inputs, or environment-sensitive assumptions change.

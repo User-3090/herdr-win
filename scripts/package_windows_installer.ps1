@@ -7,6 +7,9 @@ param(
     [string]$LauncherExe,
 
     [Parameter(Mandatory = $true)]
+    [string]$InstallerHelperExe,
+
+    [Parameter(Mandatory = $true)]
     [string]$BuildId,
 
     [Parameter(Mandatory = $true)]
@@ -346,7 +349,7 @@ $UiVersion = Assert-VersionIdentity
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
-$helperScript = Join-Path $projectRoot "packaging\windows\herdr-installer-helper.ps1"
+$helperBridge = Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"
 $uninstallRunner = Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"
 $skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 $skillHashManifest = Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"
@@ -360,6 +363,7 @@ $artworkFiles = @(
 )
 $StageDir = (Resolve-Path -LiteralPath $StageDir).Path
 $LauncherExe = (Resolve-Path -LiteralPath $LauncherExe).Path
+$InstallerHelperExe = (Resolve-Path -LiteralPath $InstallerHelperExe).Path
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $InstallerOriginalFilename = [System.IO.Path]::GetFileName($OutputPath)
 
@@ -370,7 +374,7 @@ if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
 if (Test-Path -LiteralPath $OutputPath) {
     throw "Refusing to overwrite an existing installer output: $OutputPath"
 }
-$requiredSources = @($packager, $installerScript, $helperScript, $uninstallRunner, $skillSource, $skillHashManifest)
+$requiredSources = @($packager, $installerScript, $helperBridge, $uninstallRunner, $skillSource, $skillHashManifest)
 foreach ($artworkFile in $artworkFiles) {
     $requiredSources += Join-Path $artworkDir $artworkFile
 }
@@ -421,10 +425,15 @@ if ($managedSkillHashes -cnotcontains $canonicalSkillHash) {
     throw "Canonical skills/herdr/SKILL.md hash is absent from the managed skill hash manifest."
 }
 Assert-X64Pe -Path $LauncherExe
+Assert-X64Pe -Path $InstallerHelperExe
 $payloadExe = Join-Path $StageDir "herdr.exe"
 Assert-X64Pe -Path $payloadExe
 if ($LauncherExe.Equals($payloadExe, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "LauncherExe must be the separately built launcher, not the staged Herdr payload."
+}
+if ($InstallerHelperExe.Equals($payloadExe, [System.StringComparison]::OrdinalIgnoreCase) -or
+    $InstallerHelperExe.Equals($LauncherExe, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "InstallerHelperExe must be the separately built native installer helper."
 }
 [void](Invoke-HerdrIdentityQuery `
     -Executable $payloadExe `
@@ -478,7 +487,8 @@ try {
         "/INPUTCHARSET", "UTF8",
         "/DARG_STAGE_DIR=$StageDir",
         "/DARG_LAUNCHER_EXE=$LauncherExe",
-        "/DARG_HELPER_PS1=$helperScript",
+        "/DARG_HELPER_EXE=$InstallerHelperExe",
+        "/DARG_HELPER_BRIDGE_PS1=$helperBridge",
         "/DARG_UNINSTALL_RUNNER_PS1=$uninstallRunner",
         "/DARG_SKILL_MD=$canonicalSkillSource",
         "/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest",

@@ -383,6 +383,8 @@ class DeltaPatchTests(unittest.TestCase):
         self.assertNotIn('Uninstall\\Herdr"', workflow)
         build_section, promotion_section = workflow.split("\n  publish:\n", 1)
         self.assertIn("cargo build --release", build_section)
+        self.assertIn("herdr-installer-helper.exe", build_section)
+        self.assertEqual(build_section.count('"-InstallerHelperExe", $installerHelper'), 2)
         self.assertNotIn("cargo build", promotion_section)
         self.assertNotIn("package_windows_installer.ps1", promotion_section)
         self.assertEqual(workflow.count("[void] $descendant.Handle"), 2)

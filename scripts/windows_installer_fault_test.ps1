@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$StageDir,
     [Parameter(Mandatory = $true)][string]$LauncherExe,
+    [Parameter(Mandatory = $true)][string]$InstallerHelperExe,
     [Parameter(Mandatory = $true)][string]$BuildId,
     [Parameter(Mandatory = $true)][string]$DisplayVersion,
     [Parameter(Mandatory = $true)][string]$NumericVersion,
@@ -111,7 +112,7 @@ function Assert-TestUserPathRestored {
             )
             $actualKind = $key.GetValueKind("Path")
             if ([string]$actualValue -cne [string]$originalUserPath -or $actualKind -ne $originalUserPathKind) {
-                throw "Uninstall did not restore the exact user PATH value and registry kind."
+                throw "Uninstall did not restore the exact user PATH value and registry kind. Expected '$originalUserPath' ($originalUserPathKind), got '$actualValue' ($actualKind)."
             }
         }
     } finally {
@@ -205,6 +206,95 @@ function Start-TestProcess {
     } finally {
         $process.Dispose()
     }
+}
+
+function New-TestIdentityLauncher {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Identity
+    )
+
+    $source = "$Path.cs"
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
+    [IO.File]::WriteAllText($source, @"
+using System;
+internal static class Program {
+    public static int Main(string[] args) {
+        if (args.Length == 1 && String.Equals(args[0], "--herdr-private-launcher-build-id-v1", StringComparison.Ordinal)) {
+            Console.Out.WriteLine("$Identity");
+            return 0;
+        }
+        return 64;
+    }
+}
+"@, [Text.UTF8Encoding]::new($false))
+    $compiler = @(
+        "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if ($null -eq $compiler) {
+        throw "The Windows .NET Framework C# compiler is required for the pending-update test."
+    }
+    $exitCode = Start-TestProcess -FilePath $compiler -Arguments @(
+        "/nologo", "/target:exe", "/platform:x64", "/out:$Path", $source
+    )
+    if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Could not build the pending-update launcher fixture."
+    }
+}
+
+function New-TestHelperPackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$AppLauncher,
+        [Parameter(Mandatory = $true)][string]$Uninstaller
+    )
+
+    if (Test-Path -LiteralPath $Root) {
+        throw "Native helper package fixture already exists: $Root"
+    }
+    New-Item -ItemType Directory -Path $Root | Out-Null
+    Copy-Item -LiteralPath $StageDir -Destination (Join-Path $Root "payload") -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $Root "skill") | Out-Null
+    [IO.File]::Copy($AppLauncher, (Join-Path $Root "app-launcher.exe"), $false)
+    [IO.File]::Copy($InstallerHelperExe, (Join-Path $Root "installer-helper.exe"), $false)
+    [IO.File]::Copy(
+        (Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"),
+        (Join-Path $Root "installer-helper-bridge.ps1"),
+        $false
+    )
+    [IO.File]::Copy(
+        (Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"),
+        (Join-Path $Root "uninstall-runner.ps1"),
+        $false
+    )
+    [IO.File]::Copy($skillSource, (Join-Path $Root "skill\SKILL.md"), $false)
+    [IO.File]::Copy(
+        (Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"),
+        (Join-Path $Root "skill\managed-skill-hashes.txt"),
+        $false
+    )
+    [IO.File]::Copy($Uninstaller, (Join-Path $Root "uninstall.exe"), $false)
+}
+
+function Start-TestLeaseHolder {
+    param(
+        [Parameter(Mandatory = $true)][string]$LeasePath,
+        [Parameter(Mandatory = $true)][string]$ReadyPath
+    )
+
+    $escapedLease = $LeasePath.Replace("'", "''")
+    $escapedReady = $ReadyPath.Replace("'", "''")
+    $command = @"
+`$ErrorActionPreference = 'Stop'
+`$lease = [IO.File]::Open('$escapedLease', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+[IO.File]::WriteAllText('$escapedReady', 'ready')
+try { Start-Sleep -Seconds 4 } finally { `$lease.Dispose() }
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    return Start-Process -FilePath powershell.exe -ArgumentList @(
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded
+    ) -PassThru -WindowStyle Hidden
 }
 
 function Invoke-TestQuietUninstall {
@@ -335,6 +425,7 @@ try {
         & $packager `
             -StageDir $StageDir `
             -LauncherExe $LauncherExe `
+            -InstallerHelperExe $InstallerHelperExe `
             -BuildId $BuildId `
             -DisplayVersion $DisplayVersion `
             -NumericVersion $NumericVersion `
@@ -422,6 +513,7 @@ try {
     & $packager `
         -StageDir $StageDir `
         -LauncherExe $LauncherExe `
+        -InstallerHelperExe $InstallerHelperExe `
         -BuildId $BuildId `
         -DisplayVersion $DisplayVersion `
         -NumericVersion $NumericVersion `
@@ -603,6 +695,140 @@ try {
             Remove-Item -LiteralPath $reparseStateTarget -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    # A running old runtime keeps activation pending. The installed launcher
+    # promotes the new runtime after the lease exits, then the native helper
+    # publishes the matching launcher and removes the obsolete runtime.
+    $pendingRoot = Join-Path $OutputDir "native-pending-update"
+    $oldPackage = Join-Path $pendingRoot "old-package"
+    $newPackage = Join-Path $pendingRoot "new-package"
+    $newBuildId = "fedcba987654.3210fedcba98"
+    $newDisplayVersion = $DisplayVersion.Substring(0, $DisplayVersion.Length - $BuildId.Length) + $newBuildId
+    $newLauncher = Join-Path $pendingRoot "new-launcher\app-launcher.exe"
+    New-TestIdentityLauncher -Path $newLauncher -Identity $newBuildId
+    New-TestHelperPackage -Root $oldPackage -AppLauncher $LauncherExe -Uninstaller $modifiedInstaller
+    New-TestHelperPackage -Root $newPackage -AppLauncher $newLauncher -Uninstaller $modifiedInstaller
+    $oldInstallExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments @(
+        "install",
+        "--install-root", $installRoot,
+        "--user-profile-root", $AgentUserProfileRoot,
+        "--package-root", $oldPackage,
+        "--build-id", $BuildId,
+        "--display-version", $DisplayVersion,
+        "--numeric-version", $NumericVersion,
+        "--install-manager", "Direct"
+    )
+    if ($oldInstallExit -ne 0) {
+        throw "Native helper pending-update fixture install exited with $oldInstallExit."
+    }
+    $repairLease = Join-Path $installRoot "state\leases\$BuildId.lease"
+    [IO.File]::WriteAllText($repairLease, "")
+    Remove-Item -LiteralPath (Join-Path $installRoot "state\installer-helper.exe") -Force
+    $repairInstallExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments @(
+        "install",
+        "--install-root", $installRoot,
+        "--user-profile-root", $AgentUserProfileRoot,
+        "--package-root", $oldPackage,
+        "--build-id", $BuildId,
+        "--display-version", $DisplayVersion,
+        "--numeric-version", $NumericVersion,
+        "--install-manager", "Direct"
+    )
+    if ($repairInstallExit -ne 0 -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "state\installer-helper.exe") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $repairLease -PathType Leaf)) {
+        throw "Native setup did not narrowly repair a missing installed helper."
+    }
+    Write-Host "Native missing-helper repair passed."
+    $leaseReady = Join-Path $pendingRoot "lease-ready"
+    $leaseHolder = Start-TestLeaseHolder `
+        -LeasePath (Join-Path $installRoot "state\leases\$BuildId.lease") `
+        -ReadyPath $leaseReady
+    try {
+        Wait-TestCondition -Description "pending-update lease holder" -Condition {
+            Test-Path -LiteralPath $leaseReady -PathType Leaf
+        }
+        $pendingInstallExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments @(
+            "install",
+            "--install-root", $installRoot,
+            "--user-profile-root", $AgentUserProfileRoot,
+            "--package-root", $newPackage,
+            "--build-id", $newBuildId,
+            "--display-version", $newDisplayVersion,
+            "--numeric-version", $NumericVersion,
+            "--install-manager", "Direct"
+        )
+        if ($pendingInstallExit -ne 0) {
+            throw "Native helper pending update exited with $pendingInstallExit."
+        }
+        $activeText = [IO.File]::ReadAllText((Join-Path $installRoot "state\active")).Replace("`r`n", "`n")
+        $pendingText = [IO.File]::ReadAllText((Join-Path $installRoot "state\pending")).Replace("`r`n", "`n")
+        if ($activeText -cne "herdr-pointer-v1`nbuild_id=$BuildId`n" -or
+            $pendingText -cne "herdr-pointer-v1`nbuild_id=$newBuildId`n") {
+            throw "Native helper did not preserve active and pending pointer ownership while the old lease was live."
+        }
+    } finally {
+        if (-not $leaseHolder.WaitForExit(15000)) {
+            $leaseHolder.Kill()
+            [void]$leaseHolder.WaitForExit(5000)
+        }
+        $leaseHolder.Dispose()
+    }
+    $launcherExit = Start-TestProcess -FilePath (Join-Path $installRoot "bin\herdr.exe") -Arguments @("--version")
+    if ($launcherExit -ne 0) {
+        throw "Installed launcher could not activate the pending runtime; exit code $launcherExit."
+    }
+    $expectedLauncherHash = (Get-FileHash -LiteralPath $newLauncher -Algorithm SHA256).Hash
+    Wait-TestCondition -Description "native pending-update maintenance" -Condition {
+        $active = Join-Path $installRoot "state\active"
+        (Test-Path -LiteralPath $active -PathType Leaf) -and
+            ([IO.File]::ReadAllText($active).Replace("`r`n", "`n") -ceq "herdr-pointer-v1`nbuild_id=$newBuildId`n") -and
+            -not (Test-Path -LiteralPath (Join-Path $installRoot "state\pending")) -and
+            -not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$BuildId")) -and
+            ((Get-FileHash -LiteralPath (Join-Path $installRoot "bin\herdr.exe") -Algorithm SHA256).Hash -ceq $expectedLauncherHash)
+    }
+    $nativeUninstallArguments = @(
+        "uninstall",
+        "--install-root", $installRoot,
+        "--user-profile-root", $AgentUserProfileRoot,
+        "--skill-hash-manifest", (Join-Path $newPackage "skill\managed-skill-hashes.txt"),
+        "--settings-disposition", "Keep",
+        "--skill-disposition", "Auto"
+    )
+    $malformedPendingLauncher = Join-Path $installRoot "state\launcher.pending-not-a-hash.exe"
+    [IO.File]::WriteAllText($malformedPendingLauncher, "preserve")
+    $malformedPendingExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments $nativeUninstallArguments
+    if ($malformedPendingExit -eq 0 -or
+        -not (Test-Path -LiteralPath $malformedPendingLauncher -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "bin\herdr.exe") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$newBuildId") -PathType Container) -or
+        -not (Test-Path -LiteralPath $arpKey) -or
+        -not (Test-Path -LiteralPath $skillPath -PathType Leaf)) {
+        throw "Malformed pending-launcher state did not fail closed before uninstall mutation."
+    }
+    Remove-Item -LiteralPath $malformedPendingLauncher -Force
+
+    $validArpDisplayVersion = [string](Get-ItemProperty -LiteralPath $arpKey).DisplayVersion
+    Set-ItemProperty -LiteralPath $arpKey -Name DisplayVersion -Value "$validArpDisplayVersion.extra"
+    $malformedArpExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments $nativeUninstallArguments
+    if ($malformedArpExit -eq 0 -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "bin\herdr.exe") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $installRoot "runtime\$newBuildId") -PathType Container) -or
+        -not (Test-Path -LiteralPath $arpKey) -or
+        -not (Test-Path -LiteralPath $skillPath -PathType Leaf)) {
+        throw "Malformed ARP display identity did not fail closed before uninstall mutation."
+    }
+    Set-ItemProperty -LiteralPath $arpKey -Name DisplayVersion -Value $validArpDisplayVersion
+
+    $nativeUninstallExit = Start-TestProcess -FilePath $InstallerHelperExe -Arguments $nativeUninstallArguments
+    if ($nativeUninstallExit -ne 0) {
+        throw "Native helper pending-update fixture uninstall exited with $nativeUninstallExit."
+    }
+    Wait-TestCondition -Description "native pending-update cleanup" -Condition {
+        -not (Test-Path -LiteralPath $installRoot) -and -not (Test-Path -LiteralPath $arpKey)
+    }
+    Assert-TestUserPathRestored
+    Write-Host "Native pending-update activation passed."
 } finally {
     Remove-TestInstallIfPresent
     if (Test-Path -LiteralPath $skillRoot) {
