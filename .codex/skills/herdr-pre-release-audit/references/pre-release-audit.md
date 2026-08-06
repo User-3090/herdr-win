@@ -27,7 +27,7 @@ Optional context: `$1 ${@:2}`
 
 - Require root `README.md` and `docs/next/README.md` to be byte-identical.
 - Check README, `PRODUCT.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `BACKLOG.md`, and both changelogs against current code and workflow behavior.
-- Ensure the changelog contains the stable version represented by `BASE`; qualify inherited upstream issue references as `ogulcancelik/herdr#N`.
+- Ensure the changelog contains the stable version represented by `BASE`; qualify new upstream issue references as `herdrdev/herdr#N` while preserving imported historical qualifiers.
 - Keep general Herdr documentation and upstream community material clearly attributed to official upstream.
 - Claim platform availability only when a successful candidate or published release provides that exact artifact.
 

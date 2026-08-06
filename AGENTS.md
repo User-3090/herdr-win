@@ -32,7 +32,7 @@ active memory owner.
 
 ## Identity and source invariants
 
-- Official upstream: `ogulcancelik/herdr`.
+- Official upstream: `herdrdev/herdr`.
 - This repository: `hdosys/herdr-win`, an unofficial Windows-focused
   distribution fork.
 - Release source is replayed upstream source plus the maintained delta, not an
@@ -50,7 +50,7 @@ active memory owner.
   upstream stable release selected during the last explicit manual refresh. It
   never tracks upstream `master` or a preview tag.
 - Never fetch, clone, query, download, check out, replay, test, or otherwise obtain
-  anything from official upstream `ogulcancelik/herdr` unless the user explicitly
+  anything from official upstream `herdrdev/herdr` unless the user explicitly
   requests that exact upstream operation in the current task. This prohibition also
   covers changing `BASE` or refreshing maintained mailboxes; use only already-local
   objects and the commit recorded in `BASE`, and report a blocked gate instead of

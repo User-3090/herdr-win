@@ -1,9 +1,9 @@
-From ea600ea4209743f72e25341915a61b6aa63d85dc Mon Sep 17 00:00:00 2001
+From f68364a25c444611d324ca509f347289d479de47 Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
 
-Refs ogulcancelik/herdr#1947
+Refs herdrdev/herdr#1947
 ---
  Cargo.toml                                    |   13 +
  build.rs                                      |    1 -
@@ -19,12 +19,12 @@ Refs ogulcancelik/herdr#1947
  packaging/windows/managed-skill-hashes.txt    |    3 +
  scripts/package_windows_conpty.py             |   39 +-
  scripts/package_windows_installer.ps1         |  525 +++++
- scripts/preview.py                            |  124 +-
+ scripts/preview.py                            |  120 +-
  scripts/test_package_windows_conpty.py        |   36 +-
- scripts/test_preview.py                       |  203 +-
+ scripts/test_preview.py                       |  199 +-
  scripts/test_vendor_libghostty_vt.py          |    4 +-
  scripts/test_vendor_portable_pty.py           |    4 +-
- scripts/test_windows_installer.py             |  425 ++++
+ scripts/test_windows_installer.py             |  429 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
  scripts/windows_installer_fault_test.ps1      |  845 +++++++
  src/app/api/plugins/panes.rs                  |    2 +-
@@ -53,7 +53,7 @@ Refs ogulcancelik/herdr#1947
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
  src/update.rs                                 |  878 ++++++-
- 48 files changed, 10085 insertions(+), 392 deletions(-)
+ 48 files changed, 10085 insertions(+), 388 deletions(-)
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-205x393.bmp
@@ -52234,7 +52234,7 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..2049fd944a65f26b752e80f26ff295c59b22a7a5
+index 0000000000000000000000000000000000000000..9e9c98e403993feae47e47265f9a3506126c7b2f
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
 @@ -0,0 +1,525 @@
@@ -52292,7 +52292,7 @@ index 0000000000000000000000000000000000000000..2049fd944a65f26b752e80f26ff295c5
 +$CommandName = "herdr"
 +$DistributionName = "Herdr Win"
 +$ProductUrl = "https://github.com/hdosys/herdr-win"
-+$UpstreamUrl = "https://github.com/ogulcancelik/herdr"
++$UpstreamUrl = "https://github.com/herdrdev/herdr"
 +$InstallerStartGateEnvironmentVariable = "HERDR_INSTALLER_START_GATE_V1"
 +$InstallerTestMarkerPrefix = "herdr"
 +$ProductNamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$'
@@ -52764,7 +52764,7 @@ index 0000000000000000000000000000000000000000..2049fd944a65f26b752e80f26ff295c5
 +
 +Write-Host "Created $DistributionName installer: $OutputPath"
 diff --git a/scripts/preview.py b/scripts/preview.py
-index fa55d623d865cfe1f797ab3efad58ae842f91c7c..20a76dada8055be79602e7e1e4a4ab31ff45e2f6 100644
+index fa55d623d865cfe1f797ab3efad58ae842f91c7c..46e2e43fc96c4259cbeff319108dd738ffa579bf 100644
 --- a/scripts/preview.py
 +++ b/scripts/preview.py
 @@ -2,9 +2,11 @@
@@ -52953,22 +52953,6 @@ index fa55d623d865cfe1f797ab3efad58ae842f91c7c..20a76dada8055be79602e7e1e4a4ab31
  def main() -> int:
      parser = argparse.ArgumentParser(description="Preview channel release helpers")
      sub = parser.add_subparsers(required=True)
-@@ -299,13 +379,13 @@ def main() -> int:
-     notes.add_argument("--commit", required=True)
-     notes.add_argument("--build-id", required=True)
-     notes.add_argument("--base-version", required=True)
--    notes.add_argument("--repo", default="herdrdev/herdr")
-+    notes.add_argument("--repo", default="ogulcancelik/herdr")
-     notes.add_argument("--output", required=True)
-     notes.set_defaults(func=cmd_notes)
- 
-     manifest = sub.add_parser("manifest")
-     manifest.add_argument("--output", default="website/preview.json")
--    manifest.add_argument("--repo", default="herdrdev/herdr")
-+    manifest.add_argument("--repo", default="ogulcancelik/herdr")
-     manifest.add_argument("--tag", required=True)
-     manifest.add_argument("--build-id", required=True)
-     manifest.add_argument("--commit", required=True)
 @@ -315,8 +395,20 @@ def main() -> int:
      manifest.add_argument("--notes", required=True)
      manifest.add_argument("--sha-file")
@@ -53068,7 +53052,7 @@ index b8d73a6c32e43807e6f8d0d56b0d3bfc73c98802..7a9f323734bd548969b6e4034be3cca5
              (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
              with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
 diff --git a/scripts/test_preview.py b/scripts/test_preview.py
-index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d81153d7307bb 100644
+index c280f572d346fe3f6776dac9416562f8c88d490f..44594b06ab6abd414c7c5c28a857f3add1e34447 100644
 --- a/scripts/test_preview.py
 +++ b/scripts/test_preview.py
 @@ -9,6 +9,11 @@ from pathlib import Path
@@ -53083,14 +53067,12 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
  
  class PreviewNotesTests(unittest.TestCase):
      def test_humanize_groups_conventional_subjects(self):
-@@ -31,55 +36,216 @@ class PreviewNotesTests(unittest.TestCase):
-             notes = "Preview notes\n"
+@@ -32,54 +37,215 @@ class PreviewNotesTests(unittest.TestCase):
              content = preview.build_manifest(
                  output=output,
--                repo="herdrdev/herdr",
+                 repo="herdrdev/herdr",
 -                tag="preview-2026-06-02-abcdef123456",
 -                build_id="2026-06-02-abcdef123456",
-+                repo="ogulcancelik/herdr",
 +                tag="v2026.06.02.1",
 +                build_id="abcdef123456.7890abcdef12",
                  commit="abcdef1234567890",
@@ -53116,7 +53098,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 +            )
 +            self.assertEqual(
 +                data["assets"]["linux-x86_64"]["url"],
-+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
++                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
 +            )
              self.assertEqual(
                  data["assets"]["linux-x86_64"]["sha256"],
@@ -53126,7 +53108,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
              self.assertEqual(
                  data["assets"]["windows-x86_64"]["url"],
 -                "https://github.com/herdrdev/herdr/releases/download/preview-2026-06-02-abcdef123456/herdr-windows-x86_64.zip",
-+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
++                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
              )
              self.assertEqual(
                  data["assets"]["windows-x86_64"]["sha256"],
@@ -53137,7 +53119,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 -            self.assertIn("2026-06-02-abcdef123456", data["builds"])
 +            self.assertEqual(
 +                data["assets"]["windows-x86_64-installer"]["url"],
-+                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
++                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
 +            )
 +            self.assertEqual(
 +                data["assets"]["windows-x86_64-installer"]["format"], "nsis"
@@ -53195,7 +53177,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 +                ):
 +                    preview.build_manifest(
 +                        output=Path(tmp) / "preview.json",
-+                        repo="ogulcancelik/herdr",
++                        repo="herdrdev/herdr",
 +                        tag="preview-test",
 +                        build_id="abcdef123456.7890abcdef12",
 +                        commit="abcdef",
@@ -53214,8 +53196,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 +            ):
                  preview.build_manifest(
                      output=Path(tmp) / "preview.json",
--                    repo="herdrdev/herdr",
-+                    repo="ogulcancelik/herdr",
+                     repo="herdrdev/herdr",
                      tag="preview-test",
 -                    build_id="test",
 +                    build_id="abcdef123456.7890abcdef12",
@@ -53254,7 +53235,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 +            )
 +            content = preview.build_manifest(
 +                output=output,
-+                repo="ogulcancelik/herdr",
++                repo="herdrdev/herdr",
 +                tag="preview-test",
 +                build_id="abcdef123456.7890abcdef12",
 +                commit="abcdef",
@@ -53279,7 +53260,7 @@ index c280f572d346fe3f6776dac9416562f8c88d490f..d95be513afa603a2c63dfa0dcd6d8115
 +            with self.assertRaisesRegex(ValueError, "two lowercase 12-hex"):
 +                preview.build_manifest(
 +                    output=Path(tmp) / "preview.json",
-+                    repo="ogulcancelik/herdr",
++                    repo="herdrdev/herdr",
 +                    tag="preview-test",
 +                    build_id="2026-06-02-abcdef123456",
 +                    commit="abcdef",
@@ -53368,10 +53349,10 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..41146dc4185d8ed136f7f43f245ac865d5c7f51b
+index 0000000000000000000000000000000000000000..7444cc799f64e848f01725640bd716c9c6198bf7
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,429 @@
 +from __future__ import annotations
 +
 +import hashlib
@@ -53689,6 +53670,10 @@ index 0000000000000000000000000000000000000000..41146dc4185d8ed136f7f43f245ac865
 +            packager,
 +        )
 +        self.assertIn("downloads.sourceforge.net/project/nsis", packager)
++        self.assertIn(
++            '$UpstreamUrl = "https://github.com/herdrdev/herdr"', packager
++        )
++        self.assertNotIn("https://github.com/ogulcancelik/herdr", packager)
 +        self.assertIn('"/WX"', packager)
 +        self.assertIn("Invoke-HerdrIdentityQuery", packager)
 +        self.assertIn('"--herdr-private-launcher-build-id-v1"', packager)

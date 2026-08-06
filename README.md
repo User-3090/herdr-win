@@ -1,10 +1,10 @@
 # herdr-win
 
-**A native Windows distribution of [Herdr](https://github.com/ogulcancelik/herdr), maintained as a small, reviewable patch queue—not a permanent fork.**
+**A native Windows distribution of [Herdr](https://github.com/herdrdev/herdr), maintained as a small, reviewable patch queue, not a permanent fork.**
 
 [![Patch replay](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/ci.yml) [![Candidate build](https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/hdosys/herdr-win/actions/workflows/release.yml) [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](https://github.com/hdosys/herdr-win/blob/master/rust-toolchain.toml) [![Built with Herdr Sandbox](https://img.shields.io/badge/built%20with-Herdr%20Sandbox-0078D4?logo=windows11&logoColor=white)](https://github.com/hdosys/herdr-sandbox) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/hdosys/herdr-win/blob/master/LICENSE)
 
-`herdr-win` is an unofficial, upstream-first delivery lane for Herdr on Windows. It keeps the normal `herdr` command and workflow, adds Windows behavior that has not yet landed upstream, and publishes tested snapshots from an exact reviewed Herdr release plus four explicit patches.
+`herdr-win` is an unofficial, upstream-first delivery lane for Herdr on Windows. It keeps the normal `herdr` command and workflow, adds Windows behavior not yet available in an upstream stable release, and publishes tested snapshots from an exact reviewed Herdr release plus the ordered maintained patch queue.
 
 [Why it exists](#why-it-exists) · [What it adds](#what-differs-from-upstream) · [Install](#install) · [Patch flow](#how-the-patch-queue-works) · [Upstream review](#for-upstream-maintainers) · [Maintaining](#maintaining-the-project) · [Herdr Sandbox](#sister-project-herdr-sandbox)
 
@@ -30,12 +30,12 @@ The table is intentionally capability-level. The patch files contain the exact i
 | --- | --- | --- |
 | Native ConPTY foundation | ✅ **Upstreamed in Herdr v0.6.9** | Herdr v0.8.0 added the modern app-local ConPTY packaging that herdr-win now reuses instead of carrying a duplicate foundation. |
 | Terminal fidelity | **Maintained here** · [`0001`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0001-windows-terminal-appearance.patch) | Windows appearance, color and cursor fidelity, rendering, and VTI input behavior. |
-| Windows remote attach and image bridge | **Maintained here** · [`0003`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | Windows SSH and named-pipe attachment, shared remote orchestration, and bounded clipboard/drop image transport. |
+| Windows remote attach and image bridge | **Partly merged upstream after v0.8.0, release pending** · [#2329](https://github.com/herdrdev/herdr/pull/2329) · [`0003`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0003-windows-remote-attach.patch) | Upstream master now includes Windows client attach to Linux/macOS and the image bridge. herdr-win retains Windows remote-host attach and additional named-pipe/backpressure coverage until the next stable refresh minimizes the mailbox. |
 | Managed Windows snapshots | **Maintained here** · [`0004`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0004-windows-managed-distribution.patch) | Verified Windows packages, per-user setup, portable archives, package-manager update ownership, and safe runtime handoff. |
 | OpenCode lifecycle reporting | **Maintained here** · [`0005`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0005-opencode-retry-notifications.patch) | Retry-aware status correlation so active retries stay quiet and terminal failures remain visible. |
 | Runtime downloads | **Maintained here** · [`0006`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/0006-harden-curl-transfers.patch) | Cross-platform `curl` transfers ignore user configuration and permit only bounded TLS 1.2+ HTTPS requests and redirects. |
 
-The Windows remote/image bridge builds on [nsxdavid's `feat/windows-remote-attach` work](https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach). The maintained mailbox adapts and extends that foundation within this queue.
+Upstream PR #2329 merged after v0.8.0 and has not shipped in a stable release yet. Mailbox `0003` therefore remains in the current queue; at the next stable refresh, it can shrink to Windows-host attach and the additional bridge hardening. The original implementation builds on [nsxdavid's `feat/windows-remote-attach` work](https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach).
 
 ## Sister project: Herdr Sandbox
 
@@ -89,7 +89,7 @@ winget upgrade --id hdosys.herdr-win --exact --source winget
 
 GitHub may publish a snapshot before the WinGet catalog finishes accepting it. A WinGet-owned copy shows an update only after the official `winget` source contains that exact release version, so its update action always points to installable bytes.
 
-Uninstall from **Windows Settings → Apps → Installed apps**; settings are preserved unless you explicitly choose to remove them. Locked or unsafe settings and skill residue is preserved and reported without blocking removal of the program, registration, or its installer-owned `PATH` entry. Stale private installer staging is never a reason to strand install, update, or uninstall. Uninstall stops safely if the install root is unowned or uses an unsupported legacy layout, a type or reparse-point boundary is unsafe, a managed process is active, a runtime lease is active or ambiguous, or another setup, uninstall, or launcher owns the relevant lock.
+Uninstall from **Windows Settings → Apps → Installed apps**. Settings are preserved unless you explicitly choose to remove them. Uninstall never terminates active Herdr sessions or removes unowned or unsafe content; it stops or preserves the blocked residue and explains the required action.
 
 ### Verify the download
 
@@ -106,20 +106,22 @@ The release also includes `herdr-win_v<version>_windows_amd64.zip`. Extract the 
 
 Each release includes raw `linux_amd64`, `linux_arm64`, `macos_amd64`, and `macos_arm64` executables. They are compatibility companions for remote hosts, not managed installers.
 
-herdr-win currently uses wire protocol 20. A remote client and server must agree on that protocol, so an official Herdr build with a different protocol is not interchangeable. Use matching binaries from the same herdr-win release on every endpoint.
+Use matching binaries from the same herdr-win release on every endpoint. Independently released official builds are not guaranteed to use the same wire protocol.
 
 For general commands, configuration, and agent integrations, use the [official Herdr documentation](https://herdr.dev/docs/).
 
 ## For upstream maintainers
 
-The five files in `patches/delta/series` are the complete maintained product delta. You do not need to infer behavior from this fork's development history.
+Thank you for the native Windows foundation and the remote-client work merged in [#2329](https://github.com/herdrdev/herdr/pull/2329). herdr-win exists to make remaining Windows behavior easy to inspect, test, and remove from this fork as equivalent support lands upstream. The Windows remote-host follow-up is tracked in [Discussion #2409](https://github.com/herdrdev/herdr/discussions/2409).
+
+The five files in `patches/delta/series` are the complete maintained product delta. Each is self-contained, so its behavior does not need to be reconstructed from this fork's development history.
 
 1. Start at the exact commit in [`BASE`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/BASE).
 2. Apply [`series`](https://github.com/hdosys/herdr-win/blob/master/patches/delta/series) in order with `git am --3way`.
 3. Review each mailbox as one responsibility-oriented change with its implementation, tests, and documentation.
 4. Follow [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) to reproduce the replay and verification gates.
 
-The mailboxes are review units, not a request to merge each one unchanged. Generic parts can be split along upstream ownership boundaries. Fork branding, release workflows, and publication state stay outside the product queue.
+The mailboxes are offered as focused evidence and acceptance tests, not an all-or-nothing merge request. Upstream can split or reimplement them along its own ownership boundaries; once equivalent behavior ships, herdr-win removes it. Fork branding, release workflows, and publication state stay outside the product queue.
 
 ## Maintaining the project
 
@@ -141,7 +143,7 @@ Ordinary pushes do not publish binaries.
 
 ## Issues and contributions
 
-- Use [upstream Herdr](https://github.com/ogulcancelik/herdr) for general product behavior that reproduces with an official upstream build.
+- Use [upstream Herdr](https://github.com/herdrdev/herdr) for general product behavior that reproduces with an official upstream build.
 - Use [herdr-win issues](https://github.com/hdosys/herdr-win/issues) for this distribution's artifacts, update feed, workflows, or maintained patches.
 - Read [`CONTRIBUTING.md`](https://github.com/hdosys/herdr-win/blob/master/CONTRIBUTING.md) before changing the queue or release automation.
 

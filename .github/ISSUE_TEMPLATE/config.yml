@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Upstream Herdr questions and feature requests
-    url: https://github.com/ogulcancelik/herdr/discussions
+    url: https://github.com/herdrdev/herdr/discussions
     about: Use upstream Discussions for general Herdr questions, ideas, and product direction.

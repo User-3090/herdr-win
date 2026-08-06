@@ -15,7 +15,7 @@ those owners and their implementation; it does not duplicate their decisions.
 Before editing, classify the change:
 
 - **Upstream Herdr behavior:** propose it to
-  [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr) under that
+  [`herdrdev/herdr`](https://github.com/herdrdev/herdr) under that
   project's contribution policy. Do not use the fork to bypass upstream review.
 - **Maintained Windows behavior:** update the owning logical mailbox in
   `patches/delta/`.
@@ -63,7 +63,7 @@ frozen snapshot. Rerun only after relevant source or inputs change.
 ### Refreshing from official upstream
 
 Do not fetch, merge, rebase, or advance the queue to newer
-`ogulcancelik/herdr` source as part of an ordinary feature, fix, documentation, or
+`herdrdev/herdr` source as part of an ordinary feature, fix, documentation, or
 maintenance task. Refresh official upstream only when the user explicitly requests
 that separate operation. For every approved refresh:
 

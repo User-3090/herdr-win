@@ -1,7 +1,7 @@
 # herdr-win maintained delta
 
 This is the canonical product delta applied by the manually dispatched herdr-win
-release workflow on top of the reviewed [`ogulcancelik/herdr`](https://github.com/ogulcancelik/herdr)
+release workflow on top of the reviewed [`herdrdev/herdr`](https://github.com/herdrdev/herdr)
 stable-release commit recorded in `BASE`.
 
 The queue intentionally contains a few coarse, logical feature patches rather

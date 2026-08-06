@@ -36,7 +36,7 @@ class PreviewNotesTests(unittest.TestCase):
             notes = "Preview notes\n"
             content = preview.build_manifest(
                 output=output,
-                repo="ogulcancelik/herdr",
+                repo="herdrdev/herdr",
                 tag="v2026.06.02.1",
                 build_id="abcdef123456.7890abcdef12",
                 commit="abcdef1234567890",
@@ -57,7 +57,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["assets"]["linux-x86_64"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
+                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_linux_amd64",
             )
             self.assertEqual(
                 data["assets"]["linux-x86_64"]["sha256"],
@@ -65,7 +65,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
+                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64.zip",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64"]["sha256"],
@@ -74,7 +74,7 @@ class PreviewNotesTests(unittest.TestCase):
             self.assertEqual(data["assets"]["windows-x86_64"]["format"], "zip")
             self.assertEqual(
                 data["assets"]["windows-x86_64-installer"]["url"],
-                "https://github.com/ogulcancelik/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
+                "https://github.com/herdrdev/herdr/releases/download/v2026.06.02.1/herdr-win_v2026.06.02.1_windows_amd64_setup.exe",
             )
             self.assertEqual(
                 data["assets"]["windows-x86_64-installer"]["format"], "nsis"
@@ -130,7 +130,7 @@ class PreviewNotesTests(unittest.TestCase):
                 ):
                     preview.build_manifest(
                         output=Path(tmp) / "preview.json",
-                        repo="ogulcancelik/herdr",
+                        repo="herdrdev/herdr",
                         tag="preview-test",
                         build_id="abcdef123456.7890abcdef12",
                         commit="abcdef",
@@ -149,7 +149,7 @@ class PreviewNotesTests(unittest.TestCase):
             ):
                 preview.build_manifest(
                     output=Path(tmp) / "preview.json",
-                    repo="ogulcancelik/herdr",
+                    repo="herdrdev/herdr",
                     tag="preview-test",
                     build_id="abcdef123456.7890abcdef12",
                     commit="abcdef",
@@ -186,7 +186,7 @@ class PreviewNotesTests(unittest.TestCase):
             )
             content = preview.build_manifest(
                 output=output,
-                repo="ogulcancelik/herdr",
+                repo="herdrdev/herdr",
                 tag="preview-test",
                 build_id="abcdef123456.7890abcdef12",
                 commit="abcdef",
@@ -211,7 +211,7 @@ class PreviewNotesTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "two lowercase 12-hex"):
                 preview.build_manifest(
                     output=Path(tmp) / "preview.json",
-                    repo="ogulcancelik/herdr",
+                    repo="herdrdev/herdr",
                     tag="preview-test",
                     build_id="2026-06-02-abcdef123456",
                     commit="abcdef",

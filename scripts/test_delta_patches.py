@@ -216,15 +216,18 @@ class DeltaPatchTests(unittest.TestCase):
             base[:12],
             "https://github.com/hdosys/herdr-sandbox",
             "https://github.com/nsxdavid/herdr/tree/feat/windows-remote-attach",
+            "https://github.com/herdrdev/herdr/pull/2329",
+            "https://github.com/herdrdev/herdr/discussions/2409",
             "https://raw.githubusercontent.com/hdosys/herdr-win/master/docs/assets/herdr-win-setup-welcome.png",
-            "install root is unowned",
-            "runtime lease is active or ambiguous",
+            "has not shipped in a stable release yet",
+            "never terminates active Herdr sessions",
             "Upstreamed in Herdr v0.6.9",
             "Herdr v0.8.0 added the modern app-local ConPTY packaging",
-            "wire protocol 20",
+            "matching binaries from the same herdr-win release",
             "linux_amd64",
             "macos_arm64",
             "## For upstream maintainers",
+            "not an all-or-nothing merge request",
             "https://github.com/hdosys/herdr-win/actions/workflows/ci.yml/badge.svg",
             "https://github.com/hdosys/herdr-win/actions/workflows/release.yml/badge.svg",
         ):
@@ -234,6 +237,9 @@ class DeltaPatchTests(unittest.TestCase):
         ).splitlines():
             self.assertIn(patch_name, readme)
         self.assertNotIn("User-3090/herdr-win/actions/workflows", readme)
+        self.assertNotIn("plus four explicit patches", readme)
+        self.assertNotIn("wire protocol 20", readme)
+        self.assertNotIn("github.com/ogulcancelik/herdr", readme)
         self.assertNotIn("## Identity and compatibility", readme)
         self.assertNotIn("Get-FileHash", readme)
         self.assertNotIn("platform-Windows%20x64", readme)
@@ -260,6 +266,13 @@ class DeltaPatchTests(unittest.TestCase):
         )
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn("name: Build and promote herdr-win release", workflow)
+        self.assertEqual(workflow.count("repository: herdrdev/herdr"), 2)
+        self.assertNotIn("repository: ogulcancelik/herdr", workflow)
+        ci_workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("repository: herdrdev/herdr", ci_workflow)
+        self.assertNotIn("repository: ogulcancelik/herdr", ci_workflow)
         self.assertIn(WINDOWS_INSTALLER_TARGET, workflow)
         self.assertIn("release_version:", workflow)
         self.assertIn("herdr-win-asset-names", workflow)
@@ -267,6 +280,8 @@ class DeltaPatchTests(unittest.TestCase):
         preview_source = (PROJECT_ROOT / "scripts" / "preview.py").read_text(
             encoding="utf-8"
         )
+        self.assertEqual(preview_source.count('default="herdrdev/herdr"'), 2)
+        self.assertNotIn('default="ogulcancelik/herdr"', preview_source)
         self.assertIn("herdr-win_v{release_version}_windows_amd64.zip", preview_source)
         for name in (
             "herdr-win_v{release_version}_linux_amd64",

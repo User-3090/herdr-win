@@ -12,8 +12,13 @@ behavior; code and tests remain the detailed implementation truth.
 - Release source is a fresh checkout of the exact commit behind the upstream stable
   release recorded in `BASE` plus the ordered `patches/delta/series` queue. At each
   explicit manual refresh, that commit must be the latest non-draft,
-  non-prerelease stable release then published by `ogulcancelik/herdr`; the control
+  non-prerelease stable release then published by `herdrdev/herdr`; the control
   branch is not an integration product branch.
+- Active control-plane checkouts, contributor and contact links, and fork-owned
+  installer presentation use the current official repository, `herdrdev/herdr`.
+  Imported source at recorded `BASE`, historical changelogs and version snapshots,
+  vendor provenance, and the frozen patch archive preserve references from their
+  recorded source boundary instead of creating a temporary fork delta.
 - `BASE` is a deliberate reviewed stable-release boundary, not a moving pointer.
   Ordinary work and fork-origin synchronization never advance it. Between explicit
   user-directed refreshes, releases stay on the recorded stable source even if

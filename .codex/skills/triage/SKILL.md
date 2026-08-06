@@ -7,7 +7,7 @@ description: Triage open herdr-win GitHub issues into a concise decision-first M
 
 Use this skill only inside the `hdosys/herdr-win` repository.
 
-When the user says `triage`, inspect open GitHub issues for `hdosys/herdr-win` and return a concise Markdown table. Query official `ogulcancelik/herdr` only when the user explicitly requests upstream triage. Prefer GitHub MCP tools when available. If they are unavailable, use `gh issue list` / `gh issue view` only when authenticated access is already configured.
+When the user says `triage`, inspect open GitHub issues for `hdosys/herdr-win` and return a concise Markdown table. Query official `herdrdev/herdr` only when the user explicitly requests upstream triage. Prefer GitHub MCP tools when available. If they are unavailable, use `gh issue list` / `gh issue view` only when authenticated access is already configured.
 
 Use this table shape:
 

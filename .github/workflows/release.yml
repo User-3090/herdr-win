@@ -112,7 +112,7 @@ jobs:
       - name: Checkout upstream Herdr
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: ogulcancelik/herdr
+          repository: herdrdev/herdr
           ref: ${{ steps.upstream_source.outputs.ref }}
           path: source
           fetch-depth: 0
@@ -649,7 +649,7 @@ jobs:
       - name: Checkout tested upstream source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: ogulcancelik/herdr
+          repository: herdrdev/herdr
           path: source
           ref: ${{ needs.build.outputs.upstream_sha }}
           fetch-depth: 0

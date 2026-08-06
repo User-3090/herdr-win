@@ -315,6 +315,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             packager,
         )
         self.assertIn("downloads.sourceforge.net/project/nsis", packager)
+        self.assertIn(
+            '$UpstreamUrl = "https://github.com/herdrdev/herdr"', packager
+        )
+        self.assertNotIn("https://github.com/ogulcancelik/herdr", packager)
         self.assertIn('"/WX"', packager)
         self.assertIn("Invoke-HerdrIdentityQuery", packager)
         self.assertIn('"--herdr-private-launcher-build-id-v1"', packager)
