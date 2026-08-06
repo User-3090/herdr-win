@@ -15,7 +15,7 @@ use windows_sys::Win32::{
 
 use super::installer_helper_files::{
     assert_regular_file, full_path, invalid_data, os_eq_ignore_case, parse_display_version,
-    path_eq, UNINSTALL_RUNNER_NAME,
+    path_eq, NATIVE_HELPER_NAME,
 };
 
 const PRODUCT_NAME: &str = "Herdr Win";
@@ -409,28 +409,15 @@ pub(crate) fn arp_exists() -> io::Result<bool> {
 }
 
 pub(crate) fn quiet_uninstall_string(install_root: &Path) -> io::Result<String> {
-    let system_root =
-        std::env::var_os("SystemRoot").ok_or_else(|| invalid_data("SystemRoot is missing"))?;
-    let powershell = Path::new(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    let runner = install_root.join(UNINSTALL_RUNNER_NAME);
-    let uninstaller = install_root.join("uninstall.exe");
+    let helper = install_root.join("state").join(NATIVE_HELPER_NAME);
     Ok(format!(
-        "\"{}\" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -Uninstaller \"{}\" -InstallRoot \"{}\"",
-        powershell.display(),
-        runner.display(),
-        uninstaller.display(),
+        "\"{}\" quiet-uninstall --install-root \"{}\"",
+        helper.display(),
         install_root.display()
     ))
 }
 
-pub(crate) fn assert_arp_ownership(
-    install_root: &Path,
-    allow_legacy_quiet: bool,
-) -> io::Result<()> {
+pub(crate) fn assert_arp_ownership(install_root: &Path) -> io::Result<()> {
     let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
         return Ok(());
     };
@@ -479,7 +466,6 @@ pub(crate) fn assert_arp_ownership(
     let expected_uninstaller = install_root.join("uninstall.exe");
     let expected_launcher = install_root.join("bin").join("herdr.exe");
     let expected_quiet = quiet_uninstall_string(install_root)?;
-    let legacy_quiet = format!("\"{}\" /S", expected_uninstaller.display());
     let (display_parts, _) = parse_display_version(&display_version)?;
     let versions_match = u32::from(display_parts[0]) == dword("VersionMajor")?
         && u32::from(display_parts[1]) == dword("VersionMinor")?;
@@ -488,7 +474,7 @@ pub(crate) fn assert_arp_ownership(
         || !path_eq(Path::new(&registered_root), install_root)?
         || icon != format!("{},0", expected_launcher.display())
         || uninstall != format!("\"{}\"", expected_uninstaller.display())
-        || (quiet != expected_quiet && !(allow_legacy_quiet && quiet == legacy_quiet))
+        || quiet != expected_quiet
         || !versions_match
         || dword("NoModify")? != 1
         || dword("NoRepair")? != 1
@@ -506,22 +492,8 @@ pub(crate) fn assert_arp_ownership(
     Ok(())
 }
 
-pub(crate) fn legacy_quiet_registration(install_root: &Path) -> io::Result<bool> {
-    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
-        return Ok(false);
-    };
-    let Some(RegistryValue::String {
-        value,
-        kind: REG_SZ,
-    }) = key.query("QuietUninstallString")?
-    else {
-        return Ok(false);
-    };
-    Ok(value == format!("\"{}\" /S", install_root.join("uninstall.exe").display()))
-}
-
-pub(crate) fn arp_path_owned(install_root: &Path, allow_legacy: bool) -> io::Result<bool> {
-    assert_arp_ownership(install_root, allow_legacy)?;
+pub(crate) fn arp_path_owned(install_root: &Path) -> io::Result<bool> {
+    assert_arp_ownership(install_root)?;
     let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
         return Ok(false);
     };
@@ -538,10 +510,9 @@ pub(crate) fn set_arp_registration(
     display_version: &str,
     numeric_version: &str,
     path_added: bool,
-    allow_legacy: bool,
 ) -> io::Result<()> {
-    assert_arp_ownership(install_root, allow_legacy)?;
-    assert_regular_file(&install_root.join(UNINSTALL_RUNNER_NAME))?;
+    assert_arp_ownership(install_root)?;
+    assert_regular_file(&install_root.join("state").join(NATIVE_HELPER_NAME))?;
     let key = RegistryKey::create(HKEY_CURRENT_USER, ARP_SUBKEY)?;
     let uninstaller = install_root.join("uninstall.exe");
     let launcher = install_root.join("bin").join("herdr.exe");
@@ -579,11 +550,11 @@ pub(crate) fn set_arp_registration(
     key.set_dword("NoRepair", 1)?;
     key.set_dword("PathAdded", u32::from(path_added))?;
     drop(key);
-    assert_arp_ownership(install_root, false)
+    assert_arp_ownership(install_root)
 }
 
 pub(crate) fn remove_arp_registration(install_root: &Path) -> io::Result<()> {
-    assert_arp_ownership(install_root, false)?;
+    assert_arp_ownership(install_root)?;
     if !arp_exists()? {
         return Ok(());
     }
@@ -606,5 +577,14 @@ mod tests {
             r"c:\users\example\herdr\bin",
             false,
         ));
+    }
+
+    #[test]
+    fn quiet_uninstall_command_invokes_only_the_native_helper() {
+        let root = Path::new(r"C:\Users\Example\AppData\Local\Programs\Herdr");
+        assert_eq!(
+            quiet_uninstall_string(root).unwrap(),
+            r#""C:\Users\Example\AppData\Local\Programs\Herdr\state\installer-helper.exe" quiet-uninstall --install-root "C:\Users\Example\AppData\Local\Programs\Herdr""#
+        );
     }
 }

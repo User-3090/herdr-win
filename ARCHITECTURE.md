@@ -92,24 +92,18 @@ behavior; code and tests remain the detailed implementation truth.
   custom flags only as exact tokens.
 - The helper validates the complete managed Installed Apps value set, registry
   kinds, and content before mutation or key removal; unknown values or subkeys are
-  preserved and rejected. Only setup may accept the prior current-layout direct
-  quiet-uninstall command, and after publishing the runner it rewrites that exact
-  registration before PATH mutation; uninstall and registration removal require
-  the current runner command.
-- Installed Apps quiet uninstall invokes one installed PowerShell runner that
-  validates and copies `uninstall.exe` to a random temporary path, launches it
-  once with `/S` and `_?=`, waits boundedly, and returns its terminal exit code.
-  The runner remains available through every recoverable cleanup fault and is
-  removed only during final validated residual cleanup. That final pair deletion
-  snapshots and hashes the actual current runner and uninstaller bytes, restoring
-  both on any nonterminal deletion failure instead of substituting a published
-  payload hash.
-- A current-format installation published before the native helper may temporarily
-  retain `state/installer-helper.ps1` during upgrade. That file is a bounded
-  `CompleteMaintenance` bridge from an already-running old launcher to
-  `installer-helper.exe`; it owns no lifecycle logic and is removed after pending
-  launcher publication. Fresh installs and settled native upgrades retain only the
-  native helper.
+  preserved and rejected. Setup, uninstall, and registration removal accept only
+  the current native-helper quiet-uninstall command. There is no prior command,
+  script helper, or bridge acceptance path.
+- Installed Apps quiet uninstall invokes `state/installer-helper.exe` directly.
+  That process creates one random strict sibling rendezvous, starts the NSIS
+  uninstaller in a bounded native job, and waits for the embedded helper's terminal
+  result. The embedded helper accepts only that exact installed-helper process,
+  moves its locked image to the validated sibling handoff path, removes the managed
+  root and registration, publishes the result, then deletes the handoff after the
+  waiting process exits. A nonterminal cleanup fault restores the helper and exact
+  retry markers before reporting failure. Fresh installs, updates, quiet uninstall,
+  and post-exit maintenance therefore ship and invoke no PowerShell payload.
 - NSIS accepts `/WINGET` as the sole explicit package-manager origin signal and
   passes a bounded Direct/WinGet value into the helper. The helper owns the optional
   strict UTF-8 `state/package-manager` record; only the exact
@@ -183,8 +177,8 @@ behavior; code and tests remain the detailed implementation truth.
   before a fresh **Herdr Win** install, so setup never co-owns duplicate package
   registrations.
 - Exact ARP ownership plus the current bin sentinel and install manifest permit
-  repair of the installer control filenames only: missing runner, helper, or
-  uninstaller files are recreated, and changed regular files are atomically
+  repair of the installer control filenames only: missing helper or uninstaller
+  files are recreated, and changed regular files are atomically
   replaced through the native `ReplaceFileW` boundary with backups of their actual
   current bytes. When this
   normal path cannot classify a root already bound by exact current registration,
@@ -296,8 +290,8 @@ behavior; code and tests remain the detailed implementation truth.
   gates on one frozen logical snapshot.
 - Formatting, Clippy, and Rust tests run in replayed product source. Cross-platform
   release builds add native target/machine checks and static-link validation for
-  Linux. Windows packaging changes add package/vendor checks, PowerShell wrapper
-  checks, native helper and launcher tests, and realistic installer evidence where
-  that boundary changed.
+  Linux. Windows packaging changes add package/vendor checks, native quiet-uninstall,
+  helper and launcher tests, and realistic installer evidence where that boundary
+  changed.
 - Broad gates run on an implementation-frozen snapshot. Passing evidence remains
   valid until relevant source, inputs, or environment-sensitive assumptions change.

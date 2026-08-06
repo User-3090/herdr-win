@@ -1,4 +1,4 @@
-From 134437b107d253fb2f1eaf645ae1c0ac90f7d35e Mon Sep 17 00:00:00 2001
+From ea600ea4209743f72e25341915a61b6aa63d85dc Mon Sep 17 00:00:00 2001
 From: hdosys <71881005+hdosys@users.noreply.github.com>
 Date: Wed, 29 Jul 2026 23:02:52 +0200
 Subject: [PATCH 3/5] fix(windows): install the cross-agent Herdr skill
@@ -8,7 +8,6 @@ Refs ogulcancelik/herdr#1947
  Cargo.toml                                    |   13 +
  build.rs                                      |    1 -
  justfile                                      |    6 +-
- packaging/windows/installer-helper-bridge.ps1 |   29 +
  packaging/windows/installer/artwork/README.md |   28 +
  .../installer-welcome-finish-164x314.bmp      |  Bin 0 -> 154542 bytes
  .../installer-welcome-finish-205x393.bmp      |  Bin 0 -> 242142 bytes
@@ -16,11 +15,10 @@ Refs ogulcancelik/herdr#1947
  .../installer-welcome-finish-287x550.bmp      |  Bin 0 -> 475254 bytes
  .../installer-welcome-finish-328x628.bmp      |  Bin 0 -> 618006 bytes
  .../installer-welcome-finish-source.png       |  Bin 0 -> 1698169 bytes
- packaging/windows/installer/project.nsi       |  476 +++++
+ packaging/windows/installer/project.nsi       |  489 ++++
  packaging/windows/managed-skill-hashes.txt    |    3 +
- packaging/windows/uninstall-runner.ps1        |   83 +
  scripts/package_windows_conpty.py             |   39 +-
- scripts/package_windows_installer.ps1         |  530 +++++
+ scripts/package_windows_installer.ps1         |  525 +++++
  scripts/preview.py                            |  124 +-
  scripts/test_package_windows_conpty.py        |   36 +-
  scripts/test_preview.py                       |  203 +-
@@ -28,7 +26,7 @@ Refs ogulcancelik/herdr#1947
  scripts/test_vendor_portable_pty.py           |    4 +-
  scripts/test_windows_installer.py             |  425 ++++
  .../windows_install_conpty_package_test.ps1   |  207 +-
- scripts/windows_installer_fault_test.ps1      |  865 ++++++++
+ scripts/windows_installer_fault_test.ps1      |  845 +++++++
  src/app/api/plugins/panes.rs                  |    2 +-
  src/app/api/plugins/runtime.rs                |    2 +-
  src/app/input/navigate.rs                     |    2 +-
@@ -44,19 +42,18 @@ Refs ogulcancelik/herdr#1947
  src/managed_install.rs                        |  318 +++
  src/platform/mod.rs                           |   25 +
  src/platform/windows.rs                       |  158 +-
- src/platform/windows/installer_helper.rs      |  175 ++
- .../windows/installer_helper_files.rs         |  938 +++++++++
- .../windows/installer_helper_lifecycle.rs     | 1765 +++++++++++++++++
- .../windows/installer_helper_registry.rs      |  610 ++++++
+ src/platform/windows/installer_helper.rs      |  212 ++
+ .../windows/installer_helper_files.rs         |  939 ++++++++
+ .../windows/installer_helper_lifecycle.rs     | 2012 +++++++++++++++++
+ .../windows/installer_helper_registry.rs      |  590 +++++
  .../windows/installer_helper_skills.rs        |  408 ++++
- src/platform/windows/launcher.rs              | 1084 ++++++++++
- src/platform/windows/managed_install.rs       |  689 +++++++
+ src/platform/windows/launcher.rs              | 1084 +++++++++
+ src/platform/windows/managed_install.rs       |  689 ++++++
  src/remote/attach.rs                          |   14 +-
  src/server/autodetect.rs                      |    6 +-
  src/server/handoff.rs                         |    2 +-
- src/update.rs                                 |  878 +++++++-
- 50 files changed, 9944 insertions(+), 392 deletions(-)
- create mode 100644 packaging/windows/installer-helper-bridge.ps1
+ src/update.rs                                 |  878 ++++++-
+ 48 files changed, 10085 insertions(+), 392 deletions(-)
  create mode 100644 packaging/windows/installer/artwork/README.md
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-164x314.bmp
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-205x393.bmp
@@ -66,7 +63,6 @@ Refs ogulcancelik/herdr#1947
  create mode 100644 packaging/windows/installer/artwork/installer-welcome-finish-source.png
  create mode 100644 packaging/windows/installer/project.nsi
  create mode 100644 packaging/windows/managed-skill-hashes.txt
- create mode 100644 packaging/windows/uninstall-runner.ps1
  create mode 100644 scripts/package_windows_installer.ps1
  create mode 100644 scripts/test_windows_installer.py
  create mode 100644 scripts/windows_installer_fault_test.ps1
@@ -169,41 +165,6 @@ index e5f9e1b21702c141d1d90e77e30d39e720a1b2fa..a2a6e2bd4e07cccb8b339813126784db
      @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
  
  [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
-diff --git a/packaging/windows/installer-helper-bridge.ps1 b/packaging/windows/installer-helper-bridge.ps1
-new file mode 100644
-index 0000000000000000000000000000000000000000..864c60675058d64daaaba3b6712da3f44c28e2d8
---- /dev/null
-+++ b/packaging/windows/installer-helper-bridge.ps1
-@@ -0,0 +1,29 @@
-+[CmdletBinding()]
-+param(
-+    [Parameter(Mandatory = $true)]
-+    [ValidateSet("CompleteMaintenance")]
-+    [string]$Action,
-+
-+    [Parameter(Mandatory = $true)]
-+    [ValidateNotNullOrEmpty()]
-+    [string]$InstallRoot,
-+
-+    [uint32]$ParentProcessId = 0
-+)
-+
-+Set-StrictMode -Version Latest
-+$ErrorActionPreference = "Stop"
-+
-+try {
-+    $helper = Join-Path $PSScriptRoot "installer-helper.exe"
-+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
-+        throw "The native Herdr installer helper is missing: $helper"
-+    }
-+    & $helper complete-maintenance `
-+        --install-root $InstallRoot `
-+        --parent-process-id ([string]$ParentProcessId)
-+    exit $LASTEXITCODE
-+} catch {
-+    [Console]::Error.WriteLine("Herdr Win maintenance bridge error: $($_.Exception.Message)")
-+    exit 1
-+}
 diff --git a/packaging/windows/installer/artwork/README.md b/packaging/windows/installer/artwork/README.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..00a16fb8af74995d05370720af4b0957aeda2df7
@@ -51661,10 +51622,10 @@ HcmV?d00001
 
 diff --git a/packaging/windows/installer/project.nsi b/packaging/windows/installer/project.nsi
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e7f05dac2
+index 0000000000000000000000000000000000000000..2fe7d267e201f6f5b2684ec5ea5f9be4cf356f8a
 --- /dev/null
 +++ b/packaging/windows/installer/project.nsi
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,489 @@
 +; Product identity, payloads, and runtime protocol names are build inputs.
 +!ifndef ARG_STAGE_DIR
 +  !error "ARG_STAGE_DIR is required"
@@ -51674,12 +51635,6 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +!endif
 +!ifndef ARG_HELPER_EXE
 +  !error "ARG_HELPER_EXE is required"
-+!endif
-+!ifndef ARG_HELPER_BRIDGE_PS1
-+  !error "ARG_HELPER_BRIDGE_PS1 is required"
-+!endif
-+!ifndef ARG_UNINSTALL_RUNNER_PS1
-+  !error "ARG_UNINSTALL_RUNNER_PS1 is required"
 +!endif
 +!ifndef ARG_SKILL_MD
 +  !error "ARG_SKILL_MD is required"
@@ -51781,6 +51736,9 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +Var SkillDisposition
 +Var SkillCheckbox
 +Var UpstreamLink
++Var QuietRunnerPid
++Var QuietToken
++Var QuietHelperArgs
 +
 +!define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
 +!define INSTALLER_WELCOME_BITMAP_125 "${ARG_ARTWORK_DIR}\installer-welcome-finish-205x393.bmp"
@@ -51984,6 +51942,9 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +uninstaller_profile_ready:
 +  StrCpy $SettingsDisposition "Keep"
 +  StrCpy $SkillDisposition "Auto"
++  StrCpy $QuietRunnerPid ""
++  StrCpy $QuietToken ""
++  StrCpy $QuietHelperArgs ""
 +  ${GetParameters} $0
 +  StrCpy $2 "$0 "
 +  ClearErrors
@@ -51996,6 +51957,21 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +  ${IfNot} ${Errors}
 +    StrCpy $SkillDisposition "Remove"
 +  ${EndIf}
++  ClearErrors
++  ${GetOptions} "$2" "/NATIVE_QUIET_RUNNER_PID=" $QuietRunnerPid
++  ClearErrors
++  ${GetOptions} "$2" "/NATIVE_QUIET_TOKEN=" $QuietToken
++  StrCmp $QuietRunnerPid "" un_quiet_pid_missing un_quiet_pid_present
++un_quiet_pid_missing:
++  StrCmp $QuietToken "" un_quiet_ready un_quiet_invalid
++un_quiet_pid_present:
++  StrCmp $QuietToken "" un_quiet_invalid 0
++  StrCpy $QuietHelperArgs '--quiet-runner-process-id "$QuietRunnerPid" --quiet-token "$QuietToken"'
++  Goto un_quiet_ready
++un_quiet_invalid:
++  Push "Native quiet uninstall received an incomplete rendezvous."
++  Call un.FailUninstall
++un_quiet_ready:
 +  InitPluginsDir
 +  SetOutPath "$PLUGINSDIR"
 +  ClearErrors
@@ -52073,8 +52049,6 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +  SetOutPath "$PLUGINSDIR"
 +  File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
 +  File /oname=installer-helper.exe "${ARG_HELPER_EXE}"
-+  File /oname=installer-helper-bridge.ps1 "${ARG_HELPER_BRIDGE_PS1}"
-+  File /oname=uninstall-runner.ps1 "${ARG_UNINSTALL_RUNNER_PS1}"
 +  SetOutPath "$PLUGINSDIR\skill"
 +  File /oname=SKILL.md "${ARG_SKILL_MD}"
 +  File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
@@ -52112,7 +52086,7 @@ index 0000000000000000000000000000000000000000..b5630e68d7099b95a15dad0ac6c38d2e
 +  SetAutoClose true
 +  ; The uninstaller carries its own native helper so every retry uses one
 +  ; validation and lifecycle-lock owner after installed state is removed.
-+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" uninstall --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --settings-disposition "$SettingsDisposition" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt" --skill-disposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
++  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" uninstall --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --settings-disposition "$SettingsDisposition" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt" --skill-disposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS} $QuietHelperArgs'
 +  Pop $HelperExitCode
 +  Pop $HelperOutput
 +  StrCmp $HelperExitCode "error" un_helper_start_failed
@@ -52150,95 +52124,6 @@ index 0000000000000000000000000000000000000000..2ab1a2278d6b249d176a75308ffa8c01
 +herdr-managed-skill-hashes-v1
 +0786182f02ebf92708e09d82d79e4614d1a9c30bfc337643cc2af1d0fb9db29f
 +2752439d23fcc16235e1292599e7f7b31635166d6b01221d7bf759da5d571072
-diff --git a/packaging/windows/uninstall-runner.ps1 b/packaging/windows/uninstall-runner.ps1
-new file mode 100644
-index 0000000000000000000000000000000000000000..b26ff344fad5b606db1fb50d99b12b8f87507e0f
---- /dev/null
-+++ b/packaging/windows/uninstall-runner.ps1
-@@ -0,0 +1,83 @@
-+[CmdletBinding()]
-+param(
-+    [Parameter(Mandatory = $true)]
-+    [ValidateNotNullOrEmpty()]
-+    [string]$Uninstaller,
-+
-+    [Parameter(Mandatory = $true)]
-+    [ValidateNotNullOrEmpty()]
-+    [string]$InstallRoot
-+)
-+
-+Set-StrictMode -Version Latest
-+$ErrorActionPreference = "Stop"
-+
-+$temporaryUninstaller = $null
-+$process = $null
-+$exitCode = 1
-+try {
-+    $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
-+    if ($InstallRoot.Equals([IO.Path]::GetPathRoot($InstallRoot), [StringComparison]::OrdinalIgnoreCase)) {
-+        throw "Refusing to run quiet uninstall from a volume root."
-+    }
-+    $installRootItem = Get-Item -LiteralPath $InstallRoot -Force
-+    if ($installRootItem -isnot [IO.DirectoryInfo] -or
-+        ($installRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-+        throw "Quiet uninstall requires a regular non-reparse install root."
-+    }
-+    $Uninstaller = [IO.Path]::GetFullPath($Uninstaller)
-+    $expectedUninstaller = Join-Path $InstallRoot "uninstall.exe"
-+    if (-not $Uninstaller.Equals($expectedUninstaller, [StringComparison]::OrdinalIgnoreCase)) {
-+        throw "Quiet uninstall received an unexpected uninstaller path."
-+    }
-+    $uninstallerItem = Get-Item -LiteralPath $Uninstaller -Force
-+    if ($uninstallerItem -isnot [IO.FileInfo] -or
-+        ($uninstallerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-+        $uninstallerItem.Length -le 0) {
-+        throw "Quiet uninstall requires a nonempty regular non-reparse uninstaller."
-+    }
-+
-+    $userProfileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-+    if ([string]::IsNullOrWhiteSpace($userProfileRoot)) {
-+        throw "Quiet uninstall could not locate the current user's profile."
-+    }
-+    $temporaryDirectory = [IO.Path]::GetFullPath((Join-Path $userProfileRoot "AppData\Local\Temp"))
-+    [void][IO.Directory]::CreateDirectory($temporaryDirectory)
-+    $temporaryDirectoryItem = Get-Item -LiteralPath $temporaryDirectory -Force
-+    if ($temporaryDirectoryItem -isnot [IO.DirectoryInfo] -or
-+        ($temporaryDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-+        throw "Quiet uninstall requires a regular non-reparse user temp directory."
-+    }
-+    $temporaryUninstaller = Join-Path $temporaryDirectory ("herdr-uninstall-" + [Guid]::NewGuid().ToString("N") + ".exe")
-+    [IO.File]::Copy($Uninstaller, $temporaryUninstaller, $false)
-+    $startInfo = New-Object Diagnostics.ProcessStartInfo
-+    $startInfo.FileName = $temporaryUninstaller
-+    $startInfo.Arguments = "/S _?=$InstallRoot"
-+    $startInfo.UseShellExecute = $false
-+    $startInfo.CreateNoWindow = $true
-+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-+    $process = New-Object Diagnostics.Process
-+    $process.StartInfo = $startInfo
-+    if (-not $process.Start()) {
-+        throw "Could not start the copied Herdr uninstaller."
-+    }
-+    if (-not $process.WaitForExit(180000)) {
-+        try {
-+            $process.Kill()
-+            [void]$process.WaitForExit(5000)
-+        } catch {}
-+        throw "Herdr quiet uninstall exceeded its 180 second deadline."
-+    }
-+    $exitCode = $process.ExitCode
-+} catch {
-+    [Console]::Error.WriteLine("Herdr quiet uninstall error: $($_.Exception.Message)")
-+} finally {
-+    if ($null -ne $process) {
-+        $process.Dispose()
-+    }
-+    if ($null -ne $temporaryUninstaller -and (Test-Path -LiteralPath $temporaryUninstaller)) {
-+        Remove-Item -LiteralPath $temporaryUninstaller -Force -ErrorAction SilentlyContinue
-+    }
-+}
-+
-+exit $exitCode
 diff --git a/scripts/package_windows_conpty.py b/scripts/package_windows_conpty.py
 index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c9933aeb6ec1 100644
 --- a/scripts/package_windows_conpty.py
@@ -52349,10 +52234,10 @@ index 2fc51a1e2899daa3def67642d6ed1a79c9ab2558..370dd3fbb5adf9eee5cc39405eb4c993
  if __name__ == "__main__":
 diff --git a/scripts/package_windows_installer.ps1 b/scripts/package_windows_installer.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..883d6af09af5bd384b2fd56a3e1a850617fd4d19
+index 0000000000000000000000000000000000000000..2049fd944a65f26b752e80f26ff295c59b22a7a5
 --- /dev/null
 +++ b/scripts/package_windows_installer.ps1
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,525 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)]
@@ -52387,8 +52272,7 @@ index 0000000000000000000000000000000000000000..883d6af09af5bd384b2fd56a3e1a8506
 +        "after-installer-helper",
 +        "after-state-directory",
 +        "before-uninstaller",
-+        "after-uninstaller",
-+        "after-uninstall-runner"
++        "after-uninstaller"
 +    )]
 +    [string]$TestUninstallFault,
 +
@@ -52704,8 +52588,6 @@ index 0000000000000000000000000000000000000000..883d6af09af5bd384b2fd56a3e1a8506
 +$projectRoot = Split-Path -Parent $PSScriptRoot
 +$packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 +$installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
-+$helperBridge = Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"
-+$uninstallRunner = Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"
 +$skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 +$skillHashManifest = Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"
 +$artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
@@ -52729,7 +52611,7 @@ index 0000000000000000000000000000000000000000..883d6af09af5bd384b2fd56a3e1a8506
 +if (Test-Path -LiteralPath $OutputPath) {
 +    throw "Refusing to overwrite an existing installer output: $OutputPath"
 +}
-+$requiredSources = @($packager, $installerScript, $helperBridge, $uninstallRunner, $skillSource, $skillHashManifest)
++$requiredSources = @($packager, $installerScript, $skillSource, $skillHashManifest)
 +foreach ($artworkFile in $artworkFiles) {
 +    $requiredSources += Join-Path $artworkDir $artworkFile
 +}
@@ -52843,8 +52725,6 @@ index 0000000000000000000000000000000000000000..883d6af09af5bd384b2fd56a3e1a8506
 +        "/DARG_STAGE_DIR=$StageDir",
 +        "/DARG_LAUNCHER_EXE=$LauncherExe",
 +        "/DARG_HELPER_EXE=$InstallerHelperExe",
-+        "/DARG_HELPER_BRIDGE_PS1=$helperBridge",
-+        "/DARG_UNINSTALL_RUNNER_PS1=$uninstallRunner",
 +        "/DARG_SKILL_MD=$canonicalSkillSource",
 +        "/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest",
 +        "/DARG_ARTWORK_DIR=$artworkDir",
@@ -53488,7 +53368,7 @@ index cf3b791a972aef43fd931d9dac2fe4473fa6f022..899b33f853f51c30fed08736889679b6
  
 diff --git a/scripts/test_windows_installer.py b/scripts/test_windows_installer.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac3c54b464
+index 0000000000000000000000000000000000000000..41146dc4185d8ed136f7f43f245ac865d5c7f51b
 --- /dev/null
 +++ b/scripts/test_windows_installer.py
 @@ -0,0 +1,425 @@
@@ -53504,8 +53384,8 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +PROJECT_ROOT = Path(__file__).resolve().parent.parent
 +CARGO = PROJECT_ROOT / "Cargo.toml"
 +NSI = PROJECT_ROOT / "packaging/windows/installer/project.nsi"
-+BRIDGE = PROJECT_ROOT / "packaging/windows/installer-helper-bridge.ps1"
-+UNINSTALL_RUNNER = PROJECT_ROOT / "packaging/windows/uninstall-runner.ps1"
++REMOVED_BRIDGE = PROJECT_ROOT / "packaging/windows/installer-helper-bridge.ps1"
++REMOVED_UNINSTALL_RUNNER = PROJECT_ROOT / "packaging/windows/uninstall-runner.ps1"
 +LEGACY_HELPER = PROJECT_ROOT / "packaging/windows/herdr-installer-helper.ps1"
 +LEGACY_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
 +PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
@@ -53561,8 +53441,6 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +    def test_native_helper_is_the_only_installer_engine(self) -> None:
 +        for path in (
 +            NSI,
-+            BRIDGE,
-+            UNINSTALL_RUNNER,
 +            PACKAGER,
 +            FAULT_TEST,
 +            HELPER_ENTRY,
@@ -53577,6 +53455,8 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            self.assertTrue(path.is_file(), path)
 +        self.assertFalse(LEGACY_HELPER.exists())
 +        self.assertFalse(LEGACY_TEST.exists())
++        self.assertFalse(REMOVED_BRIDGE.exists())
++        self.assertFalse(REMOVED_UNINSTALL_RUNNER.exists())
 +
 +        cargo = text(CARGO)
 +        self.assertIn('name = "herdr-installer-helper"', cargo)
@@ -53598,6 +53478,7 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +        self.assertIn("installer_helper::run()", entry)
 +        self.assertIn('"install" =>', cli)
 +        self.assertIn('"uninstall" =>', cli)
++        self.assertIn('"quiet-uninstall" =>', cli)
 +        self.assertIn('"skill-removal-default" =>', cli)
 +        self.assertIn('"complete-maintenance" =>', cli)
 +
@@ -53607,10 +53488,11 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "herdr-managed-bin-v1\\n",
 +            "herdr-package-manager-v1\\nmanager=winget\\n",
 +            "herdr-uninstall-v1\\n",
++            "herdr-quiet-uninstall-v1\\n",
 +        ):
 +            self.assertIn(record, files)
 +        self.assertIn('NATIVE_HELPER_NAME: &str = "installer-helper.exe"', files)
-+        self.assertIn('LEGACY_HELPER_NAME: &str = "installer-helper.ps1"', files)
++        self.assertNotIn("LEGACY_HELPER_NAME", files)
 +        self.assertIn('LAUNCHER_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1"', files)
 +        self.assertIn("ReplaceFileW", files)
 +        self.assertIn("MoveFileExW", files)
@@ -53629,7 +53511,10 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "lease_status",
 +            "process_paths",
 +            "uninstall.pending",
-+            "RootKind::ManagedLegacy",
++            "QuietSession",
++            "quiet_uninstall",
++            "AssignProcessToJobObject",
++            "TerminateJobObject",
 +            "set_pending_launcher",
 +            "complete_launcher_update_locked",
 +            "remove_inactive_runtimes",
@@ -53637,6 +53522,8 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "remove_uninstall_residual",
 +        ):
 +            self.assertIn(contract, lifecycle)
++        self.assertNotIn("ManagedLegacy", lifecycle)
++        self.assertNotIn("installer-helper.ps1", lifecycle)
 +        self.assertLess(
 +            lifecycle.index("acquire_lifecycle_lock", lifecycle.index("pub(crate) fn install")),
 +            lifecycle.index("registry::assert_arp_ownership", lifecycle.index("pub(crate) fn install")),
@@ -53683,21 +53570,17 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            self.assertIn(required, skills)
 +        self.assertNotIn("remove_dir_all", skills)
 +
-+    def test_transition_bridge_is_bounded_to_old_launcher_maintenance(self) -> None:
-+        bridge = text(BRIDGE)
-+        self.assertLessEqual(len(bridge.splitlines()), 32)
-+        self.assertIn('[ValidateSet("CompleteMaintenance")]', bridge)
-+        self.assertIn('Join-Path $PSScriptRoot "installer-helper.exe"', bridge)
-+        self.assertIn("& $helper complete-maintenance", bridge)
-+        self.assertIn("--parent-process-id", bridge)
-+        for forbidden in (
-+            "Remove-Item",
-+            "New-Item",
-+            "Registry",
-+            "Invoke-WebRequest",
-+            "Start-Process",
-+        ):
-+            self.assertNotIn(forbidden, bridge)
++    def test_shipped_installer_contains_no_powershell_payload(self) -> None:
++        combined = "\n".join(
++            text(path)
++            for path in (NSI, PACKAGER, HELPER_CLI, HELPER_LIFECYCLE, HELPER_REGISTRY)
++        )
++        self.assertNotIn("installer-helper-bridge.ps1", combined)
++        self.assertNotIn("uninstall-runner.ps1", combined)
++        self.assertNotIn("WindowsPowerShell", combined)
++        self.assertNotIn("ExecutionPolicy", combined)
++        self.assertNotIn("ARG_HELPER_BRIDGE_PS1", combined)
++        self.assertNotIn("ARG_UNINSTALL_RUNNER_PS1", combined)
 +
 +    def test_managed_skill_hash_manifest_is_exact(self) -> None:
 +        lines = text(MANAGED_SKILL_HASHES).splitlines()
@@ -53716,8 +53599,6 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "ARG_STAGE_DIR",
 +            "ARG_LAUNCHER_EXE",
 +            "ARG_HELPER_EXE",
-+            "ARG_HELPER_BRIDGE_PS1",
-+            "ARG_UNINSTALL_RUNNER_PS1",
 +            "ARG_SKILL_MD",
 +            "ARG_SKILL_HASH_MANIFEST",
 +            "ARG_ARTWORK_DIR",
@@ -53741,12 +53622,7 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +        self.assertEqual(
 +            nsi.count('File /oname=installer-helper.exe "${ARG_HELPER_EXE}"'), 2
 +        )
-+        self.assertEqual(
-+            nsi.count(
-+                'File /oname=installer-helper-bridge.ps1 "${ARG_HELPER_BRIDGE_PS1}"'
-+            ),
-+            1,
-+        )
++        self.assertNotIn(".ps1", nsi)
 +        self.assertIn(
 +            '"$PLUGINSDIR\\installer-helper.exe" install --install-root', nsi
 +        )
@@ -53756,6 +53632,10 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +        self.assertIn(
 +            '"$INSTDIR\\state\\installer-helper.exe" skill-removal-default', nsi
 +        )
++        self.assertIn("/NATIVE_QUIET_RUNNER_PID=", nsi)
++        self.assertIn("/NATIVE_QUIET_TOKEN=", nsi)
++        self.assertIn("--quiet-runner-process-id", nsi)
++        self.assertIn("--quiet-token", nsi)
 +        self.assertIn("/TIMEOUT=180000", nsi)
 +        self.assertIn("/TIMEOUT=30000", nsi)
 +        self.assertIn('StrCmp $HelperExitCode "error"', nsi)
@@ -53801,10 +53681,8 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +        self.assertIn("$InstallerHelperExe = (Resolve-Path", packager)
 +        self.assertEqual(packager.count("Assert-X64Pe -Path"), 3)
 +        self.assertIn("separately built native installer helper", packager)
-+        self.assertIn("installer-helper-bridge.ps1", packager)
 +        self.assertIn('"/DARG_HELPER_EXE=$InstallerHelperExe"', packager)
-+        self.assertIn('"/DARG_HELPER_BRIDGE_PS1=$helperBridge"', packager)
-+        self.assertNotIn("herdr-installer-helper.ps1", packager)
++        self.assertNotIn(".ps1", packager.replace("package_windows_installer.ps1", ""))
 +        self.assertIn('$NsisVersion = "3.12"', packager)
 +        self.assertIn(
 +            "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f",
@@ -53826,7 +53704,6 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "after-state-directory",
 +            "before-uninstaller",
 +            "after-uninstaller",
-+            "after-uninstall-runner",
 +        ):
 +            self.assertIn(f'"{stage}"', fault)
 +        for contract in (
@@ -53843,20 +53720,23 @@ index 0000000000000000000000000000000000000000..1c5abc019dce8033fcb824b9057856ac
 +            "Start-TestLeaseHolder",
 +            '"state\\pending"',
 +            '"runtime\\$BuildId"',
++            '"quiet-uninstall"',
++            '"state\\installer-helper.exe"',
 +        ):
 +            self.assertIn(contract, fault)
 +        self.assertIn("WaitForExit", fault)
 +        self.assertNotIn("Wait-Process", fault)
 +
-+    def test_quiet_uninstall_runner_is_the_only_persistent_powershell_wrapper(self) -> None:
-+        runner = text(UNINSTALL_RUNNER)
-+        self.assertIn('Arguments = "/S _?=$InstallRoot"', runner)
-+        self.assertIn("[IO.FileAttributes]::ReparsePoint", runner)
-+        self.assertIn("[Environment+SpecialFolder]::UserProfile", runner)
-+        self.assertIn('Join-Path $userProfileRoot "AppData\\Local\\Temp"', runner)
-+        self.assertNotIn("[IO.Path]::GetTempPath()", runner)
-+        self.assertIn("WaitForExit(180000)", runner)
-+        self.assertIn("exit $exitCode", runner)
++    def test_native_helper_owns_terminal_quiet_uninstall(self) -> None:
++        lifecycle = text(HELPER_LIFECYCLE)
++        registry = text(HELPER_REGISTRY)
++        self.assertIn('arg("/S")', lifecycle)
++        self.assertIn("QUIET_UNINSTALL_TIMEOUT", lifecycle)
++        self.assertIn("ProcessJob::new", lifecycle)
++        self.assertIn("wait_for_runner_and_remove_helper", lifecycle)
++        self.assertIn("restore_quiet_uninstall_retry", lifecycle)
++        self.assertIn("quiet-uninstall --install-root", registry)
++        self.assertNotIn("powershell", registry.lower())
 +
 +    def test_installer_artwork_is_an_exact_native_bmp3_set(self) -> None:
 +        expected_files = {"README.md", ARTWORK_SOURCE.name, *ARTWORK_DERIVATIVES}
@@ -54140,10 +54020,10 @@ index 232e61ac4dbc07220d5baa446e7d2390991d976e..331dec1946e78838302c93b9325a825c
  }
 diff --git a/scripts/windows_installer_fault_test.ps1 b/scripts/windows_installer_fault_test.ps1
 new file mode 100644
-index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35a2d8e83b
+index 0000000000000000000000000000000000000000..86ab7f7623ab264bfc581db7ce2968931f877906
 --- /dev/null
 +++ b/scripts/windows_installer_fault_test.ps1
-@@ -0,0 +1,865 @@
+@@ -0,0 +1,845 @@
 +[CmdletBinding()]
 +param(
 +    [Parameter(Mandatory = $true)][string]$StageDir,
@@ -54162,8 +54042,7 @@ index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35
 +        "after-installer-helper",
 +        "after-state-directory",
 +        "before-uninstaller",
-+        "after-uninstaller",
-+        "after-uninstall-runner"
++        "after-uninstaller"
 +    )
 +)
 +
@@ -54310,8 +54189,7 @@ index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35
 +    "after-installer-helper",
 +    "after-state-directory",
 +    "before-uninstaller",
-+    "after-uninstaller",
-+    "after-uninstall-runner"
++    "after-uninstaller"
 +)
 +if ($ProductName -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$') {
 +    throw "Invalid product name '$ProductName'."
@@ -54404,16 +54282,6 @@ index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35
 +    New-Item -ItemType Directory -Path (Join-Path $Root "skill") | Out-Null
 +    [IO.File]::Copy($AppLauncher, (Join-Path $Root "app-launcher.exe"), $false)
 +    [IO.File]::Copy($InstallerHelperExe, (Join-Path $Root "installer-helper.exe"), $false)
-+    [IO.File]::Copy(
-+        (Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"),
-+        (Join-Path $Root "installer-helper-bridge.ps1"),
-+        $false
-+    )
-+    [IO.File]::Copy(
-+        (Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"),
-+        (Join-Path $Root "uninstall-runner.ps1"),
-+        $false
-+    )
 +    [IO.File]::Copy($skillSource, (Join-Path $Root "skill\SKILL.md"), $false)
 +    [IO.File]::Copy(
 +        (Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"),
@@ -54444,26 +54312,18 @@ index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35
 +}
 +
 +function Invoke-TestQuietUninstall {
-+    $uninstaller = Join-Path $installRoot "uninstall.exe"
-+    $runner = Join-Path $installRoot "uninstall-runner.ps1"
-+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
-+        throw "Quiet-uninstall runner is missing: $runner"
++    $helper = Join-Path $installRoot "state\installer-helper.exe"
++    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
++        throw "Native quiet-uninstall helper is missing: $helper"
 +    }
-+    $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-+    $expected = ('"{0}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Uninstaller "{2}" -InstallRoot "{3}"' -f $powerShell, $runner, $uninstaller, $installRoot)
++    $expected = ('"{0}" quiet-uninstall --install-root "{1}"' -f $helper, $installRoot)
 +    $actual = [string](Get-ItemProperty -LiteralPath $arpKey).QuietUninstallString
 +    if ($actual -cne $expected) {
 +        throw "ARP quiet uninstall command is not exact. Expected '$expected', got '$actual'."
 +    }
-+    return Start-TestProcess -FilePath $powerShell -Arguments @(
-+        "-NoLogo",
-+        "-NoProfile",
-+        "-NonInteractive",
-+        "-WindowStyle", "Hidden",
-+        "-ExecutionPolicy", "Bypass",
-+        "-File", ('"' + $runner + '"'),
-+        "-Uninstaller", ('"' + $uninstaller + '"'),
-+        "-InstallRoot", ('"' + $installRoot + '"')
++    return Start-TestProcess -FilePath $helper -Arguments @(
++        "quiet-uninstall",
++        "--install-root", ('"' + $installRoot + '"')
 +    )
 +}
 +
@@ -54626,8 +54486,8 @@ index 0000000000000000000000000000000000000000..40736b7b283be68f847d0903b4e68a35
 +        if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
 +            throw "Injected uninstall $fault removed its retry executable."
 +        }
-+        if (-not (Test-Path -LiteralPath (Join-Path $installRoot "uninstall-runner.ps1") -PathType Leaf)) {
-+            throw "Injected uninstall $fault removed its quiet retry runner."
++        if (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\installer-helper.exe") -PathType Leaf)) {
++            throw "Injected uninstall $fault removed its native quiet retry helper."
 +        }
 +
 +        $retryQuietExit = Invoke-TestQuietUninstall
@@ -55969,10 +55829,10 @@ index e3d9761014b79e10ae5a0c8e91a9fded952a2480..a92453bde980e358611bfe6944cb2add
          use base64::Engine as _;
 diff --git a/src/platform/windows/installer_helper.rs b/src/platform/windows/installer_helper.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e765224b0125b
+index 0000000000000000000000000000000000000000..d6e948b5cfda728607efa9fd231c52c9d0147e78
 --- /dev/null
 +++ b/src/platform/windows/installer_helper.rs
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,212 @@
 +//! Native owner for the managed Windows install lifecycle.
 +
 +use std::{collections::BTreeMap, ffi::OsString, io, path::PathBuf};
@@ -55990,8 +55850,8 @@ index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e7652
 +
 +use installer_helper_files::invalid_data;
 +use installer_helper_lifecycle::{
-+    InstallManager, InstallOptions, MaintenanceOptions, SettingsDisposition, SkillDefaultOptions,
-+    UninstallOptions,
++    InstallManager, InstallOptions, MaintenanceOptions, QuietRunnerOptions, QuietUninstallOptions,
++    SettingsDisposition, SkillDefaultOptions, UninstallOptions,
 +};
 +use installer_helper_skills::SkillDisposition;
 +
@@ -56002,7 +55862,7 @@ index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e7652
 +        .and_then(|value| value.into_string().ok())
 +        .ok_or_else(|| {
 +            invalid_data(
-+                "missing installer helper action; expected install, uninstall, skill-removal-default, or complete-maintenance",
++                "missing installer helper action; expected install, uninstall, quiet-uninstall, skill-removal-default, or complete-maintenance",
 +            )
 +        })?;
 +    let values = parse_named_arguments(args.collect())?;
@@ -56044,6 +55904,10 @@ index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e7652
 +            fault: optional_utf8(&values, "--uninstall-fault")?,
 +            fault_marker_prefix: optional_utf8(&values, "--fault-marker-prefix")?
 +                .unwrap_or_else(|| "herdr".to_string()),
++            quiet_runner: parse_quiet_runner(&values)?,
++        }),
++        "quiet-uninstall" => installer_helper_lifecycle::quiet_uninstall(QuietUninstallOptions {
++            install_root: required_path(&values, "--install-root")?,
 +        }),
 +        "skill-removal-default" => {
 +            installer_helper_lifecycle::skill_removal_default(SkillDefaultOptions {
@@ -56067,6 +55931,25 @@ index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e7652
 +        _ => Err(invalid_data(format!(
 +            "unknown installer helper action {action:?}"
 +        ))),
++    }
++}
++
++fn parse_quiet_runner(
++    values: &BTreeMap<String, OsString>,
++) -> io::Result<Option<QuietRunnerOptions>> {
++    let process_id = optional_utf8(values, "--quiet-runner-process-id")?;
++    let token = optional_utf8(values, "--quiet-token")?;
++    match (process_id, token) {
++        (None, None) => Ok(None),
++        (Some(process_id), Some(token)) => Ok(Some(QuietRunnerOptions {
++            process_id: process_id.parse::<u32>().map_err(|_| {
++                invalid_data(format!("invalid quiet-uninstall process ID {process_id:?}"))
++            })?,
++            token,
++        })),
++        _ => Err(invalid_data(
++            "quiet-uninstall process ID and token must be provided together",
++        )),
 +    }
 +}
 +
@@ -56147,13 +56030,27 @@ index 0000000000000000000000000000000000000000..de37b5f402682a14ce92c23f234e7652
 +        ])
 +        .is_err());
 +    }
++
++    #[test]
++    fn quiet_runner_requires_a_complete_pair() {
++        let mut values = BTreeMap::new();
++        values.insert(
++            "--quiet-runner-process-id".to_string(),
++            OsString::from("42"),
++        );
++        assert!(parse_quiet_runner(&values).is_err());
++        values.insert("--quiet-token".to_string(), OsString::from("a".repeat(32)));
++        let parsed = parse_quiet_runner(&values).unwrap().unwrap();
++        assert_eq!(parsed.process_id, 42);
++        assert_eq!(parsed.token, "a".repeat(32));
++    }
 +}
 diff --git a/src/platform/windows/installer_helper_files.rs b/src/platform/windows/installer_helper_files.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dfdc02e186d4e13d69f889bc9367cf7aaad2957a
+index 0000000000000000000000000000000000000000..773a878ec59fab5f70e18af4615788209b6c146b
 --- /dev/null
 +++ b/src/platform/windows/installer_helper_files.rs
-@@ -0,0 +1,938 @@
+@@ -0,0 +1,939 @@
 +use std::{
 +    collections::{BTreeMap, BTreeSet},
 +    ffi::{OsStr, OsString},
@@ -56192,8 +56089,9 @@ index 0000000000000000000000000000000000000000..dfdc02e186d4e13d69f889bc9367cf7a
 +pub(crate) const PACKAGE_MANAGER_MARKER: &[u8] = b"herdr-package-manager-v1\nmanager=winget\n";
 +pub(crate) const UNINSTALL_MARKER: &[u8] = b"herdr-uninstall-v1\n";
 +pub(crate) const NATIVE_HELPER_NAME: &str = "installer-helper.exe";
-+pub(crate) const LEGACY_HELPER_NAME: &str = "installer-helper.ps1";
-+pub(crate) const UNINSTALL_RUNNER_NAME: &str = "uninstall-runner.ps1";
++pub(crate) const QUIET_UNINSTALL_PENDING: &[u8] = b"herdr-quiet-uninstall-v1\nstatus=pending\n";
++pub(crate) const QUIET_UNINSTALL_SUCCESS: &[u8] = b"herdr-quiet-uninstall-v1\nexit_code=0\n";
++pub(crate) const QUIET_UNINSTALL_FAILURE: &[u8] = b"herdr-quiet-uninstall-v1\nexit_code=1\n";
 +pub(crate) const LAUNCHER_REPLACEMENT_NAME: &str = "herdr.exe.new";
 +pub(crate) const LAUNCHER_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
 +
@@ -57094,10 +56992,10 @@ index 0000000000000000000000000000000000000000..dfdc02e186d4e13d69f889bc9367cf7a
 +}
 diff --git a/src/platform/windows/installer_helper_lifecycle.rs b/src/platform/windows/installer_helper_lifecycle.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2be78636dc
+index 0000000000000000000000000000000000000000..28edf89aa56efed0c8aaff20fc459b1bbf73bb04
 --- /dev/null
 +++ b/src/platform/windows/installer_helper_lifecycle.rs
-@@ -0,0 +1,1765 @@
+@@ -0,0 +1,2012 @@
 +use std::{
 +    collections::BTreeSet,
 +    ffi::{OsStr, OsString},
@@ -57106,8 +57004,10 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    os::windows::{
 +        ffi::OsStringExt as _,
 +        fs::{MetadataExt as _, OpenOptionsExt as _},
++        io::AsRawHandle as _,
 +    },
 +    path::{Path, PathBuf},
++    process::{Child, Command, Stdio},
 +    thread,
 +    time::{Duration, Instant},
 +};
@@ -57122,6 +57022,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
 +            TH32CS_SNAPPROCESS,
 +        },
++        JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
 +        Threading::{
 +            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
 +            PROCESS_QUERY_LIMITED_INFORMATION,
@@ -57141,6 +57042,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +
 +const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 +const LOCK_RETRY: Duration = Duration::from_millis(50);
++const QUIET_UNINSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 +
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub(crate) enum InstallManager {
@@ -57174,6 +57076,18 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    pub(crate) skill_disposition: SkillDisposition,
 +    pub(crate) fault: Option<String>,
 +    pub(crate) fault_marker_prefix: String,
++    pub(crate) quiet_runner: Option<QuietRunnerOptions>,
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct QuietRunnerOptions {
++    pub(crate) process_id: u32,
++    pub(crate) token: String,
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct QuietUninstallOptions {
++    pub(crate) install_root: PathBuf,
 +}
 +
 +#[derive(Clone, Debug)]
@@ -57192,7 +57106,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +enum RootKind {
 +    New,
 +    ManagedNative,
-+    ManagedLegacy,
 +    UninstallRetry,
 +    UninstallResidual,
 +}
@@ -57214,6 +57127,16 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +#[derive(Debug)]
 +struct ProcessHandle(HANDLE);
 +
++#[derive(Debug)]
++struct ProcessJob(HANDLE);
++
++#[derive(Clone, Debug)]
++struct QuietSession {
++    process_id: u32,
++    result_path: PathBuf,
++    moved_helper_path: PathBuf,
++}
++
 +impl Drop for ProcessHandle {
 +    fn drop(&mut self) {
 +        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
@@ -57223,14 +57146,147 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    }
 +}
 +
++impl ProcessJob {
++    fn new() -> io::Result<Self> {
++        // SAFETY: null security attributes and name request a private job. This
++        // guard owns the returned handle.
++        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
++        if handle.is_null() {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(Self(handle))
++    }
++
++    fn assign(&self, child: &Child) -> io::Result<()> {
++        // SAFETY: the job and process handles remain valid for this call.
++        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(())
++    }
++
++    fn terminate(&self) -> io::Result<()> {
++        // SAFETY: this guard owns a valid job handle.
++        if unsafe { TerminateJobObject(self.0, 1) } == 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(())
++    }
++}
++
++impl Drop for ProcessJob {
++    fn drop(&mut self) {
++        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
++            // SAFETY: this guard uniquely owns the job handle. The job has no
++            // kill-on-close policy, so successful NSIS cleanup may finish.
++            unsafe { CloseHandle(self.0) };
++        }
++    }
++}
++
++impl QuietSession {
++    fn new(install_root: &Path, options: &QuietRunnerOptions) -> io::Result<Self> {
++        validate_quiet_token(&options.token)?;
++        if options.process_id == 0 || options.process_id == std::process::id() {
++            return Err(files::invalid_data(
++                "quiet-uninstall runner process ID is invalid",
++            ));
++        }
++        let expected = install_root.join("state").join(files::NATIVE_HELPER_NAME);
++        files::assert_regular_file(&expected)?;
++        let actual = process_path(options.process_id).ok_or_else(|| {
++            files::invalid_data("quiet-uninstall runner process is not available")
++        })?;
++        if !files::path_eq(&actual, &expected)? {
++            return Err(files::invalid_data(
++                "quiet-uninstall runner is not the installed native helper",
++            ));
++        }
++        let (result_path, moved_helper_path) = quiet_paths(install_root, &options.token)?;
++        files::assert_regular_file(&result_path)?;
++        if fs::read(&result_path)? != files::QUIET_UNINSTALL_PENDING {
++            return Err(files::invalid_data(
++                "quiet-uninstall rendezvous is not pending",
++            ));
++        }
++        if files::path_exists(&moved_helper_path)? {
++            return Err(files::invalid_data(
++                "quiet-uninstall helper handoff path already exists",
++            ));
++        }
++        Ok(Self {
++            process_id: options.process_id,
++            result_path,
++            moved_helper_path,
++        })
++    }
++
++    fn publish_result(&self, success: bool) -> io::Result<()> {
++        files::assert_regular_file(&self.result_path)?;
++        if fs::read(&self.result_path)? != files::QUIET_UNINSTALL_PENDING {
++            return Err(files::invalid_data(
++                "quiet-uninstall rendezvous changed before completion",
++            ));
++        }
++        let replacement = self
++            .result_path
++            .with_file_name(format!("quiet-result.{}.new", files::unique_hex()));
++        files::write_durable(
++            &replacement,
++            if success {
++                files::QUIET_UNINSTALL_SUCCESS
++            } else {
++                files::QUIET_UNINSTALL_FAILURE
++            },
++        )?;
++        files::replace_file(&self.result_path, &replacement, None)
++    }
++
++    fn wait_for_runner_and_remove_helper(&self) -> io::Result<()> {
++        if !files::wait_for_process(self.process_id, LOCK_TIMEOUT)? {
++            return Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "quiet-uninstall runner did not exit before cleanup deadline",
++            ));
++        }
++        remove_file_if_exists(&self.moved_helper_path)
++    }
++}
++
++fn validate_quiet_token(token: &str) -> io::Result<()> {
++    if token.len() != 32
++        || !token
++            .bytes()
++            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
++    {
++        return Err(files::invalid_data("invalid quiet-uninstall token"));
++    }
++    Ok(())
++}
++
++fn quiet_paths(install_root: &Path, token: &str) -> io::Result<(PathBuf, PathBuf)> {
++    validate_quiet_token(token)?;
++    let parent = install_root
++        .parent()
++        .ok_or_else(|| files::invalid_data("install root has no parent"))?;
++    files::assert_regular_dir(parent)?;
++    let leaf = install_root
++        .file_name()
++        .and_then(OsStr::to_str)
++        .ok_or_else(|| files::invalid_data("install root has no UTF-8 leaf"))?;
++    Ok((
++        parent.join(format!("{leaf}.quiet-uninstall.{token}.result")),
++        parent.join(format!("{leaf}.quiet-uninstall.{token}.exe")),
++    ))
++}
++
 +pub(crate) fn install(options: InstallOptions) -> io::Result<String> {
 +    let install_root = files::full_path(&options.install_root)?;
 +    let profile = skills::user_profile_root(&options.user_profile_root)?;
 +    let _lifecycle = acquire_lifecycle_lock(&install_root, LOCK_TIMEOUT)?;
-+    registry::assert_arp_ownership(&install_root, true)?;
++    registry::assert_arp_ownership(&install_root)?;
 +    let allow_convergence = registry::arp_exists()?;
-+    let legacy_quiet = registry::legacy_quiet_registration(&install_root)?;
-+    let previous_path_owned = registry::arp_path_owned(&install_root, true)?;
++    let previous_path_owned = registry::arp_path_owned(&install_root)?;
 +    let agent_root = skills::agent_skills_root(&profile)?;
 +    let claude_root = if skills::claude_installed(&profile)? {
 +        Some(skills::claude_skills_root(
@@ -57251,68 +57307,172 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        claude_root.as_deref(),
 +        allow_convergence,
 +    )?;
-+    if legacy_quiet {
-+        registry::set_arp_registration(
-+            &install_root,
-+            &options.display_version,
-+            &options.numeric_version,
-+            previous_path_owned,
-+            true,
-+        )?;
-+    }
 +    let path_update = registry::add_user_path(&install_root.join("bin"), previous_path_owned)?;
 +    registry::set_arp_registration(
 +        &install_root,
 +        &options.display_version,
 +        &options.numeric_version,
 +        path_update.owned,
-+        false,
 +    )?;
 +    Ok(result)
 +}
 +
 +pub(crate) fn uninstall(options: UninstallOptions) -> io::Result<String> {
 +    let install_root = files::full_path(&options.install_root)?;
-+    let profile = skills::user_profile_root(&options.user_profile_root)?;
-+    let known = skills::read_managed_skill_hashes(&options.skill_hash_manifest, None)?;
-+    let _lifecycle = acquire_lifecycle_lock(&install_root, LOCK_TIMEOUT)?;
-+    registry::assert_arp_ownership(&install_root, false)?;
-+    let allow_convergence = registry::arp_exists()?;
-+    let path_owned = registry::arp_path_owned(&install_root, false)?;
-+    let agent_root = skills::agent_skills_root(&profile)?;
-+    let claude_roots = skills::claude_roots_for_removal(&profile)?;
-+    let mut warnings = Vec::new();
-+    let (preserved, warning) = uninstall_layout(
-+        &install_root,
-+        &agent_root,
-+        &claude_roots,
-+        &known,
-+        options.skill_disposition,
-+        allow_convergence,
-+        options.fault.as_deref(),
-+        &options.fault_marker_prefix,
-+    )?;
-+    if let Some(warning) = warning {
-+        warnings.push(warning);
-+    }
-+    let _ = registry::remove_user_path(&install_root.join("bin"), path_owned)?;
-+    registry::remove_arp_registration(&install_root)?;
-+    if options.settings_disposition == SettingsDisposition::Remove {
-+        if let Err(err) = skills::remove_user_settings(&profile) {
-+            warnings.push(format!(
++    let quiet = options
++        .quiet_runner
++        .as_ref()
++        .map(|value| QuietSession::new(&install_root, value))
++        .transpose()?;
++    let result = (|| {
++        let profile = skills::user_profile_root(&options.user_profile_root)?;
++        let known = skills::read_managed_skill_hashes(&options.skill_hash_manifest, None)?;
++        let _lifecycle = acquire_lifecycle_lock(&install_root, LOCK_TIMEOUT)?;
++        registry::assert_arp_ownership(&install_root)?;
++        let allow_convergence = registry::arp_exists()?;
++        let path_owned = registry::arp_path_owned(&install_root)?;
++        let agent_root = skills::agent_skills_root(&profile)?;
++        let claude_roots = skills::claude_roots_for_removal(&profile)?;
++        let mut warnings = Vec::new();
++        let (preserved, warning) = uninstall_layout(
++            &install_root,
++            &agent_root,
++            &claude_roots,
++            &known,
++            options.skill_disposition,
++            allow_convergence,
++            options.fault.as_deref(),
++            &options.fault_marker_prefix,
++            quiet.as_ref(),
++        )?;
++        if let Some(warning) = warning {
++            warnings.push(warning);
++        }
++        let _ = registry::remove_user_path(&install_root.join("bin"), path_owned)?;
++        registry::remove_arp_registration(&install_root)?;
++        if options.settings_disposition == SettingsDisposition::Remove {
++            if let Err(err) = skills::remove_user_settings(&profile) {
++                warnings.push(format!(
 +                "Warning: Selected Herdr settings cleanup was incomplete; locked or unsafe settings were preserved. {err}"
 +            ));
++            }
 +        }
++        remove_fault_marker(options.fault.as_deref(), &options.fault_marker_prefix)?;
++        let mut output = String::from("Herdr Win uninstall cleanup is ready.");
++        for path in preserved {
++            output.push_str(&format!("\nPreserved Herdr skill: {}", path.display()));
++        }
++        for warning in warnings {
++            output.push_str(&format!("\n{warning}"));
++        }
++        Ok(output)
++    })();
++    if let Some(quiet) = &quiet {
++        let success = result.is_ok();
++        let publish_result = quiet.publish_result(success);
++        if files::path_exists(&quiet.moved_helper_path)? {
++            if publish_result.is_ok() {
++                quiet.wait_for_runner_and_remove_helper()?;
++            } else {
++                let _ = files::wait_for_process(
++                    quiet.process_id,
++                    QUIET_UNINSTALL_TIMEOUT + LOCK_TIMEOUT,
++                );
++                remove_file_if_exists(&quiet.moved_helper_path)?;
++            }
++        }
++        publish_result?;
 +    }
-+    remove_fault_marker(options.fault.as_deref(), &options.fault_marker_prefix)?;
-+    let mut output = String::from("Herdr Win uninstall cleanup is ready.");
-+    for path in preserved {
-+        output.push_str(&format!("\nPreserved Herdr skill: {}", path.display()));
++    result
++}
++
++pub(crate) fn quiet_uninstall(options: QuietUninstallOptions) -> io::Result<String> {
++    let install_root = files::full_path(&options.install_root)?;
++    let expected_helper = install_root.join("state").join(files::NATIVE_HELPER_NAME);
++    let current = std::env::current_exe()?;
++    if !files::path_eq(&current, &expected_helper)? {
++        return Err(files::invalid_data(
++            "quiet uninstall must run from the installed native helper",
++        ));
 +    }
-+    for warning in warnings {
-+        output.push_str(&format!("\n{warning}"));
++    if !matches!(
++        classify_root(&install_root, false)?,
++        RootKind::ManagedNative | RootKind::UninstallRetry | RootKind::UninstallResidual
++    ) {
++        return Err(files::invalid_data(
++            "quiet uninstall requires an exact native managed or retry root",
++        ));
 +    }
-+    Ok(output)
++    registry::assert_arp_ownership(&install_root)?;
++    let token = files::unique_hex();
++    let (result_path, moved_helper_path) = quiet_paths(&install_root, &token)?;
++    if files::path_exists(&result_path)? || files::path_exists(&moved_helper_path)? {
++        return Err(files::invalid_data(
++            "quiet-uninstall rendezvous path already exists",
++        ));
++    }
++    files::write_durable(&result_path, files::QUIET_UNINSTALL_PENDING)?;
++    let uninstaller = install_root.join("uninstall.exe");
++    files::assert_regular_file(&uninstaller)?;
++    let job = ProcessJob::new()?;
++    let mut child = Command::new(&uninstaller)
++        .arg("/S")
++        .arg(format!("/NATIVE_QUIET_RUNNER_PID={}", std::process::id()))
++        .arg(format!("/NATIVE_QUIET_TOKEN={token}"))
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .map_err(|err| files::contextual(err, "failed to start native quiet uninstall"))?;
++    if let Err(err) = job.assign(&child) {
++        let _ = child.kill();
++        let _ = child.wait();
++        remove_file_if_exists(&result_path)?;
++        return Err(files::contextual(
++            err,
++            "failed to contain native quiet uninstall process tree",
++        ));
++    }
++    let deadline = Instant::now() + QUIET_UNINSTALL_TIMEOUT;
++    loop {
++        if files::path_exists(&result_path)? {
++            files::assert_regular_file(&result_path)?;
++            let status = fs::read(&result_path)?;
++            if status != files::QUIET_UNINSTALL_PENDING {
++                remove_file_if_exists(&result_path)?;
++                return match status.as_slice() {
++                    files::QUIET_UNINSTALL_SUCCESS => {
++                        Ok("Herdr Win quiet uninstall completed.".to_string())
++                    }
++                    files::QUIET_UNINSTALL_FAILURE => Err(files::invalid_data(
++                        "native quiet uninstall reported failure",
++                    )),
++                    _ => Err(files::invalid_data(
++                        "native quiet uninstall returned malformed status",
++                    )),
++                };
++            }
++        }
++        if let Some(status) = child.try_wait()? {
++            if !status.success() {
++                remove_file_if_exists(&result_path)?;
++                return Err(files::invalid_data(format!(
++                    "native quiet uninstall bootstrap exited with {status}"
++                )));
++            }
++        }
++        if Instant::now() >= deadline {
++            if !files::path_exists(&moved_helper_path)? && files::path_exists(&install_root)? {
++                let _ = job.terminate();
++            }
++            remove_file_if_exists(&result_path)?;
++            return Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "native quiet uninstall exceeded its 180 second deadline",
++            ));
++        }
++        thread::sleep(LOCK_RETRY);
++    }
 +}
 +
 +pub(crate) fn skill_removal_default(options: SkillDefaultOptions) -> io::Result<String> {
@@ -57336,7 +57496,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    remove_stale_staging(&install_root);
 +    if !matches!(
 +        classify_root(&install_root, false),
-+        Ok(RootKind::ManagedNative | RootKind::ManagedLegacy)
++        Ok(RootKind::ManagedNative)
 +    ) {
 +        return Ok("Herdr Win maintenance: Deferred".to_string());
 +    }
@@ -57361,21 +57521,11 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    let stage = package_root.join("payload");
 +    let launcher = package_root.join("app-launcher.exe");
 +    let helper = package_root.join("installer-helper.exe");
-+    let bridge = package_root.join("installer-helper-bridge.ps1");
-+    let runner = package_root.join(files::UNINSTALL_RUNNER_NAME);
 +    let uninstaller = package_root.join("uninstall.exe");
 +    let skill = package_root.join("skill").join("SKILL.md");
 +    let skill_hashes = package_root.join("skill").join("managed-skill-hashes.txt");
 +    files::assert_regular_dir(&stage)?;
-+    for path in [
-+        &launcher,
-+        &helper,
-+        &bridge,
-+        &runner,
-+        &uninstaller,
-+        &skill,
-+        &skill_hashes,
-+    ] {
++    for path in [&launcher, &helper, &uninstaller, &skill, &skill_hashes] {
 +        files::assert_regular_file(path)?;
 +    }
 +    let queried = files::query_launcher_build_id(&launcher, LOCK_TIMEOUT)?;
@@ -57389,7 +57539,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    files::validate_version_identity(display_version, numeric_version)?;
 +    let known = skills::read_managed_skill_hashes(&skill_hashes, Some(&skill))?;
 +    remove_stale_staging(install_root);
-+    if legacy_launcher_hop(install_root)? {
++    if unsupported_launcher_hop(install_root)? {
 +        return Err(incompatible_root(install_root));
 +    }
 +    let mut kind = match classify_root(install_root, true) {
@@ -57417,10 +57567,11 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            true,
 +            None,
 +            "herdr",
++            None,
 +        )?;
 +        kind = RootKind::New;
 +    } else if kind == RootKind::UninstallResidual {
-+        remove_uninstall_residual(install_root, None, "herdr")?;
++        remove_uninstall_residual(install_root, None, "herdr", None)?;
 +        kind = RootKind::New;
 +    }
 +    let effective_manager =
@@ -57432,26 +57583,22 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            requested_manager
 +        };
 +    let status = match kind {
-+        RootKind::ManagedNative | RootKind::ManagedLegacy => install_upgrade(
++        RootKind::ManagedNative => install_upgrade(
 +            install_root,
 +            &stage,
 +            &launcher,
 +            &helper,
-+            &bridge,
-+            &runner,
 +            &uninstaller,
 +            build_id,
 +            display_version,
 +            numeric_version,
 +            effective_manager,
-+            kind == RootKind::ManagedLegacy,
 +        )?,
 +        RootKind::New => install_fresh(
 +            install_root,
 +            &stage,
 +            &launcher,
 +            &helper,
-+            &runner,
 +            &uninstaller,
 +            build_id,
 +            display_version,
@@ -57485,7 +57632,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    stage: &Path,
 +    launcher: &Path,
 +    helper: &Path,
-+    runner: &Path,
 +    uninstaller: &Path,
 +    build_id: &BuildId,
 +    display_version: &str,
@@ -57516,7 +57662,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        files::pointer_text(build_id).as_bytes(),
 +    )?;
 +    files::copy_durable_file(helper, &root.join("state").join(files::NATIVE_HELPER_NAME))?;
-+    files::copy_durable_file(runner, &root.join(files::UNINSTALL_RUNNER_NAME))?;
 +    files::copy_durable_file(uninstaller, &root.join("uninstall.exe"))?;
 +    files::write_durable(
 +        &root.join("state").join("install.manifest"),
@@ -57528,7 +57673,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        .as_bytes(),
 +    )?;
 +    set_package_manager_marker(&root.join("state"), manager)?;
-+    validate_managed_root(&root, false, false)?;
++    validate_managed_root(&root, false)?;
 +    if files::path_exists(install_root)? {
 +        return Err(files::invalid_data(
 +            "install root appeared before fresh publication",
@@ -57545,14 +57690,11 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    stage: &Path,
 +    launcher: &Path,
 +    helper: &Path,
-+    bridge: &Path,
-+    runner: &Path,
 +    uninstaller: &Path,
 +    build_id: &BuildId,
 +    display_version: &str,
 +    numeric_version: &str,
 +    manager: InstallManager,
-+    legacy_helper: bool,
 +) -> io::Result<&'static str> {
 +    let staging = new_staging("update", install_root)?;
 +    let staged_runtime = staging.path.join("runtime");
@@ -57560,8 +57702,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    let metadata = staging.path.join("metadata");
 +    fs::create_dir(&metadata)?;
 +    files::copy_durable_file(helper, &metadata.join(files::NATIVE_HELPER_NAME))?;
-+    files::copy_durable_file(bridge, &metadata.join(files::LEGACY_HELPER_NAME))?;
-+    files::copy_durable_file(runner, &metadata.join(files::UNINSTALL_RUNNER_NAME))?;
 +    files::copy_durable_file(uninstaller, &metadata.join("uninstall.exe"))?;
 +    files::write_durable(
 +        &metadata.join("pending"),
@@ -57569,7 +57709,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    )?;
 +    let install = ManagedInstall::new(install_root.to_path_buf());
 +    let _coordination = acquire_coordination(&install, LOCK_TIMEOUT)?;
-+    validate_managed_root(install_root, legacy_helper, !legacy_helper)?;
++    validate_managed_root(install_root, true)?;
 +    files::write_durable(
 +        &metadata.join("install.manifest"),
 +        files::install_manifest_text(
@@ -57599,18 +57739,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    files::publish_file(
 +        &metadata.join(files::NATIVE_HELPER_NAME),
 +        &state.join(files::NATIVE_HELPER_NAME),
-+        &staging.path,
-+    )?;
-+    if legacy_helper {
-+        files::publish_file(
-+            &metadata.join(files::LEGACY_HELPER_NAME),
-+            &state.join(files::LEGACY_HELPER_NAME),
-+            &staging.path,
-+        )?;
-+    }
-+    files::publish_file(
-+        &metadata.join(files::UNINSTALL_RUNNER_NAME),
-+        &install_root.join(files::UNINSTALL_RUNNER_NAME),
 +        &staging.path,
 +    )?;
 +    files::publish_file(
@@ -57699,15 +57827,11 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +
 +fn maintenance_locked(install_root: &Path) -> io::Result<()> {
 +    repair_launcher_publication(install_root)?;
-+    validate_managed_root(install_root, true, false)?;
++    validate_managed_root(install_root, false)?;
 +    remove_inactive_runtimes(install_root)?;
 +    let _ = complete_launcher_update_locked(install_root)?;
 +    repair_launcher_publication(install_root)?;
-+    validate_managed_root(install_root, true, false)?;
-+    if files::pending_launcher(&install_root.join("state"))?.is_none() {
-+        remove_file_if_exists(&install_root.join("state").join(files::LEGACY_HELPER_NAME))?;
-+    }
-+    validate_managed_root(install_root, false, false)
++    validate_managed_root(install_root, false)
 +}
 +
 +fn complete_launcher_update_locked(install_root: &Path) -> io::Result<bool> {
@@ -57847,7 +57971,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        files::validate_runtime_directory(&entry.path(), &build)?;
 +        if processes
 +            .iter()
-+            .any(|path| files::path_within(path, &entry.path()).unwrap_or(false))
++            .any(|(_, path)| files::path_within(path, &entry.path()).unwrap_or(false))
 +        {
 +            continue;
 +        }
@@ -57871,6 +57995,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    allow_convergence: bool,
 +    fault: Option<&str>,
 +    marker_prefix: &str,
++    quiet: Option<&QuietSession>,
 +) -> io::Result<(Vec<PathBuf>, Option<String>)> {
 +    remove_stale_staging(install_root);
 +    if !files::path_exists(install_root)? {
@@ -57907,13 +58032,10 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            known,
 +            skill_disposition,
 +        );
-+        remove_uninstall_residual(install_root, fault, marker_prefix)?;
++        remove_uninstall_residual(install_root, fault, marker_prefix, quiet)?;
 +        return Ok(result);
 +    }
-+    if !matches!(
-+        kind,
-+        RootKind::ManagedNative | RootKind::ManagedLegacy | RootKind::UninstallRetry
-+    ) {
++    if !matches!(kind, RootKind::ManagedNative | RootKind::UninstallRetry) {
 +        return Err(files::invalid_data(
 +            "only an exact managed root can be uninstalled",
 +        ));
@@ -57923,7 +58045,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    if kind == RootKind::UninstallRetry {
 +        validate_uninstall_retry_root(install_root)?;
 +    } else {
-+        validate_managed_root(install_root, kind == RootKind::ManagedLegacy, false)?;
++        validate_managed_root(install_root, false)?;
 +    }
 +    let leases = if files::path_exists(&install.leases_dir())? {
 +        lease_status(&install.leases_dir())?
@@ -57939,10 +58061,10 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            "Herdr is still active. Close all managed sessions before uninstalling.",
 +        ));
 +    }
-+    if process_paths()?
-+        .iter()
-+        .any(|path| files::path_within(path, install_root).unwrap_or(false))
-+    {
++    if process_paths()?.iter().any(|(pid, path)| {
++        quiet.is_none_or(|quiet| *pid != quiet.process_id)
++            && files::path_within(path, install_root).unwrap_or(false)
++    }) {
 +        return Err(files::invalid_data(
 +            "a process from the managed Herdr install tree is still active",
 +        ));
@@ -57973,7 +58095,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    }
 +    drop(_coordination);
 +    validate_uninstall_residual(install_root)?;
-+    remove_uninstall_residual(install_root, fault, marker_prefix)?;
++    remove_uninstall_residual(install_root, fault, marker_prefix, quiet)?;
 +    Ok((preserved, warning))
 +}
 +
@@ -58003,7 +58125,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    }
 +    if process_paths()?
 +        .iter()
-+        .any(|path| files::path_within(path, install_root).unwrap_or(false))
++        .any(|(_, path)| files::path_within(path, install_root).unwrap_or(false))
 +    {
 +        return Err(files::invalid_data(
 +            "a process from the managed root is active",
@@ -58055,11 +58177,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    }
 +}
 +
-+fn validate_managed_root(
-+    install_root: &Path,
-+    allow_legacy_helper: bool,
-+    allow_missing_helper: bool,
-+) -> io::Result<()> {
++fn validate_managed_root(install_root: &Path, allow_missing_helper: bool) -> io::Result<()> {
 +    files::assert_regular_dir(install_root)?;
 +    assert_exact_root_names(install_root)?;
 +    let state = install_root.join("state");
@@ -58070,7 +58188,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        "leases",
 +        "launcher.lock",
 +        files::NATIVE_HELPER_NAME,
-+        files::LEGACY_HELPER_NAME,
 +        "install.manifest",
 +        "package-manager",
 +    ];
@@ -58100,22 +58217,13 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    }
 +    files::assert_regular_dir(&state.join("leases"))?;
 +    let native = files::path_exists(&state.join(files::NATIVE_HELPER_NAME))?;
-+    let legacy = files::path_exists(&state.join(files::LEGACY_HELPER_NAME))?;
-+    if !(native || allow_legacy_helper && legacy || allow_missing_helper && !legacy) {
++    if !(native || allow_missing_helper) {
 +        return Err(files::invalid_data(
 +            "managed root lacks native installer helper",
 +        ));
 +    }
 +    if native {
 +        files::assert_regular_file(&state.join(files::NATIVE_HELPER_NAME))?;
-+    }
-+    if legacy {
-+        if !allow_legacy_helper {
-+            return Err(files::invalid_data(
-+                "managed root retained legacy installer helper",
-+            ));
-+        }
-+        files::assert_regular_file(&state.join(files::LEGACY_HELPER_NAME))?;
 +    }
 +    validate_leases_dir(&state.join("leases"))?;
 +    validate_package_manager_marker(&state.join("package-manager"))?;
@@ -58143,13 +58251,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +}
 +
 +fn assert_exact_root_names(install_root: &Path) -> io::Result<()> {
-+    let allowed = [
-+        "bin",
-+        "runtime",
-+        "state",
-+        "uninstall.exe",
-+        files::UNINSTALL_RUNNER_NAME,
-+    ];
++    let allowed = ["bin", "runtime", "state", "uninstall.exe"];
 +    for entry in fs::read_dir(install_root)? {
 +        let entry = entry?;
 +        if !allowed
@@ -58166,10 +58268,8 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    for directory in ["bin", "runtime", "state"] {
 +        files::assert_regular_dir(&install_root.join(directory))?;
 +    }
-+    for file in ["uninstall.exe", files::UNINSTALL_RUNNER_NAME] {
-+        if files::path_exists(&install_root.join(file))? {
-+            files::assert_regular_file(&install_root.join(file))?;
-+        }
++    if files::path_exists(&install_root.join("uninstall.exe"))? {
++        files::assert_regular_file(&install_root.join("uninstall.exe"))?;
 +    }
 +    Ok(())
 +}
@@ -58211,9 +58311,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +            Some("bin") | Some("runtime") | Some("state") => {
 +                files::assert_regular_dir(&entry.path())?
 +            }
-+            Some("uninstall.exe") | Some(files::UNINSTALL_RUNNER_NAME) => {
-+                files::assert_regular_file(&entry.path())?
-+            }
++            Some("uninstall.exe") => files::assert_regular_file(&entry.path())?,
 +            _ => {
 +                return Err(files::invalid_data(
 +                    "uninstall retry root contains unexpected content",
@@ -58228,7 +58326,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        "pending",
 +        "launcher.lock",
 +        files::NATIVE_HELPER_NAME,
-+        files::LEGACY_HELPER_NAME,
 +        "install.manifest",
 +        "package-manager",
 +        "uninstall.pending",
@@ -58299,7 +58396,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    files::assert_regular_dir(install_root)?;
 +    for entry in fs::read_dir(install_root)? {
 +        let entry = entry?;
-+        if !["state", "uninstall.exe", files::UNINSTALL_RUNNER_NAME]
++        if !["state", "uninstall.exe"]
 +            .iter()
 +            .any(|allowed| entry.file_name() == OsStr::new(allowed))
 +        {
@@ -58312,7 +58409,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    files::assert_regular_dir(&state)?;
 +    let allowed = [
 +        files::NATIVE_HELPER_NAME,
-+        files::LEGACY_HELPER_NAME,
 +        "launcher.lock",
 +        "uninstall.pending",
 +    ];
@@ -58347,9 +58443,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        let entry = entry?;
 +        match entry.file_name().to_str() {
 +            Some("state") => files::assert_regular_dir(&entry.path())?,
-+            Some("uninstall.exe") | Some(files::UNINSTALL_RUNNER_NAME) => {
-+                files::assert_regular_file(&entry.path())?
-+            }
++            Some("uninstall.exe") => files::assert_regular_file(&entry.path())?,
 +            _ => {
 +                return Err(files::invalid_data(
 +                    "uninstall cleanup root contains unexpected content",
@@ -58364,7 +58458,6 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    files::assert_regular_dir(&state)?;
 +    let allowed = [
 +        files::NATIVE_HELPER_NAME,
-+        files::LEGACY_HELPER_NAME,
 +        "launcher.lock",
 +        "uninstall.pending",
 +    ];
@@ -58391,18 +58484,12 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        validate_uninstall_retry_root(install_root)?;
 +        return Ok(RootKind::UninstallRetry);
 +    }
-+    if validate_managed_root(install_root, false, false).is_ok() {
++    if validate_managed_root(install_root, false).is_ok() {
 +        return Ok(RootKind::ManagedNative);
-+    }
-+    if validate_managed_root(install_root, true, false).is_ok()
-+        && files::path_exists(&install_root.join("state").join(files::LEGACY_HELPER_NAME))?
-+    {
-+        return Ok(RootKind::ManagedLegacy);
 +    }
 +    if allow_missing_helper
 +        && !files::path_exists(&install_root.join("state").join(files::NATIVE_HELPER_NAME))?
-+        && !files::path_exists(&install_root.join("state").join(files::LEGACY_HELPER_NAME))?
-+        && validate_managed_root(install_root, false, true).is_ok()
++        && validate_managed_root(install_root, true).is_ok()
 +    {
 +        return Ok(RootKind::ManagedNative);
 +    }
@@ -58419,7 +58506,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    ))
 +}
 +
-+fn legacy_launcher_hop(install_root: &Path) -> io::Result<bool> {
++fn unsupported_launcher_hop(install_root: &Path) -> io::Result<bool> {
 +    let runtime = install_root.join("runtime");
 +    if !files::path_exists(&runtime)? {
 +        return Ok(false);
@@ -58667,7 +58754,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    Ok(())
 +}
 +
-+fn process_paths() -> io::Result<Vec<PathBuf>> {
++fn process_paths() -> io::Result<Vec<(u32, PathBuf)>> {
 +    // SAFETY: snapshot has no pointer arguments and returns an owned handle.
 +    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
 +    if snapshot == INVALID_HANDLE_VALUE {
@@ -58683,7 +58770,7 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
 +    while ok {
 +        if let Some(path) = process_path(entry.th32ProcessID) {
-+            output.push(path);
++            output.push((entry.th32ProcessID, path));
 +        }
 +        // SAFETY: entry remains valid for the next snapshot record.
 +        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
@@ -58774,24 +58861,70 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    install_root: &Path,
 +    fault: Option<&str>,
 +    prefix: &str,
++    quiet: Option<&QuietSession>,
 +) -> io::Result<()> {
 +    if !files::path_exists(install_root)? {
 +        return Ok(());
 +    }
 +    validate_uninstall_cleanup_root(install_root)?;
++    let result = (|| {
++        let state = install_root.join("state");
++        if files::path_exists(&state)? {
++            remove_file_if_exists(&state.join("uninstall.pending"))?;
++            inject_fault("after-uninstall-pending", fault, prefix)?;
++            remove_file_if_exists(&state.join("launcher.lock"))?;
++            inject_fault("after-launcher-lock", fault, prefix)?;
++            let helper = state.join(files::NATIVE_HELPER_NAME);
++            if let Some(quiet) = quiet {
++                files::assert_regular_file(&helper)?;
++                if files::path_exists(&quiet.moved_helper_path)? {
++                    return Err(files::invalid_data(
++                        "quiet-uninstall helper handoff path appeared during cleanup",
++                    ));
++                }
++                fs::rename(&helper, &quiet.moved_helper_path)?;
++            } else {
++                remove_file_if_exists(&helper)?;
++            }
++            inject_fault("after-installer-helper", fault, prefix)?;
++            fs::remove_dir(&state)?;
++            inject_fault("after-state-directory", fault, prefix)?;
++        }
++        remove_terminal_uninstall_files(install_root, fault, prefix)
++    })();
++    if result.is_err() {
++        if let Some(quiet) = quiet {
++            restore_quiet_uninstall_retry(install_root, quiet)?;
++        }
++    }
++    result
++}
++
++fn restore_quiet_uninstall_retry(install_root: &Path, quiet: &QuietSession) -> io::Result<()> {
++    if !files::path_exists(install_root)? || !files::path_exists(&quiet.moved_helper_path)? {
++        return Ok(());
++    }
++    files::assert_regular_dir(install_root)?;
 +    let state = install_root.join("state");
 +    if files::path_exists(&state)? {
-+        remove_file_if_exists(&state.join("uninstall.pending"))?;
-+        inject_fault("after-uninstall-pending", fault, prefix)?;
-+        remove_file_if_exists(&state.join("launcher.lock"))?;
-+        inject_fault("after-launcher-lock", fault, prefix)?;
-+        remove_file_if_exists(&state.join(files::NATIVE_HELPER_NAME))?;
-+        remove_file_if_exists(&state.join(files::LEGACY_HELPER_NAME))?;
-+        inject_fault("after-installer-helper", fault, prefix)?;
-+        fs::remove_dir(&state)?;
-+        inject_fault("after-state-directory", fault, prefix)?;
++        files::assert_regular_dir(&state)?;
++    } else {
++        fs::create_dir(&state)?;
 +    }
-+    remove_terminal_uninstall_files(install_root, fault, prefix)
++    let helper = state.join(files::NATIVE_HELPER_NAME);
++    if files::path_exists(&helper)? {
++        return Err(files::invalid_data(
++            "quiet-uninstall retry helper destination already exists",
++        ));
++    }
++    fs::rename(&quiet.moved_helper_path, &helper)?;
++    if !files::path_exists(&state.join("launcher.lock"))? {
++        files::write_durable(&state.join("launcher.lock"), &[])?;
++    }
++    if !files::path_exists(&state.join("uninstall.pending"))? {
++        files::write_durable(&state.join("uninstall.pending"), files::UNINSTALL_MARKER)?;
++    }
++    validate_uninstall_retry_root(install_root)
 +}
 +
 +fn remove_terminal_uninstall_files(
@@ -58800,27 +58933,27 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +    prefix: &str,
 +) -> io::Result<()> {
 +    validate_uninstall_cleanup_root(install_root)?;
-+    let mut retry = Vec::new();
-+    for name in ["uninstall.exe", files::UNINSTALL_RUNNER_NAME] {
-+        let path = install_root.join(name);
-+        if files::path_exists(&path)? {
-+            files::assert_regular_file(&path)?;
-+            retry.push((path.clone(), fs::read(&path)?, files::sha256(&path)?));
-+        }
++    let mut retry = None;
++    let uninstaller = install_root.join("uninstall.exe");
++    if files::path_exists(&uninstaller)? {
++        files::assert_regular_file(&uninstaller)?;
++        retry = Some((
++            uninstaller.clone(),
++            fs::read(&uninstaller)?,
++            files::sha256(&uninstaller)?,
++        ));
 +    }
 +    let result = (|| {
 +        inject_fault("before-uninstaller", fault, prefix)?;
-+        remove_file_if_exists(&install_root.join("uninstall.exe"))?;
++        remove_file_if_exists(&uninstaller)?;
 +        inject_fault("after-uninstaller", fault, prefix)?;
-+        remove_file_if_exists(&install_root.join(files::UNINSTALL_RUNNER_NAME))?;
-+        inject_fault("after-uninstall-runner", fault, prefix)?;
 +        fs::remove_dir(install_root)?;
 +        Ok(())
 +    })();
 +    if let Err(original) = result {
 +        if files::path_exists(install_root)? {
 +            files::assert_regular_dir(install_root)?;
-+            for (path, bytes, hash) in retry {
++            if let Some((path, bytes, hash)) = retry {
 +                if files::path_exists(&path)? {
 +                    files::assert_regular_file(&path)?;
 +                    if files::sha256(&path)? != hash {
@@ -58862,13 +58995,25 @@ index 0000000000000000000000000000000000000000..536b66356496f80340f9f4d4e6161a2b
 +        assert!(fault_marker("before-uninstaller", "herdr-test").is_ok());
 +        assert!(fault_marker("before-uninstaller", "../escape").is_err());
 +    }
++
++    #[test]
++    fn quiet_uninstall_token_is_exact_lowercase_hex() {
++        assert!(validate_quiet_token("0123456789abcdef0123456789abcdef").is_ok());
++        for invalid in [
++            "0123456789abcdef",
++            "0123456789ABCDEF0123456789ABCDEF",
++            "0123456789abcdef0123456789abcdeg",
++        ] {
++            assert!(validate_quiet_token(invalid).is_err(), "accepted {invalid}");
++        }
++    }
 +}
 diff --git a/src/platform/windows/installer_helper_registry.rs b/src/platform/windows/installer_helper_registry.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9d0ef6147
+index 0000000000000000000000000000000000000000..2310eed0ab437562121fc21060b0c3d4a7afda72
 --- /dev/null
 +++ b/src/platform/windows/installer_helper_registry.rs
-@@ -0,0 +1,610 @@
+@@ -0,0 +1,590 @@
 +use std::{collections::BTreeSet, ffi::OsStr, io, os::windows::ffi::OsStrExt as _, path::Path};
 +
 +use windows_sys::Win32::{
@@ -58886,7 +59031,7 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +
 +use super::installer_helper_files::{
 +    assert_regular_file, full_path, invalid_data, os_eq_ignore_case, parse_display_version,
-+    path_eq, UNINSTALL_RUNNER_NAME,
++    path_eq, NATIVE_HELPER_NAME,
 +};
 +
 +const PRODUCT_NAME: &str = "Herdr Win";
@@ -59280,28 +59425,15 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +}
 +
 +pub(crate) fn quiet_uninstall_string(install_root: &Path) -> io::Result<String> {
-+    let system_root =
-+        std::env::var_os("SystemRoot").ok_or_else(|| invalid_data("SystemRoot is missing"))?;
-+    let powershell = Path::new(&system_root)
-+        .join("System32")
-+        .join("WindowsPowerShell")
-+        .join("v1.0")
-+        .join("powershell.exe");
-+    let runner = install_root.join(UNINSTALL_RUNNER_NAME);
-+    let uninstaller = install_root.join("uninstall.exe");
++    let helper = install_root.join("state").join(NATIVE_HELPER_NAME);
 +    Ok(format!(
-+        "\"{}\" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -Uninstaller \"{}\" -InstallRoot \"{}\"",
-+        powershell.display(),
-+        runner.display(),
-+        uninstaller.display(),
++        "\"{}\" quiet-uninstall --install-root \"{}\"",
++        helper.display(),
 +        install_root.display()
 +    ))
 +}
 +
-+pub(crate) fn assert_arp_ownership(
-+    install_root: &Path,
-+    allow_legacy_quiet: bool,
-+) -> io::Result<()> {
++pub(crate) fn assert_arp_ownership(install_root: &Path) -> io::Result<()> {
 +    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
 +        return Ok(());
 +    };
@@ -59350,7 +59482,6 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +    let expected_uninstaller = install_root.join("uninstall.exe");
 +    let expected_launcher = install_root.join("bin").join("herdr.exe");
 +    let expected_quiet = quiet_uninstall_string(install_root)?;
-+    let legacy_quiet = format!("\"{}\" /S", expected_uninstaller.display());
 +    let (display_parts, _) = parse_display_version(&display_version)?;
 +    let versions_match = u32::from(display_parts[0]) == dword("VersionMajor")?
 +        && u32::from(display_parts[1]) == dword("VersionMinor")?;
@@ -59359,7 +59490,7 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +        || !path_eq(Path::new(&registered_root), install_root)?
 +        || icon != format!("{},0", expected_launcher.display())
 +        || uninstall != format!("\"{}\"", expected_uninstaller.display())
-+        || (quiet != expected_quiet && !(allow_legacy_quiet && quiet == legacy_quiet))
++        || quiet != expected_quiet
 +        || !versions_match
 +        || dword("NoModify")? != 1
 +        || dword("NoRepair")? != 1
@@ -59377,22 +59508,8 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +    Ok(())
 +}
 +
-+pub(crate) fn legacy_quiet_registration(install_root: &Path) -> io::Result<bool> {
-+    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
-+        return Ok(false);
-+    };
-+    let Some(RegistryValue::String {
-+        value,
-+        kind: REG_SZ,
-+    }) = key.query("QuietUninstallString")?
-+    else {
-+        return Ok(false);
-+    };
-+    Ok(value == format!("\"{}\" /S", install_root.join("uninstall.exe").display()))
-+}
-+
-+pub(crate) fn arp_path_owned(install_root: &Path, allow_legacy: bool) -> io::Result<bool> {
-+    assert_arp_ownership(install_root, allow_legacy)?;
++pub(crate) fn arp_path_owned(install_root: &Path) -> io::Result<bool> {
++    assert_arp_ownership(install_root)?;
 +    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, ARP_SUBKEY, KEY_READ)? else {
 +        return Ok(false);
 +    };
@@ -59409,10 +59526,9 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +    display_version: &str,
 +    numeric_version: &str,
 +    path_added: bool,
-+    allow_legacy: bool,
 +) -> io::Result<()> {
-+    assert_arp_ownership(install_root, allow_legacy)?;
-+    assert_regular_file(&install_root.join(UNINSTALL_RUNNER_NAME))?;
++    assert_arp_ownership(install_root)?;
++    assert_regular_file(&install_root.join("state").join(NATIVE_HELPER_NAME))?;
 +    let key = RegistryKey::create(HKEY_CURRENT_USER, ARP_SUBKEY)?;
 +    let uninstaller = install_root.join("uninstall.exe");
 +    let launcher = install_root.join("bin").join("herdr.exe");
@@ -59450,11 +59566,11 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +    key.set_dword("NoRepair", 1)?;
 +    key.set_dword("PathAdded", u32::from(path_added))?;
 +    drop(key);
-+    assert_arp_ownership(install_root, false)
++    assert_arp_ownership(install_root)
 +}
 +
 +pub(crate) fn remove_arp_registration(install_root: &Path) -> io::Result<()> {
-+    assert_arp_ownership(install_root, false)?;
++    assert_arp_ownership(install_root)?;
 +    if !arp_exists()? {
 +        return Ok(());
 +    }
@@ -59477,6 +59593,15 @@ index 0000000000000000000000000000000000000000..11d2e079f92b3fca8046dc9c59ddb9c9
 +            r"c:\users\example\herdr\bin",
 +            false,
 +        ));
++    }
++
++    #[test]
++    fn quiet_uninstall_command_invokes_only_the_native_helper() {
++        let root = Path::new(r"C:\Users\Example\AppData\Local\Programs\Herdr");
++        assert_eq!(
++            quiet_uninstall_string(root).unwrap(),
++            r#""C:\Users\Example\AppData\Local\Programs\Herdr\state\installer-helper.exe" quiet-uninstall --install-root "C:\Users\Example\AppData\Local\Programs\Herdr""#
++        );
 +    }
 +}
 diff --git a/src/platform/windows/installer_helper_skills.rs b/src/platform/windows/installer_helper_skills.rs

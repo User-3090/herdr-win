@@ -32,8 +32,7 @@ param(
         "after-installer-helper",
         "after-state-directory",
         "before-uninstaller",
-        "after-uninstaller",
-        "after-uninstall-runner"
+        "after-uninstaller"
     )]
     [string]$TestUninstallFault,
 
@@ -349,8 +348,6 @@ $UiVersion = Assert-VersionIdentity
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $packager = Join-Path $PSScriptRoot "package_windows_conpty.py"
 $installerScript = Join-Path $projectRoot "packaging\windows\installer\project.nsi"
-$helperBridge = Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"
-$uninstallRunner = Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"
 $skillSource = Join-Path $projectRoot "skills\herdr\SKILL.md"
 $skillHashManifest = Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"
 $artworkDir = Join-Path $projectRoot "packaging\windows\installer\artwork"
@@ -374,7 +371,7 @@ if (-not (Test-Path -LiteralPath $StageDir -PathType Container) -or
 if (Test-Path -LiteralPath $OutputPath) {
     throw "Refusing to overwrite an existing installer output: $OutputPath"
 }
-$requiredSources = @($packager, $installerScript, $helperBridge, $uninstallRunner, $skillSource, $skillHashManifest)
+$requiredSources = @($packager, $installerScript, $skillSource, $skillHashManifest)
 foreach ($artworkFile in $artworkFiles) {
     $requiredSources += Join-Path $artworkDir $artworkFile
 }
@@ -488,8 +485,6 @@ try {
         "/DARG_STAGE_DIR=$StageDir",
         "/DARG_LAUNCHER_EXE=$LauncherExe",
         "/DARG_HELPER_EXE=$InstallerHelperExe",
-        "/DARG_HELPER_BRIDGE_PS1=$helperBridge",
-        "/DARG_UNINSTALL_RUNNER_PS1=$uninstallRunner",
         "/DARG_SKILL_MD=$canonicalSkillSource",
         "/DARG_SKILL_HASH_MANIFEST=$canonicalSkillHashManifest",
         "/DARG_ARTWORK_DIR=$artworkDir",

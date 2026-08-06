@@ -36,8 +36,9 @@ pub(crate) const MANAGED_BIN_MARKER: &[u8] = b"herdr-managed-bin-v1\n";
 pub(crate) const PACKAGE_MANAGER_MARKER: &[u8] = b"herdr-package-manager-v1\nmanager=winget\n";
 pub(crate) const UNINSTALL_MARKER: &[u8] = b"herdr-uninstall-v1\n";
 pub(crate) const NATIVE_HELPER_NAME: &str = "installer-helper.exe";
-pub(crate) const LEGACY_HELPER_NAME: &str = "installer-helper.ps1";
-pub(crate) const UNINSTALL_RUNNER_NAME: &str = "uninstall-runner.ps1";
+pub(crate) const QUIET_UNINSTALL_PENDING: &[u8] = b"herdr-quiet-uninstall-v1\nstatus=pending\n";
+pub(crate) const QUIET_UNINSTALL_SUCCESS: &[u8] = b"herdr-quiet-uninstall-v1\nexit_code=0\n";
+pub(crate) const QUIET_UNINSTALL_FAILURE: &[u8] = b"herdr-quiet-uninstall-v1\nexit_code=1\n";
 pub(crate) const LAUNCHER_REPLACEMENT_NAME: &str = "herdr.exe.new";
 pub(crate) const LAUNCHER_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1";
 

@@ -10,8 +10,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CARGO = PROJECT_ROOT / "Cargo.toml"
 NSI = PROJECT_ROOT / "packaging/windows/installer/project.nsi"
-BRIDGE = PROJECT_ROOT / "packaging/windows/installer-helper-bridge.ps1"
-UNINSTALL_RUNNER = PROJECT_ROOT / "packaging/windows/uninstall-runner.ps1"
+REMOVED_BRIDGE = PROJECT_ROOT / "packaging/windows/installer-helper-bridge.ps1"
+REMOVED_UNINSTALL_RUNNER = PROJECT_ROOT / "packaging/windows/uninstall-runner.ps1"
 LEGACY_HELPER = PROJECT_ROOT / "packaging/windows/herdr-installer-helper.ps1"
 LEGACY_TEST = PROJECT_ROOT / "scripts/windows_installer_test.ps1"
 PACKAGER = PROJECT_ROOT / "scripts/package_windows_installer.ps1"
@@ -67,8 +67,6 @@ class WindowsInstallerStaticTests(unittest.TestCase):
     def test_native_helper_is_the_only_installer_engine(self) -> None:
         for path in (
             NSI,
-            BRIDGE,
-            UNINSTALL_RUNNER,
             PACKAGER,
             FAULT_TEST,
             HELPER_ENTRY,
@@ -83,6 +81,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             self.assertTrue(path.is_file(), path)
         self.assertFalse(LEGACY_HELPER.exists())
         self.assertFalse(LEGACY_TEST.exists())
+        self.assertFalse(REMOVED_BRIDGE.exists())
+        self.assertFalse(REMOVED_UNINSTALL_RUNNER.exists())
 
         cargo = text(CARGO)
         self.assertIn('name = "herdr-installer-helper"', cargo)
@@ -104,6 +104,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("installer_helper::run()", entry)
         self.assertIn('"install" =>', cli)
         self.assertIn('"uninstall" =>', cli)
+        self.assertIn('"quiet-uninstall" =>', cli)
         self.assertIn('"skill-removal-default" =>', cli)
         self.assertIn('"complete-maintenance" =>', cli)
 
@@ -113,10 +114,11 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "herdr-managed-bin-v1\\n",
             "herdr-package-manager-v1\\nmanager=winget\\n",
             "herdr-uninstall-v1\\n",
+            "herdr-quiet-uninstall-v1\\n",
         ):
             self.assertIn(record, files)
         self.assertIn('NATIVE_HELPER_NAME: &str = "installer-helper.exe"', files)
-        self.assertIn('LEGACY_HELPER_NAME: &str = "installer-helper.ps1"', files)
+        self.assertNotIn("LEGACY_HELPER_NAME", files)
         self.assertIn('LAUNCHER_QUERY_ARG: &str = "--herdr-private-launcher-build-id-v1"', files)
         self.assertIn("ReplaceFileW", files)
         self.assertIn("MoveFileExW", files)
@@ -135,7 +137,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "lease_status",
             "process_paths",
             "uninstall.pending",
-            "RootKind::ManagedLegacy",
+            "QuietSession",
+            "quiet_uninstall",
+            "AssignProcessToJobObject",
+            "TerminateJobObject",
             "set_pending_launcher",
             "complete_launcher_update_locked",
             "remove_inactive_runtimes",
@@ -143,6 +148,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "remove_uninstall_residual",
         ):
             self.assertIn(contract, lifecycle)
+        self.assertNotIn("ManagedLegacy", lifecycle)
+        self.assertNotIn("installer-helper.ps1", lifecycle)
         self.assertLess(
             lifecycle.index("acquire_lifecycle_lock", lifecycle.index("pub(crate) fn install")),
             lifecycle.index("registry::assert_arp_ownership", lifecycle.index("pub(crate) fn install")),
@@ -189,21 +196,17 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             self.assertIn(required, skills)
         self.assertNotIn("remove_dir_all", skills)
 
-    def test_transition_bridge_is_bounded_to_old_launcher_maintenance(self) -> None:
-        bridge = text(BRIDGE)
-        self.assertLessEqual(len(bridge.splitlines()), 32)
-        self.assertIn('[ValidateSet("CompleteMaintenance")]', bridge)
-        self.assertIn('Join-Path $PSScriptRoot "installer-helper.exe"', bridge)
-        self.assertIn("& $helper complete-maintenance", bridge)
-        self.assertIn("--parent-process-id", bridge)
-        for forbidden in (
-            "Remove-Item",
-            "New-Item",
-            "Registry",
-            "Invoke-WebRequest",
-            "Start-Process",
-        ):
-            self.assertNotIn(forbidden, bridge)
+    def test_shipped_installer_contains_no_powershell_payload(self) -> None:
+        combined = "\n".join(
+            text(path)
+            for path in (NSI, PACKAGER, HELPER_CLI, HELPER_LIFECYCLE, HELPER_REGISTRY)
+        )
+        self.assertNotIn("installer-helper-bridge.ps1", combined)
+        self.assertNotIn("uninstall-runner.ps1", combined)
+        self.assertNotIn("WindowsPowerShell", combined)
+        self.assertNotIn("ExecutionPolicy", combined)
+        self.assertNotIn("ARG_HELPER_BRIDGE_PS1", combined)
+        self.assertNotIn("ARG_UNINSTALL_RUNNER_PS1", combined)
 
     def test_managed_skill_hash_manifest_is_exact(self) -> None:
         lines = text(MANAGED_SKILL_HASHES).splitlines()
@@ -222,8 +225,6 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "ARG_STAGE_DIR",
             "ARG_LAUNCHER_EXE",
             "ARG_HELPER_EXE",
-            "ARG_HELPER_BRIDGE_PS1",
-            "ARG_UNINSTALL_RUNNER_PS1",
             "ARG_SKILL_MD",
             "ARG_SKILL_HASH_MANIFEST",
             "ARG_ARTWORK_DIR",
@@ -247,12 +248,7 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertEqual(
             nsi.count('File /oname=installer-helper.exe "${ARG_HELPER_EXE}"'), 2
         )
-        self.assertEqual(
-            nsi.count(
-                'File /oname=installer-helper-bridge.ps1 "${ARG_HELPER_BRIDGE_PS1}"'
-            ),
-            1,
-        )
+        self.assertNotIn(".ps1", nsi)
         self.assertIn(
             '"$PLUGINSDIR\\installer-helper.exe" install --install-root', nsi
         )
@@ -262,6 +258,10 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn(
             '"$INSTDIR\\state\\installer-helper.exe" skill-removal-default', nsi
         )
+        self.assertIn("/NATIVE_QUIET_RUNNER_PID=", nsi)
+        self.assertIn("/NATIVE_QUIET_TOKEN=", nsi)
+        self.assertIn("--quiet-runner-process-id", nsi)
+        self.assertIn("--quiet-token", nsi)
         self.assertIn("/TIMEOUT=180000", nsi)
         self.assertIn("/TIMEOUT=30000", nsi)
         self.assertIn('StrCmp $HelperExitCode "error"', nsi)
@@ -307,10 +307,8 @@ class WindowsInstallerStaticTests(unittest.TestCase):
         self.assertIn("$InstallerHelperExe = (Resolve-Path", packager)
         self.assertEqual(packager.count("Assert-X64Pe -Path"), 3)
         self.assertIn("separately built native installer helper", packager)
-        self.assertIn("installer-helper-bridge.ps1", packager)
         self.assertIn('"/DARG_HELPER_EXE=$InstallerHelperExe"', packager)
-        self.assertIn('"/DARG_HELPER_BRIDGE_PS1=$helperBridge"', packager)
-        self.assertNotIn("herdr-installer-helper.ps1", packager)
+        self.assertNotIn(".ps1", packager.replace("package_windows_installer.ps1", ""))
         self.assertIn('$NsisVersion = "3.12"', packager)
         self.assertIn(
             "56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f",
@@ -332,7 +330,6 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "after-state-directory",
             "before-uninstaller",
             "after-uninstaller",
-            "after-uninstall-runner",
         ):
             self.assertIn(f'"{stage}"', fault)
         for contract in (
@@ -349,20 +346,23 @@ class WindowsInstallerStaticTests(unittest.TestCase):
             "Start-TestLeaseHolder",
             '"state\\pending"',
             '"runtime\\$BuildId"',
+            '"quiet-uninstall"',
+            '"state\\installer-helper.exe"',
         ):
             self.assertIn(contract, fault)
         self.assertIn("WaitForExit", fault)
         self.assertNotIn("Wait-Process", fault)
 
-    def test_quiet_uninstall_runner_is_the_only_persistent_powershell_wrapper(self) -> None:
-        runner = text(UNINSTALL_RUNNER)
-        self.assertIn('Arguments = "/S _?=$InstallRoot"', runner)
-        self.assertIn("[IO.FileAttributes]::ReparsePoint", runner)
-        self.assertIn("[Environment+SpecialFolder]::UserProfile", runner)
-        self.assertIn('Join-Path $userProfileRoot "AppData\\Local\\Temp"', runner)
-        self.assertNotIn("[IO.Path]::GetTempPath()", runner)
-        self.assertIn("WaitForExit(180000)", runner)
-        self.assertIn("exit $exitCode", runner)
+    def test_native_helper_owns_terminal_quiet_uninstall(self) -> None:
+        lifecycle = text(HELPER_LIFECYCLE)
+        registry = text(HELPER_REGISTRY)
+        self.assertIn('arg("/S")', lifecycle)
+        self.assertIn("QUIET_UNINSTALL_TIMEOUT", lifecycle)
+        self.assertIn("ProcessJob::new", lifecycle)
+        self.assertIn("wait_for_runner_and_remove_helper", lifecycle)
+        self.assertIn("restore_quiet_uninstall_retry", lifecycle)
+        self.assertIn("quiet-uninstall --install-root", registry)
+        self.assertNotIn("powershell", registry.lower())
 
     def test_installer_artwork_is_an_exact_native_bmp3_set(self) -> None:
         expected_files = {"README.md", ARTWORK_SOURCE.name, *ARTWORK_DERIVATIVES}

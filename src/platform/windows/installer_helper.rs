@@ -15,8 +15,8 @@ mod installer_helper_skills;
 
 use installer_helper_files::invalid_data;
 use installer_helper_lifecycle::{
-    InstallManager, InstallOptions, MaintenanceOptions, SettingsDisposition, SkillDefaultOptions,
-    UninstallOptions,
+    InstallManager, InstallOptions, MaintenanceOptions, QuietRunnerOptions, QuietUninstallOptions,
+    SettingsDisposition, SkillDefaultOptions, UninstallOptions,
 };
 use installer_helper_skills::SkillDisposition;
 
@@ -27,7 +27,7 @@ pub(crate) fn run() -> io::Result<String> {
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| {
             invalid_data(
-                "missing installer helper action; expected install, uninstall, skill-removal-default, or complete-maintenance",
+                "missing installer helper action; expected install, uninstall, quiet-uninstall, skill-removal-default, or complete-maintenance",
             )
         })?;
     let values = parse_named_arguments(args.collect())?;
@@ -69,6 +69,10 @@ pub(crate) fn run() -> io::Result<String> {
             fault: optional_utf8(&values, "--uninstall-fault")?,
             fault_marker_prefix: optional_utf8(&values, "--fault-marker-prefix")?
                 .unwrap_or_else(|| "herdr".to_string()),
+            quiet_runner: parse_quiet_runner(&values)?,
+        }),
+        "quiet-uninstall" => installer_helper_lifecycle::quiet_uninstall(QuietUninstallOptions {
+            install_root: required_path(&values, "--install-root")?,
         }),
         "skill-removal-default" => {
             installer_helper_lifecycle::skill_removal_default(SkillDefaultOptions {
@@ -92,6 +96,25 @@ pub(crate) fn run() -> io::Result<String> {
         _ => Err(invalid_data(format!(
             "unknown installer helper action {action:?}"
         ))),
+    }
+}
+
+fn parse_quiet_runner(
+    values: &BTreeMap<String, OsString>,
+) -> io::Result<Option<QuietRunnerOptions>> {
+    let process_id = optional_utf8(values, "--quiet-runner-process-id")?;
+    let token = optional_utf8(values, "--quiet-token")?;
+    match (process_id, token) {
+        (None, None) => Ok(None),
+        (Some(process_id), Some(token)) => Ok(Some(QuietRunnerOptions {
+            process_id: process_id.parse::<u32>().map_err(|_| {
+                invalid_data(format!("invalid quiet-uninstall process ID {process_id:?}"))
+            })?,
+            token,
+        })),
+        _ => Err(invalid_data(
+            "quiet-uninstall process ID and token must be provided together",
+        )),
     }
 }
 
@@ -171,5 +194,19 @@ mod tests {
             OsString::from("b"),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn quiet_runner_requires_a_complete_pair() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "--quiet-runner-process-id".to_string(),
+            OsString::from("42"),
+        );
+        assert!(parse_quiet_runner(&values).is_err());
+        values.insert("--quiet-token".to_string(), OsString::from("a".repeat(32)));
+        let parsed = parse_quiet_runner(&values).unwrap().unwrap();
+        assert_eq!(parsed.process_id, 42);
+        assert_eq!(parsed.token, "a".repeat(32));
     }
 }

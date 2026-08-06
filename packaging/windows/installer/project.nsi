@@ -8,12 +8,6 @@
 !ifndef ARG_HELPER_EXE
   !error "ARG_HELPER_EXE is required"
 !endif
-!ifndef ARG_HELPER_BRIDGE_PS1
-  !error "ARG_HELPER_BRIDGE_PS1 is required"
-!endif
-!ifndef ARG_UNINSTALL_RUNNER_PS1
-  !error "ARG_UNINSTALL_RUNNER_PS1 is required"
-!endif
 !ifndef ARG_SKILL_MD
   !error "ARG_SKILL_MD is required"
 !endif
@@ -114,6 +108,9 @@ Var SettingsCheckbox
 Var SkillDisposition
 Var SkillCheckbox
 Var UpstreamLink
+Var QuietRunnerPid
+Var QuietToken
+Var QuietHelperArgs
 
 !define INSTALLER_WELCOME_BITMAP_100 "${ARG_ARTWORK_DIR}\installer-welcome-finish-164x314.bmp"
 !define INSTALLER_WELCOME_BITMAP_125 "${ARG_ARTWORK_DIR}\installer-welcome-finish-205x393.bmp"
@@ -317,6 +314,9 @@ Function un.onInit
 uninstaller_profile_ready:
   StrCpy $SettingsDisposition "Keep"
   StrCpy $SkillDisposition "Auto"
+  StrCpy $QuietRunnerPid ""
+  StrCpy $QuietToken ""
+  StrCpy $QuietHelperArgs ""
   ${GetParameters} $0
   StrCpy $2 "$0 "
   ClearErrors
@@ -329,6 +329,21 @@ uninstaller_profile_ready:
   ${IfNot} ${Errors}
     StrCpy $SkillDisposition "Remove"
   ${EndIf}
+  ClearErrors
+  ${GetOptions} "$2" "/NATIVE_QUIET_RUNNER_PID=" $QuietRunnerPid
+  ClearErrors
+  ${GetOptions} "$2" "/NATIVE_QUIET_TOKEN=" $QuietToken
+  StrCmp $QuietRunnerPid "" un_quiet_pid_missing un_quiet_pid_present
+un_quiet_pid_missing:
+  StrCmp $QuietToken "" un_quiet_ready un_quiet_invalid
+un_quiet_pid_present:
+  StrCmp $QuietToken "" un_quiet_invalid 0
+  StrCpy $QuietHelperArgs '--quiet-runner-process-id "$QuietRunnerPid" --quiet-token "$QuietToken"'
+  Goto un_quiet_ready
+un_quiet_invalid:
+  Push "Native quiet uninstall received an incomplete rendezvous."
+  Call un.FailUninstall
+un_quiet_ready:
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   ClearErrors
@@ -406,8 +421,6 @@ Section "${INFO_DISTRIBUTIONNAME}" SEC_APP
   SetOutPath "$PLUGINSDIR"
   File /oname=app-launcher.exe "${ARG_LAUNCHER_EXE}"
   File /oname=installer-helper.exe "${ARG_HELPER_EXE}"
-  File /oname=installer-helper-bridge.ps1 "${ARG_HELPER_BRIDGE_PS1}"
-  File /oname=uninstall-runner.ps1 "${ARG_UNINSTALL_RUNNER_PS1}"
   SetOutPath "$PLUGINSDIR\skill"
   File /oname=SKILL.md "${ARG_SKILL_MD}"
   File /oname=managed-skill-hashes.txt "${ARG_SKILL_HASH_MANIFEST}"
@@ -445,7 +458,7 @@ Section "Uninstall"
   SetAutoClose true
   ; The uninstaller carries its own native helper so every retry uses one
   ; validation and lifecycle-lock owner after installed state is removed.
-  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" uninstall --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --settings-disposition "$SettingsDisposition" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt" --skill-disposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS}'
+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\installer-helper.exe" uninstall --install-root "$INSTDIR" --user-profile-root "${APP_USER_PROFILE_ROOT}" --settings-disposition "$SettingsDisposition" --skill-hash-manifest "$PLUGINSDIR\managed-skill-hashes.txt" --skill-disposition "$SkillDisposition" ${APP_UNINSTALL_FAULT_ARGS} $QuietHelperArgs'
   Pop $HelperExitCode
   Pop $HelperOutput
   StrCmp $HelperExitCode "error" un_helper_start_failed

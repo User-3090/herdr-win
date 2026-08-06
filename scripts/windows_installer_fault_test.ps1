@@ -16,8 +16,7 @@ param(
         "after-installer-helper",
         "after-state-directory",
         "before-uninstaller",
-        "after-uninstaller",
-        "after-uninstall-runner"
+        "after-uninstaller"
     )
 )
 
@@ -164,8 +163,7 @@ $allowedFaults = @(
     "after-installer-helper",
     "after-state-directory",
     "before-uninstaller",
-    "after-uninstaller",
-    "after-uninstall-runner"
+    "after-uninstaller"
 )
 if ($ProductName -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?$') {
     throw "Invalid product name '$ProductName'."
@@ -258,16 +256,6 @@ function New-TestHelperPackage {
     New-Item -ItemType Directory -Path (Join-Path $Root "skill") | Out-Null
     [IO.File]::Copy($AppLauncher, (Join-Path $Root "app-launcher.exe"), $false)
     [IO.File]::Copy($InstallerHelperExe, (Join-Path $Root "installer-helper.exe"), $false)
-    [IO.File]::Copy(
-        (Join-Path $projectRoot "packaging\windows\installer-helper-bridge.ps1"),
-        (Join-Path $Root "installer-helper-bridge.ps1"),
-        $false
-    )
-    [IO.File]::Copy(
-        (Join-Path $projectRoot "packaging\windows\uninstall-runner.ps1"),
-        (Join-Path $Root "uninstall-runner.ps1"),
-        $false
-    )
     [IO.File]::Copy($skillSource, (Join-Path $Root "skill\SKILL.md"), $false)
     [IO.File]::Copy(
         (Join-Path $projectRoot "packaging\windows\managed-skill-hashes.txt"),
@@ -298,26 +286,18 @@ try { Start-Sleep -Seconds 4 } finally { `$lease.Dispose() }
 }
 
 function Invoke-TestQuietUninstall {
-    $uninstaller = Join-Path $installRoot "uninstall.exe"
-    $runner = Join-Path $installRoot "uninstall-runner.ps1"
-    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
-        throw "Quiet-uninstall runner is missing: $runner"
+    $helper = Join-Path $installRoot "state\installer-helper.exe"
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+        throw "Native quiet-uninstall helper is missing: $helper"
     }
-    $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $expected = ('"{0}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -Uninstaller "{2}" -InstallRoot "{3}"' -f $powerShell, $runner, $uninstaller, $installRoot)
+    $expected = ('"{0}" quiet-uninstall --install-root "{1}"' -f $helper, $installRoot)
     $actual = [string](Get-ItemProperty -LiteralPath $arpKey).QuietUninstallString
     if ($actual -cne $expected) {
         throw "ARP quiet uninstall command is not exact. Expected '$expected', got '$actual'."
     }
-    return Start-TestProcess -FilePath $powerShell -Arguments @(
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle", "Hidden",
-        "-ExecutionPolicy", "Bypass",
-        "-File", ('"' + $runner + '"'),
-        "-Uninstaller", ('"' + $uninstaller + '"'),
-        "-InstallRoot", ('"' + $installRoot + '"')
+    return Start-TestProcess -FilePath $helper -Arguments @(
+        "quiet-uninstall",
+        "--install-root", ('"' + $installRoot + '"')
     )
 }
 
@@ -480,8 +460,8 @@ try {
         if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
             throw "Injected uninstall $fault removed its retry executable."
         }
-        if (-not (Test-Path -LiteralPath (Join-Path $installRoot "uninstall-runner.ps1") -PathType Leaf)) {
-            throw "Injected uninstall $fault removed its quiet retry runner."
+        if (-not (Test-Path -LiteralPath (Join-Path $installRoot "state\installer-helper.exe") -PathType Leaf)) {
+            throw "Injected uninstall $fault removed its native quiet retry helper."
         }
 
         $retryQuietExit = Invoke-TestQuietUninstall
